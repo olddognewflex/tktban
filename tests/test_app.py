@@ -29,6 +29,25 @@ def test_board_mounts_columns_in_role_order():
     ]
 
 
+def test_viewer_opens_with_full_ticket():
+    from tktban.screens import ViewerModal
+
+    async def go():
+        app = BanApp(Tkt(config=FIX))
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # TKT-6 has an unresolved blocker — exercises that branch too.
+            worker = app._open_viewer("TKT-6")
+            await worker.wait()
+            await pilot.pause()
+            top = app.screen
+            return type(top).__name__, getattr(top, "ticket", {}).get("key")
+
+    name, key = _run(go())
+    assert name == "ViewerModal" and key == "TKT-6"
+
+
 def test_write_dispatch_mutates_board_through_verbs(tmp_path):
     # Copy the fixture to a temp .sdlc so the committed fixture stays pristine.
     dst = tmp_path / ".sdlc"
