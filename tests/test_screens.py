@@ -1,5 +1,51 @@
-"""Tests for the pure markdown builder behind the read-only ticket viewer."""
-from tktban.screens import ticket_markdown
+"""Tests for the pure helpers behind the viewer and editor modals."""
+from tktban.screens import compute_edit, ticket_markdown
+
+
+def _orig(**over):
+    base = {
+        "summary": "old summary",
+        "description": "old description",
+        "priority": "Low",
+        "assignee": "raymond",
+        "labels": ["a", "b"],
+    }
+    base.update(over)
+    return base
+
+
+def test_compute_edit_no_changes_returns_empty():
+    o = _orig()
+    assert compute_edit(o, dict(o)) == {}
+
+
+def test_compute_edit_single_field():
+    o = _orig()
+    new = dict(o, summary="new summary")
+    assert compute_edit(o, new) == {"summary": "new summary"}
+
+
+def test_compute_edit_description_maps_to_body():
+    o = _orig()
+    assert compute_edit(o, dict(o, description="new")) == {"body": "new"}
+
+
+def test_compute_edit_priority_and_assignee():
+    o = _orig()
+    new = dict(o, priority="High", assignee="alex")
+    assert compute_edit(o, new) == {"priority": "High", "assignee": "alex"}
+
+
+def test_compute_edit_clearing_a_field_is_a_change():
+    o = _orig()
+    assert compute_edit(o, dict(o, assignee="")) == {"assignee": ""}
+
+
+def test_compute_edit_label_diff():
+    o = _orig(labels=["a", "b"])
+    new = dict(o, labels=["b", "c"])  # drop a, add c
+    out = compute_edit(o, new)
+    assert out == {"add_labels": ["c"], "remove_labels": ["a"]}
 
 
 def _ticket(**over):

@@ -65,3 +65,40 @@ def test_write_dispatch_mutates_board_through_verbs(tmp_path):
     history = (dst / "state" / "TKT-5.history.jsonl").read_text()
     assert "In Review" in history                 # history sidecar recorded the move
     assert (dst / "board" / "TKT-8.md").is_file()   # create made the next key
+
+
+def test_editor_opens_prefilled():
+    from textual.widgets import Input
+
+    async def go():
+        app = BanApp(Tkt(config=FIX))
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            worker = app._open_editor("TKT-3")
+            await worker.wait()
+            await pilot.pause()
+            top = app.screen
+            return type(top).__name__, top.query_one("#summary", Input).value
+
+    name, summary = _run(go())
+    assert name == "EditModal"
+    assert summary == "Document the verb contract"  # TKT-3 fixture summary, pre-filled
+
+
+def test_edit_dispatch_mutates_fields_through_verb(tmp_path):
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    app = BanApp(Tkt(config=str(dst / "config.toml")))
+
+    app._apply_write("edit", ("TKT-3", {
+        "summary": "Reworded summary",
+        "priority": "Highest",
+        "add_labels": ["docs"],
+    }))
+
+    md = (dst / "board" / "TKT-3.md").read_text()
+    assert "# Reworded summary" in md       # summary heading rewritten
+    assert "priority: Highest" in md        # frontmatter updated
+    assert "docs" in md                     # label added
+    assert "status: In Review" in md        # status untouched by edit (TKT-3 fixture lane)

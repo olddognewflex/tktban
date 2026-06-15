@@ -12,7 +12,7 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView, Markdown
+from textual.widgets import Button, Input, Label, ListItem, ListView, Markdown, TextArea
 
 from .model import Card
 
@@ -154,4 +154,80 @@ class ViewerModal(ModalScreen[None]):
             yield Markdown(ticket_markdown(self.ticket))
 
     def action_close(self) -> None:
+        self.dismiss(None)
+
+
+def compute_edit(orig: dict, new: dict) -> dict:
+    """Diff a ticket's original fields against the edited values and return only
+    the kwargs that changed, ready to splat into Tkt.edit(). Pure + testable.
+
+    `orig`/`new` keys: summary, description, priority, assignee, labels (list).
+    Labels become add_labels/remove_labels. An unchanged field is omitted, so
+    e.g. editing only priority never rewrites the description (and never sends a
+    stale value)."""
+    out: dict = {}
+    if new["summary"] != orig["summary"]:
+        out["summary"] = new["summary"]
+    if new["description"] != orig["description"]:
+        out["body"] = new["description"]
+    if new["priority"] != orig["priority"]:
+        out["priority"] = new["priority"]
+    if new["assignee"] != orig["assignee"]:
+        out["assignee"] = new["assignee"]
+    old_labels, new_labels = orig["labels"], new["labels"]
+    add = [l for l in new_labels if l not in old_labels]
+    remove = [l for l in old_labels if l not in new_labels]
+    if add:
+        out["add_labels"] = add
+    if remove:
+        out["remove_labels"] = remove
+    return out
+
+
+class EditModal(ModalScreen[dict | None]):
+    """Edit a ticket's content/fields. Pre-filled from the ticket; returns only
+    the changed kwargs for Tkt.edit() (None = cancelled, {} = no changes).
+
+    Status is not editable here — lane moves go through Move (`tkt transition`)."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, ticket: dict) -> None:
+        self.ticket = ticket
+        self._orig = {
+            "summary": ticket.get("summary", ""),
+            "description": ticket.get("description", ""),
+            "priority": ticket.get("priority", ""),
+            "assignee": ticket.get("assignee", ""),
+            "labels": list(ticket.get("labels") or []),
+        }
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        o = self._orig
+        with Vertical(id="dialog"):
+            yield Label(f"Edit {self.ticket.get('key', '')}")
+            yield Input(value=o["summary"], placeholder="summary", id="summary")
+            yield TextArea(o["description"], id="description")
+            yield Input(value=o["priority"], placeholder="priority", id="priority")
+            yield Input(value=o["assignee"], placeholder="assignee", id="assignee")
+            yield Input(value=", ".join(o["labels"]), placeholder="labels (comma-separated)", id="labels")
+            with Horizontal(id="buttons"):
+                yield Button("Save", variant="success", id="save")
+                yield Button("Cancel", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        new = {
+            "summary": self.query_one("#summary", Input).value,
+            "description": self.query_one("#description", TextArea).text,
+            "priority": self.query_one("#priority", Input).value,
+            "assignee": self.query_one("#assignee", Input).value,
+            "labels": [x.strip() for x in self.query_one("#labels", Input).value.split(",") if x.strip()],
+        }
+        self.dismiss(compute_edit(self._orig, new))
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

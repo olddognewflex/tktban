@@ -116,6 +116,33 @@ class Tkt:
             args += ["--body", body]
         return self._run(args + ["--json"], as_json=True)
 
+    def edit(
+        self,
+        key: str,
+        summary: str | None = None,
+        body: str | None = None,
+        priority: str | None = None,
+        assignee: str | None = None,
+        add_labels: list[str] | None = None,
+        remove_labels: list[str] | None = None,
+    ) -> dict:
+        """Edit content/fields via `tkt edit`. Only non-None args are sent; an
+        empty string is a real value (e.g. clear the assignee)."""
+        args = ["edit", key]
+        if summary is not None:
+            args += ["--summary", summary]
+        if body is not None:
+            args += ["--body", body]
+        if priority is not None:
+            args += ["--priority", priority]
+        if assignee is not None:
+            args += ["--assignee", assignee]
+        for lbl in add_labels or []:
+            args += ["--add-label", lbl]
+        for lbl in remove_labels or []:
+            args += ["--remove-label", lbl]
+        return self._run(args + ["--json"], as_json=True)
+
     # ---- diagnostics -------------------------------------------------------
 
     def doctor(self) -> list[tuple[str, bool, str]]:
