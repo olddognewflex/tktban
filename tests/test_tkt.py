@@ -81,6 +81,32 @@ def test_edit_empty_string_is_sent_but_none_is_omitted(run):
 
 
 @mock.patch("tktban.tkt.subprocess.run")
+def test_lane_time_is_read_only_and_parses(run):
+    run.return_value = _proc(stdout='{"key": "TKT-1", "human": "6h 10m", "worklog_id": ""}')
+    out = Tkt().lane_time("TKT-1", "todo")
+    assert out["human"] == "6h 10m"
+    argv = run.call_args[0][0]
+    assert argv == ["tkt", "lane-time", "TKT-1", "--role", "todo",
+                    "--read-only", "--json"]
+    assert out["worklog_id"] == ""   # read-only: never records a worklog
+
+
+@mock.patch("tktban.tkt.subprocess.run")
+def test_lane_time_returns_none_on_no_history(run):
+    # Benign: ticket has no entry in that lane -> wrapper degrades to None.
+    run.return_value = _proc(returncode=3, stderr="no entry into 'To Do' in history")
+    assert Tkt().lane_time("TKT-1", "todo") is None
+
+
+@mock.patch("tktban.tkt.subprocess.run")
+def test_lane_time_reraises_genuine_error(run):
+    # A real provider/config failure must NOT be masked as "no badge".
+    run.return_value = _proc(returncode=2, stderr="config error: bad board_dir")
+    with pytest.raises(TktError):
+        Tkt().lane_time("TKT-1", "todo")
+
+
+@mock.patch("tktban.tkt.subprocess.run")
 def test_transition_and_comment_argv(run):
     run.return_value = _proc(stdout="ok")
     t = Tkt()

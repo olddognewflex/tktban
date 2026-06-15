@@ -158,6 +158,50 @@ def test_filter_modal_clear_and_cancel_contracts():
     assert out["cancel"] is None
 
 
+def test_lane_time_badge_populated_and_graceful():
+    from tktban.app import CardItem
+
+    async def go():
+        app = BanApp(Tkt(config=FIX))
+        # Deterministic: stub the read-only lane-time call (TKT-1 has time,
+        # everything else has no history -> None -> no badge).
+        app.tkt.lane_time = lambda key, role: {"human": "2h 5m"} if key == "TKT-1" else None
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            return {ci.card.key: ci.card.lane_human for ci in app.query(CardItem)}
+
+    cards = _run(go())
+    assert cards["TKT-1"] == "2h 5m"   # populated from tkt
+    assert cards["TKT-3"] == ""        # None -> graceful, no badge
+
+
+def test_lane_time_read_only_does_not_record_worklog(tmp_path):
+    import re
+
+    from tktban.app import CardItem
+
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    # Give TKT-7 (To Do) a history entry so read-only lane-time can compute.
+    state = dst / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "TKT-7.history.jsonl").write_text(
+        '{"ts": "2026-06-15T00:00:00Z", "from": "", "to": "To Do"}\n'
+    )
+    app = BanApp(Tkt(config=str(dst / "config.toml")))
+
+    async def go():
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            return {ci.card.key: ci.card.lane_human for ci in app.query(CardItem)}
+
+    cards = _run(go())
+    assert re.fullmatch(r"\d+h \d+m", cards["TKT-7"])     # a real duration rendered
+    assert not (state / "worklog.jsonl").exists()         # read-only: recorded nothing
+
+
 def test_edit_dispatch_mutates_fields_through_verb(tmp_path):
     dst = tmp_path / ".sdlc"
     shutil.copytree(FIXDIR, dst)
