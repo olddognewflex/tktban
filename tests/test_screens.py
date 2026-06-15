@@ -1,5 +1,24 @@
 """Tests for the pure helpers behind the viewer and editor modals."""
-from tktban.screens import compute_edit, ticket_markdown
+from tktban.screens import build_ticket_body, compute_edit, ticket_markdown
+
+
+def test_build_ticket_body_description_only():
+    assert build_ticket_body("Hello world.", "") == "Hello world."
+
+
+def test_build_ticket_body_with_acceptance_section():
+    assert build_ticket_body("Desc.", "one\ntwo") == (
+        "Desc.\n\n## Acceptance\n- one\n- two"
+    )
+
+
+def test_build_ticket_body_acceptance_only():
+    # Blank lines dropped, each line trimmed; no leading description.
+    assert build_ticket_body("", " a \n\n b ") == "## Acceptance\n- a\n- b"
+
+
+def test_build_ticket_body_empty_is_empty():
+    assert build_ticket_body("   ", "  \n  ") == ""
 
 
 def _orig(**over):

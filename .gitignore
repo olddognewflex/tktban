@@ -12,3 +12,5 @@ tests/fixtures/.sdlc/state/
 # repo-root .sdlc is generated per-machine by odnf/.sdlc/_gen_configs.py (absolute
 # paths) — leading slash so it does NOT match the committed tests/fixtures/.sdlc
 /.sdlc/
+# local agent scratch (subagent memory etc.) — never part of the repo
+.claude/agent-memory/
