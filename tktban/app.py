@@ -12,8 +12,15 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, ListItem, ListView
 
-from .model import Card, Column, build_board
-from .screens import CommentModal, CreateModal, EditModal, MoveModal, ViewerModal
+from .model import Card, Column, build_board, filter_tickets
+from .screens import (
+    CommentModal,
+    CreateModal,
+    EditModal,
+    FilterModal,
+    MoveModal,
+    ViewerModal,
+)
 from .tkt import Tkt, TktError
 
 
@@ -52,6 +59,7 @@ class BanApp(App):
 
     BINDINGS = [
         ("r", "refresh", "Refresh"),
+        ("f", "filter", "Filter"),
         ("v", "view", "View"),
         ("e", "edit", "Edit"),
         ("m", "move", "Move"),
@@ -63,6 +71,7 @@ class BanApp(App):
     def __init__(self, tkt: Tkt) -> None:
         self.tkt = tkt
         self._roles: dict[str, str] = {}
+        self._filter: dict[str, str] = {"assignee": "", "prefix": ""}
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -83,6 +92,7 @@ class BanApp(App):
         except TktError as e:
             self.call_from_thread(self.notify, str(e), severity="error", timeout=10)
             return
+        tickets = filter_tickets(tickets, **self._filter)
         columns = build_board(roles, tickets)
         self.call_from_thread(self._render, roles, columns)
 
@@ -92,7 +102,18 @@ class BanApp(App):
         board.remove_children()
         for col in columns:
             board.mount(ColumnWidget(col))
-        self.sub_title = f"{sum(len(c.cards) for c in columns)} tickets"
+        count = sum(len(c.cards) for c in columns)
+        self.sub_title = f"{count} tickets{self._filter_label()}"
+
+    def _filter_label(self) -> str:
+        """Human suffix describing the active filter, e.g.
+        '  ·  filter: @raymond, TKB'. Empty when no filter is set."""
+        parts = []
+        if self._filter["assignee"]:
+            parts.append(f"@{self._filter['assignee']}")
+        if self._filter["prefix"]:
+            parts.append(self._filter["prefix"])
+        return ("  ·  filter: " + ", ".join(parts)) if parts else ""
 
     # ---- selection helpers -------------------------------------------------
 
@@ -112,6 +133,14 @@ class BanApp(App):
 
     def action_refresh(self) -> None:
         self.refresh_board()
+
+    def action_filter(self) -> None:
+        def done(result: dict | None) -> None:
+            if result is not None:  # None = cancelled; {} pair = clear
+                self._filter = result
+                self.refresh_board()
+
+        self.push_screen(FilterModal(dict(self._filter)), done)
 
     def action_view(self) -> None:
         card = self._current_card()

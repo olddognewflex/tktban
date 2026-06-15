@@ -86,6 +86,78 @@ def test_editor_opens_prefilled():
     assert summary == "Document the verb contract"  # TKT-3 fixture summary, pre-filled
 
 
+def test_filter_narrows_board_to_matching_cards():
+    async def go():
+        app = BanApp(Tkt(config=FIX))
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # alex owns exactly TKT-3 (In Review) and TKT-6 (Blocked).
+            app._filter = {"assignee": "alex", "prefix": ""}
+            app.refresh_board()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            cards = [c.key for col in app.query(ColumnWidget) for c in col.column.cards]
+            return sorted(cards), app.sub_title
+
+    cards, sub_title = _run(go())
+    assert cards == ["TKT-3", "TKT-6"]
+    assert "filter: @alex" in sub_title
+
+
+def test_filter_modal_apply_drives_board_end_to_end():
+    from textual.widgets import Input
+
+    from tktban.screens import FilterModal
+
+    async def go():
+        app = BanApp(Tkt(config=FIX))
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_filter()
+            await pilot.pause()
+            assert isinstance(app.screen, FilterModal)
+            app.screen.query_one("#assignee", Input).value = "alex"
+            await pilot.click("#apply")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            cards = [c.key for col in app.query(ColumnWidget) for c in col.column.cards]
+            return sorted(cards), app._filter, isinstance(app.screen, FilterModal)
+
+    cards, flt, still_open = _run(go())
+    assert cards == ["TKT-3", "TKT-6"]                 # filter applied
+    assert flt == {"assignee": "alex", "prefix": ""}   # state stored
+    assert not still_open                              # modal dismissed
+
+
+def test_filter_modal_clear_and_cancel_contracts():
+    from tktban.screens import FilterModal
+
+    async def go():
+        app = BanApp(Tkt(config=FIX))
+        out = {}
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Clear returns an empty pair (distinct from cancel's None).
+            app.push_screen(FilterModal({"assignee": "x", "prefix": "y"}),
+                            lambda r: out.__setitem__("clear", r))
+            await pilot.pause()
+            await pilot.click("#clear")
+            await pilot.pause()
+            # Cancel returns None.
+            app.push_screen(FilterModal({}), lambda r: out.__setitem__("cancel", r))
+            await pilot.pause()
+            await pilot.click("#cancel")
+            await pilot.pause()
+        return out
+
+    out = _run(go())
+    assert out["clear"] == {"assignee": "", "prefix": ""}
+    assert out["cancel"] is None
+
+
 def test_edit_dispatch_mutates_fields_through_verb(tmp_path):
     dst = tmp_path / ".sdlc"
     shutil.copytree(FIXDIR, dst)
