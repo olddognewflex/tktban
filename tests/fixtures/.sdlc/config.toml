@@ -1,0 +1,29 @@
+# Fixture config for tktban manual/e2e testing. Markdown provider, self-contained.
+[ticketing]
+provider = "markdown"
+project  = "TKT"
+
+[markdown]
+board_dir = ".sdlc/board"
+state_dir = ".sdlc/state"
+me        = "raymond"
+
+[board.roles]
+backlog     = "Backlog"
+todo        = "To Do"
+in_progress = "In Progress"
+review      = "In Review"
+done        = "Done"
+blocked     = "Blocked"
+
+[issue_types]
+full_sdlc   = ["Story", "Bug"]
+deliverable = ["Task", "Chore", "Spike"]
+
+[queries]
+all     = 'ORDER BY key ASC'
+tier1   = 'status = "To Do" AND assignee = currentUser()'
+blocked = 'status = "Blocked"'
+
+[timetracking]
+provider = "local"
