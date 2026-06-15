@@ -13,7 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, ListItem, ListView
 
 from .model import Card, Column, build_board
-from .screens import CommentModal, CreateModal, MoveModal
+from .screens import CommentModal, CreateModal, MoveModal, ViewerModal
 from .tkt import Tkt, TktError
 
 
@@ -52,6 +52,7 @@ class BanApp(App):
 
     BINDINGS = [
         ("r", "refresh", "Refresh"),
+        ("v", "view", "View"),
         ("m", "move", "Move"),
         ("c", "comment", "Comment"),
         ("n", "new", "New"),
@@ -110,6 +111,23 @@ class BanApp(App):
 
     def action_refresh(self) -> None:
         self.refresh_board()
+
+    def action_view(self) -> None:
+        card = self._current_card()
+        if card is None:
+            self.notify("Select a card first", severity="warning")
+            return
+        self._open_viewer(card.key)
+
+    @work(thread=True)
+    def _open_viewer(self, key: str) -> None:
+        """Fetch the full ticket off-thread, then show it read-only."""
+        try:
+            ticket = self.tkt.view(key)
+        except TktError as e:
+            self.call_from_thread(self.notify, str(e), severity="error", timeout=10)
+            return
+        self.call_from_thread(self.push_screen, ViewerModal(ticket))
 
     def action_move(self) -> None:
         card = self._current_card()

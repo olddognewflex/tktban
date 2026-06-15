@@ -1,13 +1,18 @@
-"""Modal dialogs for the three write actions. Each dialog only *collects input*
-and returns it via dismiss(); the actual tkt verb call happens in the app (so all
-mutations stay funnelled through tkt.py). A dialog that returns None = cancelled.
+"""Modal dialogs.
+
+The three write dialogs (Move/Comment/Create) only *collect input* and return it
+via dismiss(); the actual tkt verb call happens in the app, so every mutation stays
+funnelled through tkt.py. A write dialog that returns None = cancelled.
+
+ViewerModal is the read-only exception: it just renders a ticket (already fetched
+via `tkt view --json`) as markdown and dismisses with None.
 """
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView
+from textual.widgets import Button, Input, Label, ListItem, ListView, Markdown
 
 from .model import Card
 
@@ -91,4 +96,62 @@ class CreateModal(ModalScreen[dict | None]):
         })
 
     def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+def ticket_markdown(t: dict) -> str:
+    """Render a normalized ticket dict (from `tkt view --json`) as a markdown
+    document. Pure function so it is unit-testable without Textual."""
+    lines = [f"# {t.get('key', '')} — {t.get('summary', '')}", ""]
+
+    meta = []
+    typ = t.get("type", "") or "—"
+    tclass = t.get("type_class", "")
+    meta.append(f"**Type:** {typ}" + (f" ({tclass})" if tclass else ""))
+    meta.append(f"**Status:** {t.get('status', '') or '—'} ({t.get('status_role', '')})")
+    meta.append(f"**Assignee:** {t.get('assignee', '') or '—'}")
+    meta.append(f"**Priority:** {t.get('priority', '') or '—'}")
+    lines += ["  ·  ".join(meta), ""]
+
+    blocked = t.get("blocked_by") or []
+    if blocked:
+        lines.append("## Blockers")
+        for b in blocked:
+            mark = "✅" if b.get("resolved") else "🔴"
+            lines.append(f"- {mark} {b.get('key', '')}")
+        lines.append("")
+
+    desc = (t.get("description") or "").strip()
+    lines += ["## Description", desc if desc else "_(none)_", ""]
+
+    acceptance = t.get("acceptance") or []
+    if acceptance:
+        lines.append("## Acceptance")
+        lines += [f"- {a}" for a in acceptance]
+        lines.append("")
+
+    labels = t.get("labels") or []
+    if labels:
+        lines.append("**Labels:** " + ", ".join(labels))
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+class ViewerModal(ModalScreen[None]):
+    """Read-only detail view of a ticket, rendered as scrollable markdown."""
+
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("q", "close", "Close"),
+    ]
+
+    def __init__(self, ticket: dict) -> None:
+        self.ticket = ticket
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="viewer"):
+            yield Markdown(ticket_markdown(self.ticket))
+
+    def action_close(self) -> None:
         self.dismiss(None)

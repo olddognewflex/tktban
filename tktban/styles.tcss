@@ -86,3 +86,11 @@ ModalScreen {
 #buttons Button {
     margin: 0 1;
 }
+
+#viewer {
+    width: 80%;
+    height: 80%;
+    padding: 1 2;
+    border: thick $primary;
+    background: $surface;
+}
