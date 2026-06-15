@@ -83,6 +83,27 @@ ModalScreen {
     max-height: 12;
 }
 
+#create-form {
+    height: auto;
+    max-height: 22;
+}
+
+#create-form TextArea {
+    height: 4;
+}
+
+#create-form .field-label {
+    text-style: none;
+    color: $text-muted;
+    margin-bottom: 0;
+}
+
+.error {
+    color: $error;
+    text-style: bold;
+    margin-bottom: 0;
+}
+
 #buttons {
     height: auto;
     align: center middle;

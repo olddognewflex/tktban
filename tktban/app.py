@@ -324,11 +324,72 @@ class BanApp(App):
         self.push_screen(CommentModal(card), done)
 
     def action_new(self) -> None:
-        def done(payload: dict | None) -> None:
-            if payload:
-                self._do_write("create", payload, "Created ticket")
+        self._open_creator()
 
-        self.push_screen(CreateModal(), done)
+    @work(thread=True)
+    def _open_creator(self) -> None:
+        """Fetch the configured issue types off-thread, then open the creator
+        with them as the type picker's options."""
+        try:
+            types = self.tkt.issue_types()
+        except TktError as e:
+            self.call_from_thread(self.notify, str(e), severity="error", timeout=10)
+            return
+        options = list(types.get("full_sdlc", [])) + list(types.get("deliverable", []))
+        self.call_from_thread(
+            self.push_screen, CreateModal(options, self._do_create)
+        )
+
+    def _create_ticket(self, payload: dict) -> dict:
+        """Perform the create (+ optional labels) and report the outcome without
+        touching the UI, so it is directly testable. Returns
+        {key, error, label_error}:
+
+        - error set        → `tkt create` failed; nothing was created.
+        - error None        → created; `key` is the new key.
+        - label_error set  → the ticket was created but labels could not be
+          applied (`tkt create` has no label flag, so they go through a follow-up
+          `tkt edit`; a failure there does not undo the ticket).
+
+        Labels are skipped with a `label_error` when create returns no key rather
+        than issuing an edit against an empty key."""
+        labels = payload.pop("labels", [])
+        try:
+            ticket = self.tkt.create(**payload)
+        except TktError as e:
+            return {"key": "", "error": str(e), "label_error": ""}
+        key = ticket.get("key", "")
+        label_error = ""
+        if labels and not key:
+            label_error = "no key returned by create"
+        elif labels:
+            try:
+                self.tkt.edit(key, add_labels=labels)
+            except TktError as e:
+                label_error = str(e)
+        return {"key": key, "error": None, "label_error": label_error}
+
+    @work(thread=True)
+    def _do_create(self, payload: dict, modal) -> None:
+        """Run the create off-thread (like every other write) and report back to
+        the still-open modal: on failure it stays open and shows the error; on
+        success it dismisses. A best-effort label failure is surfaced as a toast,
+        not a create error, since the ticket already exists."""
+        res = self._create_ticket(payload)
+        if res["error"] is not None:
+            self.call_from_thread(modal.creation_failed, res["error"])
+            return
+        self.call_from_thread(modal.creation_succeeded)
+        key = res["key"]
+        msg = f"Created {key}" if key else "Created ticket"
+        if res["label_error"]:
+            self.call_from_thread(
+                self.notify, f"{msg}, but labels not applied: {res['label_error']}",
+                severity="warning", timeout=12,
+            )
+        else:
+            self.call_from_thread(self.notify, msg)
+        self.refresh_board()
 
     def _apply_write(self, verb: str, payload) -> None:
         """Dispatch a write to the matching tkt verb. Sync + pure dispatch

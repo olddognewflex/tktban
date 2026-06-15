@@ -6,7 +6,7 @@ import pathlib
 import shutil
 
 from tktban.app import BanApp, ColumnWidget
-from tktban.tkt import Tkt
+from tktban.tkt import Tkt, TktError
 
 FIXDIR = pathlib.Path(__file__).parent / "fixtures" / ".sdlc"
 FIX = str(FIXDIR / "config.toml")
@@ -328,6 +328,137 @@ def test_external_change_reflected_within_interval(tmp_path):
     start, end = _run(go())
     assert start == "backlog"
     assert end == "review"   # auto-refresh picked up the external change, no manual r
+
+
+def test_create_ticket_round_trips_description_acceptance_labels(tmp_path):
+    # _create_ticket is the UI-free core — directly testable, no pilot needed.
+    from tktban.screens import build_ticket_body
+
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    cfg = str(dst / "config.toml")
+    res = BanApp(Tkt(config=cfg))._create_ticket({
+        "issue_type": "Story",
+        "summary": "Created via creator",
+        "priority": "High",
+        "assignee": "",
+        "body": build_ticket_body("A real description.", "crit a\ncrit b"),
+        "labels": ["alpha", "beta"],
+    })
+    assert res["error"] is None and res["label_error"] == ""
+    # Fixture has TKT-1..7, so the creator makes TKT-8.
+    t = Tkt(config=cfg).view("TKT-8")
+    assert t["summary"] == "Created via creator"
+    assert t["description"] == "A real description."     # round-trips
+    assert t["acceptance"] == ["crit a", "crit b"]        # parsed from body section
+    assert set(t["labels"]) == {"alpha", "beta"}          # applied via follow-up edit
+
+
+def test_create_ticket_reports_error_without_creating(tmp_path):
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    cfg = str(dst / "config.toml")
+    app = BanApp(Tkt(config=cfg))
+
+    def boom(**kw):
+        raise TktError("tkt create failed: bad type")
+
+    app.tkt.create = boom
+    res = app._create_ticket({
+        "issue_type": "Nope", "summary": "x", "priority": "",
+        "assignee": "", "body": "", "labels": [],
+    })
+    assert res["error"] and "bad type" in res["error"]    # surfaced, not raised
+    assert not (dst / "board" / "TKT-8.md").exists()       # nothing created
+
+
+def test_create_ticket_label_failure_keeps_the_ticket(tmp_path):
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    cfg = str(dst / "config.toml")
+    app = BanApp(Tkt(config=cfg))
+
+    def boom_edit(*a, **k):
+        raise TktError("edit failed: label rejected")
+
+    app.tkt.edit = boom_edit
+    res = app._create_ticket({
+        "issue_type": "Task", "summary": "with labels", "priority": "",
+        "assignee": "", "body": "", "labels": ["x"],
+    })
+    assert res["error"] is None                            # ticket WAS created
+    assert "edit failed" in res["label_error"]             # label failure reported
+    assert (dst / "board" / "TKT-8.md").is_file()          # not undone
+
+
+def test_create_ticket_no_key_skips_label_edit(tmp_path):
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    cfg = str(dst / "config.toml")
+    app = BanApp(Tkt(config=cfg))
+    app.tkt.create = lambda **kw: {}          # contract drift: no key
+    edited = []
+    app.tkt.edit = lambda *a, **k: edited.append((a, k))
+    res = app._create_ticket({
+        "issue_type": "Task", "summary": "s", "priority": "",
+        "assignee": "", "body": "", "labels": ["x"],
+    })
+    assert res["error"] is None and res["key"] == ""
+    assert res["label_error"] == "no key returned by create"
+    assert edited == []                                    # never edits an empty key
+
+
+def test_creator_modal_validates_then_creates(tmp_path):
+    from textual.widgets import Input, Label, Select, TextArea
+
+    from tktban.screens import CreateModal
+
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    cfg = str(dst / "config.toml")
+
+    async def go():
+        app = BanApp(Tkt(config=cfg))
+        # Roomy viewport so the tall create form's Create button is on-screen.
+        async with app.run_test(size=(100, 60)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_new()                       # _open_creator worker -> push modal
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert isinstance(app.screen, CreateModal)
+            modal = app.screen
+            types = list(modal.types)
+            # Create with nothing -> validation error, modal stays open.
+            await pilot.click("#create")
+            await pilot.pause()
+            err = str(modal.query_one("#create-error", Label).render())
+            still_open = isinstance(app.screen, CreateModal)
+            # Fill required fields, then submit (drive _submit directly — it's
+            # what the Create button invokes; pilot.click is geometry-flaky once
+            # the Select overlay is in play).
+            modal.query_one("#type", Select).value = "Bug"
+            modal.query_one("#summary", Input).value = "From the modal"
+            modal.query_one("#description", TextArea).text = "modal desc"
+            await pilot.pause()
+            ok = modal._submit()                   # dispatches the create worker
+            # Poll for the modal to close (the worker dismisses on success); don't
+            # await workers — the trailing exclusive refresh can cancel and raise.
+            for _ in range(30):
+                await pilot.pause(0.05)
+                if not isinstance(app.screen, CreateModal):
+                    break
+            closed = not isinstance(app.screen, CreateModal)
+            return types, err, still_open, ok, closed
+
+    types, err, still_open, ok, closed = _run(go())
+    assert "Story" in types and "Bug" in types and "Task" in types   # from issue_types
+    assert "Choose a type" in err                                    # validated inline
+    assert still_open is True                                        # not closed on error
+    assert ok is None                                                # create succeeded
+    assert closed is True                                            # closed after success
+    t = Tkt(config=cfg).view("TKT-8")
+    assert t["summary"] == "From the modal" and t["type"] == "Bug"
 
 
 def test_edit_dispatch_mutates_fields_through_verb(tmp_path):

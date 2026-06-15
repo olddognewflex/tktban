@@ -12,7 +12,16 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView, Markdown, TextArea
+from textual.widgets import (
+    Button,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Markdown,
+    Select,
+    TextArea,
+)
 
 from .model import Card
 
@@ -63,18 +72,54 @@ class CommentModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class CreateModal(ModalScreen[dict | None]):
-    """New-ticket form. Returns kwargs for Tkt.create(...) or None."""
+def build_ticket_body(description: str, acceptance_text: str) -> str:
+    """Compose a `tkt create --body` string from a free-text description and
+    acceptance criteria (one per line). Criteria are written as a `## Acceptance`
+    markdown section so they round-trip into the normalized ticket's
+    `acceptance` list. Pure + testable."""
+    desc = (description or "").strip()
+    criteria = [ln.strip() for ln in (acceptance_text or "").splitlines() if ln.strip()]
+    body = desc
+    if criteria:
+        if body:
+            body += "\n\n"
+        body += "## Acceptance\n" + "\n".join(f"- {c}" for c in criteria)
+    return body
+
+
+class CreateModal(ModalScreen[None]):
+    """New-ticket form. Collects type (picked from the configured issue types),
+    summary, description, acceptance criteria (one per line → a `## Acceptance`
+    body section), priority, assignee, and optional labels.
+
+    Unlike the other write dialogs it does NOT just collect input: it kicks off
+    the create via an injected `create_fn(payload, self)` (an app worker that runs
+    tkt off-thread) and stays open until that worker calls back — `creation_failed`
+    (show the error, re-enable) or `creation_succeeded` (dismiss). Client-side
+    validation still happens inline. `create_fn` is the only tkt touch-point — the
+    verb call lives in the app/tkt.py, so the coupling boundary holds."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, types: list[str], create_fn) -> None:
+        self.types = types
+        self._create_fn = create_fn
+        super().__init__()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Label("New ticket")
-            yield Input(placeholder="type (e.g. Task, Story, Bug)", id="type")
-            yield Input(placeholder="summary", id="summary")
-            yield Input(placeholder="priority (optional)", id="priority")
-            yield Input(placeholder="assignee (optional, blank = you)", id="assignee")
+            with VerticalScroll(id="create-form"):
+                yield Select([(t, t) for t in self.types], prompt="type…", id="type")
+                yield Input(placeholder="summary", id="summary")
+                yield Label("description", classes="field-label")
+                yield TextArea(id="description")
+                yield Label("acceptance — one criterion per line", classes="field-label")
+                yield TextArea(id="acceptance")
+                yield Input(placeholder="priority (optional)", id="priority")
+                yield Input(placeholder="assignee (optional, blank = you)", id="assignee")
+                yield Input(placeholder="labels (optional, comma-separated)", id="labels")
+            yield Label("", id="create-error", classes="error")
             with Horizontal(id="buttons"):
                 yield Button("Create", variant="success", id="create")
                 yield Button("Cancel", id="cancel")
@@ -83,17 +128,56 @@ class CreateModal(ModalScreen[dict | None]):
         if event.button.id == "cancel":
             self.dismiss(None)
             return
-        issue_type = self.query_one("#type", Input).value.strip()
+        err = self._submit()
+        if err is not None:
+            self.query_one("#create-error", Label).update(err)
+
+    def _submit(self) -> str | None:
+        """Validate inline, then kick off the (off-thread) create. Returns a
+        validation error string to display (modal stays open, nothing started),
+        or None once the create has been dispatched — the worker then drives
+        `creation_failed`/`creation_succeeded`."""
+        type_val = self.query_one("#type", Select).value
         summary = self.query_one("#summary", Input).value.strip()
-        if not issue_type or not summary:
-            self.notify("type and summary are required", severity="warning")
-            return
-        self.dismiss({
-            "issue_type": issue_type,
+        # A real choice is one of the configured types; any no-selection sentinel
+        # (Select.BLANK / Select.NULL) fails membership, which is more robust than
+        # comparing against a specific sentinel across Textual versions.
+        if type_val not in self.types:
+            return "Choose a type."
+        if not summary:
+            return "Summary is required."
+        labels = [x.strip() for x in self.query_one("#labels", Input).value.split(",") if x.strip()]
+        payload = {
+            "issue_type": type_val,
             "summary": summary,
             "priority": self.query_one("#priority", Input).value.strip(),
             "assignee": self.query_one("#assignee", Input).value.strip(),
-        })
+            "body": build_ticket_body(
+                self.query_one("#description", TextArea).text,
+                self.query_one("#acceptance", TextArea).text,
+            ),
+            "labels": labels,
+        }
+        self.query_one("#create-error", Label).update("")
+        self._set_busy(True)
+        self._create_fn(payload, self)
+        return None
+
+    def _set_busy(self, busy: bool) -> None:
+        """Disable the Create button and show progress while the create runs, so
+        the modal isn't a dead UI during the off-thread tkt call."""
+        btn = self.query_one("#create", Button)
+        btn.disabled = busy
+        btn.label = "Creating…" if busy else "Create"
+
+    def creation_failed(self, message: str) -> None:
+        """Worker callback: create failed — re-enable and show the error."""
+        self._set_busy(False)
+        self.query_one("#create-error", Label).update(message)
+
+    def creation_succeeded(self) -> None:
+        """Worker callback: ticket created — close the modal."""
+        self.dismiss(None)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
