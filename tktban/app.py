@@ -144,27 +144,29 @@ class BanApp(App):
         self.call_from_thread(self._render, roles, columns)
 
     def _attach_lane_time(self, tickets: list[dict]) -> None:
-        """Annotate each (visible) ticket with its read-only time-in-current-lane.
+        """Annotate each visible ticket with its read-only time-in-current-lane.
 
-        Cost: one `tkt lane-time --read-only` subprocess per visible card (the
-        verb contract has no batch form), so refresh is O(visible cards) in
-        process spawns. Fine for the local markdown backend; for a large remote
-        board prefer filtering first. Runs in the read worker, so the UI never
-        blocks. A card with no lane history simply gets no badge; a genuine tkt
-        failure is surfaced once and aborts the rest of the pass rather than
-        blanking every card silently."""
+        Uses a single `tkt lane-time --keys K1:role,K2:role ... --read-only --json`
+        batch call per refresh, so refresh is O(1) subprocess spawns regardless of
+        visible-card count. Runs in the read worker, so the UI never blocks. A card
+        with no lane history simply gets no badge; a genuine tkt failure is
+        surfaced once and aborts the rest of the pass rather than blanking every
+        card silently."""
+        items = [(t.get("key", ""), t.get("status_role", "")) for t in tickets]
+        items = [(k, r) for k, r in items if k and r]
+        if not items:
+            return
+        try:
+            batch = self.tkt.lane_time_batch(items)
+        except TktError as e:
+            self.call_from_thread(
+                self.notify, f"time-in-lane unavailable: {e}",
+                severity="warning", timeout=8,
+            )
+            return
         for t in tickets:
-            key, role = t.get("key", ""), t.get("status_role", "")
-            if not key or not role:
-                continue
-            try:
-                wl = self.tkt.lane_time(key, role)
-            except TktError as e:
-                self.call_from_thread(
-                    self.notify, f"time-in-lane unavailable: {e}",
-                    severity="warning", timeout=8,
-                )
-                return
+            key = t.get("key", "")
+            wl = batch.get(key)
             if wl and wl.get("human"):
                 t["lane_human"] = wl["human"]
 

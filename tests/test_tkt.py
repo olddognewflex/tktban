@@ -82,13 +82,26 @@ def test_edit_empty_string_is_sent_but_none_is_omitted(run):
 
 @mock.patch("tktban.tkt.subprocess.run")
 def test_lane_time_is_read_only_and_parses(run):
-    run.return_value = _proc(stdout='{"key": "TKT-1", "human": "6h 10m", "worklog_id": ""}')
+    run.return_value = _proc(stdout='[{"key": "TKT-1", "human": "6h 10m", "worklog_id": ""}]')
     out = Tkt().lane_time("TKT-1", "todo")
     assert out["human"] == "6h 10m"
     argv = run.call_args[0][0]
-    assert argv == ["tkt", "lane-time", "TKT-1", "--role", "todo",
+    assert argv == ["tkt", "lane-time", "--keys", "TKT-1:todo",
                     "--read-only", "--json"]
     assert out["worklog_id"] == ""   # read-only: never records a worklog
+
+
+@mock.patch("tktban.tkt.subprocess.run")
+def test_lane_time_batch_is_read_only_and_maps_by_key(run):
+    run.return_value = _proc(stdout='[{"key": "TKT-1", "human": "6h 10m"}, {"key": "TKT-2", "human": "1h 5m"}]')
+    out = Tkt().lane_time_batch([("TKT-1", "todo"), ("TKT-2", "in_progress")])
+    assert out == {
+        "TKT-1": {"key": "TKT-1", "human": "6h 10m"},
+        "TKT-2": {"key": "TKT-2", "human": "1h 5m"},
+    }
+    argv = run.call_args[0][0]
+    assert argv == ["tkt", "lane-time", "--keys", "TKT-1:todo,TKT-2:in_progress",
+                    "--read-only", "--json"]
 
 
 @mock.patch("tktban.tkt.subprocess.run")

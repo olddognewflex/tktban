@@ -101,16 +101,35 @@ class Tkt:
         just omits the badge. Any other failure (missing binary, config or
         provider/network error) is re-raised so the caller can surface it rather
         than silently blanking every card."""
+        out = self.lane_time_batch([(key, role)])
+        return out.get(key)
+
+    def lane_time_batch(self, items: list[tuple[str, str]]) -> dict[str, dict | None]:
+        """Batch read-only time-in-lane for all (key, role) pairs.
+
+        Returns a dict keyed by key. Entries for tickets with no history in the
+        requested lane map to None; genuine errors raise."""
+        if not items:
+            return {}
+        pairs = ",".join(f"{key}:{role}" for key, role in items)
         try:
-            return self._run(
-                ["lane-time", key, "--role", role, "--read-only", "--json"],
+            result = self._run(
+                ["lane-time", "--keys", pairs, "--read-only", "--json"],
                 as_json=True,
             )
         except TktError as e:
             blob = (e.stderr or str(e)).lower()
             if any(s in blob for s in ("no entry", "history", "changelog")):
-                return None
+                return {key: None for key, _ in items}
             raise
+        if len(result) != len(items):
+            raise TktError(
+                f"lane_time_batch: tkt returned {len(result)} entries for {len(items)} inputs"
+            )
+        return {
+            entry.get("key", key): entry
+            for (key, _), entry in zip(items, result)
+        }
 
     # ---- write verbs (mutations go through tkt so history/worklog stay correct) ----
 
