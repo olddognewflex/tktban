@@ -202,6 +202,134 @@ def test_lane_time_read_only_does_not_record_worklog(tmp_path):
     assert not (state / "worklog.jsonl").exists()         # read-only: recorded nothing
 
 
+def test_auto_on_config_state():
+    # Defaults: on, 10s.
+    a = BanApp(Tkt(config=FIX))
+    assert a._auto_on is True and a._refresh_secs == 10.0
+    # Explicit interval.
+    assert BanApp(Tkt(config=FIX), refresh_interval=3)._refresh_secs == 3
+    # Non-positive interval -> starts off, cadence falls back to 10.
+    z = BanApp(Tkt(config=FIX), refresh_interval=0)
+    assert z._auto_on is False and z._refresh_secs == 10.0
+    # Explicit opt-out.
+    assert BanApp(Tkt(config=FIX), auto_refresh=False)._auto_on is False
+
+
+def test_auto_on_timer_created_and_toggles():
+    async def go():
+        app = BanApp(Tkt(config=FIX), refresh_interval=999)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            states = [app._refresh_timer is not None, app._auto_on]
+            app.action_toggle_auto()          # -> off
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            states.append(app._auto_on)
+            assert "auto off" in app.sub_title
+            app.action_toggle_auto()          # -> on
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            states.append(app._auto_on)
+            return states, app.sub_title
+
+    states, sub = _run(go())
+    assert states == [True, True, False, True]
+    assert "auto 999s" in sub
+
+
+def test_auto_tick_skips_refresh_while_modal_open():
+    from tktban.screens import FilterModal
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), auto_refresh=False)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            calls = []
+            app.refresh_board = lambda: calls.append(1)   # spy on the worker call
+            app._auto_tick()                              # no modal -> refreshes
+            app.push_screen(FilterModal({}))
+            await pilot.pause()
+            app._auto_tick()                              # modal open -> skip
+            await pilot.pause()
+            return calls
+
+    assert _run(go()) == [1]   # only the no-modal tick triggered a refresh
+
+
+def test_focus_preserved_across_refresh():
+    from tktban.app import CardItem
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), auto_refresh=False)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Focus a specific card.
+            target = next(ci for ci in app.query(CardItem) if ci.card.key == "TKT-1")
+            target.parent.focus()             # focus its ListView
+            await pilot.pause()
+            lv = app._focused_listview()
+            lv.index = [getattr(i, "card", None) and i.card.key for i in lv.children].index("TKT-1")
+            await pilot.pause()
+            before = app._current_card().key
+            # A refresh repaints every widget; focus must survive.
+            app.refresh_board()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            after = app._current_card()
+            return before, (after.key if after else None)
+
+    before, after = _run(go())
+    assert before == "TKT-1"
+    assert after == "TKT-1"   # same card still focused after the repaint
+
+
+def test_external_change_reflected_within_interval(tmp_path):
+    from tktban.app import CardItem, ColumnWidget
+
+    dst = tmp_path / ".sdlc"
+    shutil.copytree(FIXDIR, dst)
+    cfg = str(dst / "config.toml")
+
+    def col_of(app, key):
+        for cw in app.query(ColumnWidget):
+            if any(getattr(ci, "card", None) and ci.card.key == key
+                   for ci in cw.query(CardItem)):
+                return cw.column.role
+        return None
+
+    async def go():
+        app = BanApp(Tkt(config=cfg), refresh_interval=0.5)
+        # Keep each refresh cheap so it finishes well inside the interval —
+        # the per-card lane-time fan-out isn't what this test exercises.
+        app.tkt.lane_time = lambda key, role: None
+        async with app.run_test() as pilot:
+            # Poll for first paint rather than awaiting workers: the interval
+            # timer cancels in-flight refreshes (exclusive coalescing), which
+            # would surface as WorkerCancelled if we awaited them.
+            start = None
+            for _ in range(25):
+                await pilot.pause(0.1)
+                start = col_of(app, "TKT-5")
+                if start is not None:
+                    break
+            # External mutation (another process / CLI), not via the UI.
+            Tkt(config=cfg).transition("TKT-5", "review")
+            end = None
+            for _ in range(30):
+                await pilot.pause(0.2)
+                end = col_of(app, "TKT-5")
+                if end == "review":
+                    break
+            return start, end
+
+    start, end = _run(go())
+    assert start == "backlog"
+    assert end == "review"   # auto-refresh picked up the external change, no manual r
+
+
 def test_edit_dispatch_mutates_fields_through_verb(tmp_path):
     dst = tmp_path / ".sdlc"
     shutil.copytree(FIXDIR, dst)
