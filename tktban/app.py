@@ -10,6 +10,7 @@ from __future__ import annotations
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.timer import Timer
 from textual.widgets import Footer, Header, Label, ListItem, ListView
 
 from .model import Card, Column, build_board, filter_tickets
@@ -64,6 +65,7 @@ class BanApp(App):
 
     BINDINGS = [
         ("r", "refresh", "Refresh"),
+        ("a", "toggle_auto", "Auto-refresh"),
         ("f", "filter", "Filter"),
         ("v", "view", "View"),
         ("e", "edit", "Edit"),
@@ -73,10 +75,19 @@ class BanApp(App):
         ("q", "quit", "Quit"),
     ]
 
-    def __init__(self, tkt: Tkt) -> None:
+    def __init__(self, tkt: Tkt, refresh_interval: float = 10.0,
+                 auto_refresh: bool = True) -> None:
         self.tkt = tkt
         self._roles: dict[str, str] = {}
         self._filter: dict[str, str] = {"assignee": "", "prefix": ""}
+        # NB: names are prefixed `_auto_*`/`_refresh_*` and deliberately avoid
+        # Textual App's own `auto_refresh` attribute, which would clobber them.
+        # Cadence (seconds) is always positive; `_auto_on` is the on/off state,
+        # toggled at runtime with `a`. A non-positive interval starts disabled
+        # but still toggles on at the 10s default.
+        self._refresh_secs: float = refresh_interval if refresh_interval > 0 else 10.0
+        self._auto_on: bool = auto_refresh and refresh_interval > 0
+        self._refresh_timer: Timer | None = None
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -86,6 +97,19 @@ class BanApp(App):
 
     def on_mount(self) -> None:
         self.refresh_board()
+        # One repeating timer; pause/resume is the toggle. refresh_board is an
+        # exclusive worker, so a tick that lands while one is running coalesces.
+        self._refresh_timer = self.set_interval(self._refresh_secs, self._auto_tick)
+        if not self._auto_on:
+            self._refresh_timer.pause()
+
+    def _auto_tick(self) -> None:
+        """Interval callback (UI thread). Skip the repaint while a modal is open
+        so an auto-refresh never rebuilds the board under a dialog or steals
+        focus from a field the user is editing. The next tick picks it up once
+        the modal closes."""
+        if len(self.screen_stack) <= 1:
+            self.refresh_board()
 
     # ---- read / render -----------------------------------------------------
 
@@ -129,12 +153,29 @@ class BanApp(App):
 
     def _render(self, roles: dict[str, str], columns: list[Column]) -> None:
         self._roles = roles
+        # Remember where the user was so an (auto-)refresh repaint doesn't yank
+        # their place; restore after the new widgets have mounted.
+        role, key = self._focused_location()
         board = self.query_one("#board", Horizontal)
         board.remove_children()
         for col in columns:
             board.mount(ColumnWidget(col))
-        count = sum(len(c.cards) for c in columns)
-        self.sub_title = f"{count} tickets{self._filter_label()}"
+        self._update_subtitle()
+        if role is not None:
+            self.call_after_refresh(self._restore_focus, role, key)
+
+    def _update_subtitle(self) -> None:
+        """Repaint the sub-title (ticket count + active filter + auto state) from
+        the mounted columns. Cheap and UI-thread only — no tkt calls — so it can
+        be used to reflect a state change (e.g. an auto toggle) without a full
+        board reload."""
+        count = sum(len(cw.column.cards) for cw in self.query(ColumnWidget))
+        self.sub_title = f"{count} tickets{self._filter_label()}{self._auto_label()}"
+
+    def _auto_label(self) -> str:
+        if self._auto_on:
+            return f"  ·  auto {int(self._refresh_secs)}s"
+        return "  ·  auto off"
 
     def _filter_label(self) -> str:
         """Human suffix describing the active filter, e.g.
@@ -160,10 +201,50 @@ class BanApp(App):
             return None
         return getattr(lv.highlighted_child, "card", None)
 
+    def _focused_location(self) -> tuple[str | None, str | None]:
+        """The (column role, card key) currently focused, for restoring across a
+        repaint. (None, None) when nothing is focused (e.g. first mount)."""
+        lv = self._focused_listview()
+        if lv is None:
+            return (None, None)
+        node = lv
+        while node is not None and not isinstance(node, ColumnWidget):
+            node = node.parent
+        role = node.column.role if node is not None else None
+        card = getattr(lv.highlighted_child, "card", None)
+        return (role, card.key if card else None)
+
+    def _restore_focus(self, role: str, key: str | None) -> None:
+        """Re-focus the column that had focus, and the same card if it still
+        exists. A vanished card falls back to its column; a vanished column
+        leaves focus at the default."""
+        for cw in self.query(ColumnWidget):
+            if cw.column.role != role:
+                continue
+            lv = cw.query_one(ListView)
+            if key is not None:
+                for i, item in enumerate(lv.children):
+                    if getattr(item, "card", None) and item.card.key == key:
+                        lv.index = i
+                        break
+            lv.focus()
+            return
+
     # ---- actions -----------------------------------------------------------
 
     def action_refresh(self) -> None:
         self.refresh_board()
+
+    def action_toggle_auto(self) -> None:
+        """Toggle auto-refresh at runtime (pauses/resumes the interval timer)."""
+        self._auto_on = not self._auto_on
+        if self._refresh_timer is not None:
+            self._refresh_timer.resume() if self._auto_on else self._refresh_timer.pause()
+        self.notify(
+            f"Auto-refresh on ({int(self._refresh_secs)}s)" if self._auto_on
+            else "Auto-refresh off"
+        )
+        self._update_subtitle()   # reflect the new state without a full board reload
 
     def action_filter(self) -> None:
         def done(result: dict | None) -> None:
