@@ -99,6 +99,51 @@ class CreateModal(ModalScreen[dict | None]):
         self.dismiss(None)
 
 
+class FilterModal(ModalScreen[dict | None]):
+    """Collect board filters (assignee + key prefix). Pre-filled with the active
+    filter. Returns {"assignee": str, "prefix": str} on Apply (Clear submits an
+    empty pair), or None on cancel. Like the write dialogs it only collects input;
+    the app owns applying it."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, current: dict) -> None:
+        self.current = current
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Filter cards")
+            yield Input(
+                value=self.current.get("assignee", ""),
+                placeholder="assignee (blank = any)",
+                id="assignee",
+            )
+            yield Input(
+                value=self.current.get("prefix", ""),
+                placeholder="key prefix, e.g. TKB (blank = any)",
+                id="prefix",
+            )
+            with Horizontal(id="buttons"):
+                yield Button("Apply", variant="success", id="apply")
+                yield Button("Clear", id="clear")
+                yield Button("Cancel", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "clear":
+            self.dismiss({"assignee": "", "prefix": ""})
+        else:
+            self.dismiss({
+                "assignee": self.query_one("#assignee", Input).value.strip(),
+                "prefix": self.query_one("#prefix", Input).value.strip(),
+            })
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 def ticket_markdown(t: dict) -> str:
     """Render a normalized ticket dict (from `tkt view --json`) as a markdown
     document. Pure function so it is unit-testable without Textual."""

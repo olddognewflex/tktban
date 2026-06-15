@@ -1,5 +1,12 @@
 """Board model tests — pure functions, no tkt/Textual needed."""
-from tktban.model import UNMAPPED, Card, build_board, priority_rank
+from tktban.model import (
+    UNMAPPED,
+    Card,
+    build_board,
+    filter_tickets,
+    key_prefix,
+    priority_rank,
+)
 
 ROLES = {
     "backlog": "Backlog",
@@ -81,3 +88,51 @@ def test_no_unmapped_column_when_all_mapped():
     cols = build_board(ROLES, [ticket("TKT-1", "todo")])
     assert all(c.role != UNMAPPED for c in cols)
     assert len(cols) == len(ROLES)
+
+
+def test_key_prefix():
+    assert key_prefix("TKB-1") == "TKB"
+    assert key_prefix("TKT-42") == "TKT"
+    assert key_prefix("NODASH") == "NODASH"
+    assert key_prefix("") == ""
+
+
+BOARD = [
+    ticket("TKB-1", "todo", assignee="raymond"),
+    ticket("TKB-2", "todo", assignee="alex"),
+    ticket("TKT-1", "todo", assignee="raymond"),
+    ticket("TKT-2", "todo", assignee=""),
+]
+
+
+def test_filter_no_args_returns_unchanged():
+    assert filter_tickets(BOARD) is BOARD
+
+
+def test_filter_by_assignee():
+    keys = [t["key"] for t in filter_tickets(BOARD, assignee="raymond")]
+    assert keys == ["TKB-1", "TKT-1"]
+
+
+def test_filter_by_prefix():
+    keys = [t["key"] for t in filter_tickets(BOARD, prefix="TKB")]
+    assert keys == ["TKB-1", "TKB-2"]
+
+
+def test_filter_by_assignee_and_prefix():
+    keys = [t["key"] for t in filter_tickets(BOARD, assignee="raymond", prefix="TKB")]
+    assert keys == ["TKB-1"]
+
+
+def test_filter_is_case_insensitive():
+    keys = [t["key"] for t in filter_tickets(BOARD, assignee="RAYMOND", prefix="tkb")]
+    assert keys == ["TKB-1"]
+
+
+def test_filter_prefix_is_exact_not_substring():
+    # 'TK' must not match 'TKB'/'TKT' — prefix is the whole project segment.
+    assert filter_tickets(BOARD, prefix="TK") == []
+
+
+def test_filter_whitespace_only_args_disable_filter():
+    assert filter_tickets(BOARD, assignee="  ", prefix="  ") is BOARD

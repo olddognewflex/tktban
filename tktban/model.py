@@ -58,6 +58,37 @@ class Column:
     cards: list[Card] = field(default_factory=list)
 
 
+def key_prefix(key: str) -> str:
+    """The project prefix of a ticket key — the part before the first '-'
+    ('TKB-1' -> 'TKB'). Returns the whole key if there is no '-'."""
+    return key.split("-", 1)[0]
+
+
+def filter_tickets(
+    tickets: list[dict], assignee: str = "", prefix: str = ""
+) -> list[dict]:
+    """Narrow a ticket list by assignee and/or key prefix. Both filters are
+    case-insensitive and optional; an empty string disables that filter, so
+    no arguments returns the list unchanged. Pure (no I/O) so it is testable
+    apart from build_board.
+
+    - assignee: exact match against the ticket's `assignee`.
+    - prefix: matches the ticket key's project prefix ('TKB' matches 'TKB-1').
+    """
+    a = assignee.strip().lower()
+    p = prefix.strip().lower()
+    if not a and not p:
+        return tickets
+    out = []
+    for t in tickets:
+        if a and (t.get("assignee") or "").lower() != a:
+            continue
+        if p and key_prefix(t.get("key") or "").lower() != p:
+            continue
+        out.append(t)
+    return out
+
+
 def build_board(roles: dict[str, str], tickets: list[dict]) -> list[Column]:
     """Group tickets into columns in `roles` insertion order.
 
