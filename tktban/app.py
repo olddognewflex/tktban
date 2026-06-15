@@ -37,8 +37,13 @@ class CardItem(ListItem):
         badge = f"  ⛔{c.blocker_count}" if c.blocker_count else ""
         yield Label(f"{prio}{c.key}{badge}", classes="card-head")
         yield Label(c.summary, classes="card-summary")
+        meta = []
         if c.assignee:
-            yield Label(f"@{c.assignee}", classes="card-meta")
+            meta.append(f"@{c.assignee}")
+        if c.lane_human:
+            meta.append(f"⏱ {c.lane_human}")
+        if meta:
+            yield Label("  ".join(meta), classes="card-meta")
 
 
 class ColumnWidget(Vertical):
@@ -93,8 +98,34 @@ class BanApp(App):
             self.call_from_thread(self.notify, str(e), severity="error", timeout=10)
             return
         tickets = filter_tickets(tickets, **self._filter)
+        self._attach_lane_time(tickets)
         columns = build_board(roles, tickets)
         self.call_from_thread(self._render, roles, columns)
+
+    def _attach_lane_time(self, tickets: list[dict]) -> None:
+        """Annotate each (visible) ticket with its read-only time-in-current-lane.
+
+        Cost: one `tkt lane-time --read-only` subprocess per visible card (the
+        verb contract has no batch form), so refresh is O(visible cards) in
+        process spawns. Fine for the local markdown backend; for a large remote
+        board prefer filtering first. Runs in the read worker, so the UI never
+        blocks. A card with no lane history simply gets no badge; a genuine tkt
+        failure is surfaced once and aborts the rest of the pass rather than
+        blanking every card silently."""
+        for t in tickets:
+            key, role = t.get("key", ""), t.get("status_role", "")
+            if not key or not role:
+                continue
+            try:
+                wl = self.tkt.lane_time(key, role)
+            except TktError as e:
+                self.call_from_thread(
+                    self.notify, f"time-in-lane unavailable: {e}",
+                    severity="warning", timeout=8,
+                )
+                return
+            if wl and wl.get("human"):
+                t["lane_human"] = wl["human"]
 
     def _render(self, roles: dict[str, str], columns: list[Column]) -> None:
         self._roles = roles

@@ -90,6 +90,18 @@ def test_no_unmapped_column_when_all_mapped():
     assert len(cols) == len(ROLES)
 
 
+def test_card_reads_lane_human_with_default():
+    assert Card.from_ticket(ticket("TKT-1", "todo")).lane_human == ""
+    d = dict(ticket("TKT-1", "todo"), lane_human="6h 10m")
+    assert Card.from_ticket(d).lane_human == "6h 10m"
+
+
+def test_build_board_passes_lane_human_through():
+    d = dict(ticket("TKT-1", "todo"), lane_human="1h 23m")
+    cols = {c.role: c for c in build_board(ROLES, [d])}
+    assert cols["todo"].cards[0].lane_human == "1h 23m"
+
+
 def test_key_prefix():
     assert key_prefix("TKB-1") == "TKB"
     assert key_prefix("TKT-42") == "TKT"

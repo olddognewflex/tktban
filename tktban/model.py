@@ -32,6 +32,7 @@ class Card:
     priority: str = ""
     status_role: str = ""
     blocker_count: int = 0
+    lane_human: str = ""   # human time-in-current-lane, e.g. "6h 10m" (empty = unknown)
 
     @classmethod
     def from_ticket(cls, d: dict) -> "Card":
@@ -44,6 +45,7 @@ class Card:
             priority=d.get("priority", ""),
             status_role=d.get("status_role", ""),
             blocker_count=blocker_count,
+            lane_human=d.get("lane_human", ""),
         )
 
     def sort_key(self) -> tuple[int, str]:

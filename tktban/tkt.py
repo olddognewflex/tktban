@@ -91,6 +91,27 @@ class Tkt:
         """{"full_sdlc": [...], "deliverable": [...]} — hints the create form."""
         return self._run(["cfg", "issue_types", "--json"], as_json=True)
 
+    def lane_time(self, key: str, role: str) -> dict | None:
+        """Read-only time-in-lane for `role` via `tkt lane-time --read-only` — a
+        Worklog-shaped dict ({key, role, lane, seconds, human, ...}). Read-only,
+        so it never records a worklog.
+
+        Returns None ONLY for the benign "this ticket has never been in that
+        lane" case (no entry in the provider's history/changelog) — the board
+        just omits the badge. Any other failure (missing binary, config or
+        provider/network error) is re-raised so the caller can surface it rather
+        than silently blanking every card."""
+        try:
+            return self._run(
+                ["lane-time", key, "--role", role, "--read-only", "--json"],
+                as_json=True,
+            )
+        except TktError as e:
+            blob = (e.stderr or str(e)).lower()
+            if any(s in blob for s in ("no entry", "history", "changelog")):
+                return None
+            raise
+
     # ---- write verbs (mutations go through tkt so history/worklog stay correct) ----
 
     def transition(self, key: str, role: str) -> None:
