@@ -7,12 +7,15 @@ never freezes on a subprocess.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.timer import Timer
 from textual.widgets import Footer, Header, Label, ListItem, ListView
 
+from . import settings
 from .model import Card, Column, build_board, filter_tickets
 from .screens import (
     CommentModal,
@@ -66,6 +69,7 @@ class BanApp(App):
     BINDINGS = [
         ("r", "refresh", "Refresh"),
         ("a", "toggle_auto", "Auto-refresh"),
+        ("t", "cycle_theme", "Theme"),
         ("f", "filter", "Filter"),
         ("v", "view", "View"),
         ("e", "edit", "Edit"),
@@ -76,10 +80,14 @@ class BanApp(App):
     ]
 
     def __init__(self, tkt: Tkt, refresh_interval: float = 10.0,
-                 auto_refresh: bool = True) -> None:
+                 auto_refresh: bool = True, settings_path: Path | None = None) -> None:
         self.tkt = tkt
         self._roles: dict[str, str] = {}
         self._filter: dict[str, str] = {"assignee": "", "prefix": ""}
+        # UI-only preferences (theme, …) persisted across runs — never board
+        # data. Loading falls back to defaults on a missing/corrupt file.
+        self._settings_path = settings_path or settings.default_path()
+        self._settings = settings.load(self._settings_path)
         # NB: names are prefixed `_auto_*`/`_refresh_*` and deliberately avoid
         # Textual App's own `auto_refresh` attribute, which would clobber them.
         # Cadence (seconds) is always positive; `_auto_on` is the on/off state,
@@ -96,12 +104,21 @@ class BanApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._apply_saved_theme()
         self.refresh_board()
         # One repeating timer; pause/resume is the toggle. refresh_board is an
         # exclusive worker, so a tick that lands while one is running coalesces.
         self._refresh_timer = self.set_interval(self._refresh_secs, self._auto_tick)
         if not self._auto_on:
             self._refresh_timer.pause()
+
+    def _apply_saved_theme(self) -> None:
+        """Apply the persisted theme, but only if it is a registered theme —
+        an unknown name (corrupt/old settings) is ignored so the default stays
+        and the app never raises InvalidThemeError."""
+        theme = self._settings.get("theme")
+        if theme in self.available_themes:
+            self.theme = theme
 
     def _auto_tick(self) -> None:
         """Interval callback (UI thread). Skip the repaint while a modal is open
@@ -245,6 +262,24 @@ class BanApp(App):
             else "Auto-refresh off"
         )
         self._update_subtitle()   # reflect the new state without a full board reload
+
+    def action_cycle_theme(self) -> None:
+        """Cycle to the next registered theme and persist the choice so it is
+        restored on the next launch. A save failure (e.g. read-only config dir)
+        is reported but never crashes the session."""
+        names = sorted(self.available_themes)
+        try:
+            i = names.index(self.theme)
+        except ValueError:
+            i = -1
+        self.theme = names[(i + 1) % len(names)]
+        self._settings["theme"] = self.theme
+        try:
+            settings.save(self._settings_path, self._settings)
+        except OSError as e:
+            self.notify(f"Theme set but not saved: {e}", severity="warning", timeout=8)
+        else:
+            self.notify(f"Theme: {self.theme}")
 
     def action_filter(self) -> None:
         def done(result: dict | None) -> None:
