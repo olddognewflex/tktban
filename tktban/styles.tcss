@@ -73,6 +73,11 @@ ModalScreen {
     margin-bottom: 1;
 }
 
+#dialog TextArea {
+    height: 8;
+    margin-bottom: 1;
+}
+
 #dialog ListView {
     height: auto;
     max-height: 12;

@@ -60,6 +60,27 @@ def test_create_omits_empty_optionals(run):
 
 
 @mock.patch("tktban.tkt.subprocess.run")
+def test_edit_argv_sends_only_provided_fields(run):
+    run.return_value = _proc(stdout='{"key": "TKT-1"}')
+    Tkt().edit("TKT-1", summary="new", priority="High",
+               add_labels=["x"], remove_labels=["y"])
+    argv = run.call_args[0][0]
+    assert argv == ["tkt", "edit", "TKT-1", "--summary", "new",
+                    "--priority", "High", "--add-label", "x",
+                    "--remove-label", "y", "--json"]
+    assert "--body" not in argv and "--assignee" not in argv
+
+
+@mock.patch("tktban.tkt.subprocess.run")
+def test_edit_empty_string_is_sent_but_none_is_omitted(run):
+    run.return_value = _proc(stdout="{}")
+    Tkt().edit("TKT-1", assignee="")  # clear assignee; summary omitted
+    argv = run.call_args[0][0]
+    assert "--assignee" in argv and argv[argv.index("--assignee") + 1] == ""
+    assert "--summary" not in argv
+
+
+@mock.patch("tktban.tkt.subprocess.run")
 def test_transition_and_comment_argv(run):
     run.return_value = _proc(stdout="ok")
     t = Tkt()

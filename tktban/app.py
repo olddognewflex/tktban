@@ -13,7 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, ListItem, ListView
 
 from .model import Card, Column, build_board
-from .screens import CommentModal, CreateModal, MoveModal, ViewerModal
+from .screens import CommentModal, CreateModal, EditModal, MoveModal, ViewerModal
 from .tkt import Tkt, TktError
 
 
@@ -53,6 +53,7 @@ class BanApp(App):
     BINDINGS = [
         ("r", "refresh", "Refresh"),
         ("v", "view", "View"),
+        ("e", "edit", "Edit"),
         ("m", "move", "Move"),
         ("c", "comment", "Comment"),
         ("n", "new", "New"),
@@ -129,6 +130,32 @@ class BanApp(App):
             return
         self.call_from_thread(self.push_screen, ViewerModal(ticket))
 
+    def action_edit(self) -> None:
+        card = self._current_card()
+        if card is None:
+            self.notify("Select a card first", severity="warning")
+            return
+        self._open_editor(card.key)
+
+    @work(thread=True)
+    def _open_editor(self, key: str) -> None:
+        """Fetch the full ticket off-thread (to pre-fill), then open the editor."""
+        try:
+            ticket = self.tkt.view(key)
+        except TktError as e:
+            self.call_from_thread(self.notify, str(e), severity="error", timeout=10)
+            return
+        self.call_from_thread(self._push_editor, ticket)
+
+    def _push_editor(self, ticket: dict) -> None:
+        def done(changes: dict | None) -> None:
+            if changes:
+                self._do_write("edit", (ticket["key"], changes), f"Edited {ticket['key']}")
+            elif changes is not None:  # {} -> saved with nothing changed
+                self.notify("No changes made")
+
+        self.push_screen(EditModal(ticket), done)
+
     def action_move(self) -> None:
         card = self._current_card()
         if card is None:
@@ -171,6 +198,9 @@ class BanApp(App):
             self.tkt.comment(*payload)
         elif verb == "create":
             self.tkt.create(**payload)
+        elif verb == "edit":
+            key, changes = payload
+            self.tkt.edit(key, **changes)
         else:  # pragma: no cover - guards against a typo'd verb
             raise ValueError(f"unknown write verb: {verb}")
 
