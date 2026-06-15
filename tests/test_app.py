@@ -461,6 +461,95 @@ def test_creator_modal_validates_then_creates(tmp_path):
     assert t["summary"] == "From the modal" and t["type"] == "Bug"
 
 
+def test_theme_applied_from_settings_on_mount(tmp_path):
+    from tktban import settings as st
+
+    p = tmp_path / "settings.toml"
+    st.save(p, {"theme": "nord"})
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), settings_path=p)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            return app.theme
+
+    assert _run(go()) == "nord"   # restored from the saved settings
+
+
+def test_corrupt_settings_falls_back_without_crash(tmp_path):
+    p = tmp_path / "settings.toml"
+    p.write_text("garbage == not toml")
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), settings_path=p)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            return app.theme
+
+    assert _run(go()) == "textual-dark"   # default applied, no crash
+
+
+def test_invalid_theme_name_ignored(tmp_path):
+    from tktban import settings as st
+
+    p = tmp_path / "settings.toml"
+    st.save(p, {"theme": "no-such-theme"})   # unregistered theme
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), settings_path=p)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            return app.theme
+
+    assert _run(go()) == "textual-dark"   # unknown theme ignored (no InvalidThemeError)
+
+
+def test_cycle_theme_changes_and_persists(tmp_path):
+    from tktban import settings as st
+
+    p = tmp_path / "settings.toml"
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), settings_path=p)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            before = app.theme
+            app.action_cycle_theme()
+            await pilot.pause()
+            return before, app.theme
+
+    before, after = _run(go())
+    assert after != before                       # advanced to the next theme
+    assert st.load(p)["theme"] == after          # persisted, matches the live theme
+
+
+def test_cycle_theme_survives_save_failure(tmp_path, monkeypatch):
+    from tktban import settings as st
+
+    def boom(*a, **k):
+        raise OSError("read-only config dir")
+
+    monkeypatch.setattr(st, "save", boom)         # force a save failure
+    p = tmp_path / "settings.toml"
+
+    async def go():
+        app = BanApp(Tkt(config=FIX), settings_path=p)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            before = app.theme
+            app.action_cycle_theme()              # must not raise
+            await pilot.pause()
+            return before, app.theme
+
+    before, after = _run(go())
+    assert after != before        # theme still changed in-session despite save failing
+
+
 def test_edit_dispatch_mutates_fields_through_verb(tmp_path):
     dst = tmp_path / ".sdlc"
     shutil.copytree(FIXDIR, dst)
