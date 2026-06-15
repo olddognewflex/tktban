@@ -1,0 +1,88 @@
+#board {
+    height: 1fr;
+}
+
+ColumnWidget {
+    width: 1fr;
+    height: 1fr;
+    border: round $primary 50%;
+    margin: 0 1;
+}
+
+ColumnWidget:focus-within {
+    border: round $primary;
+}
+
+.col-title {
+    width: 100%;
+    text-style: bold;
+    background: $boost;
+    padding: 0 1;
+}
+
+ColumnWidget ListView {
+    height: 1fr;
+    background: transparent;
+}
+
+CardItem {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: thick $surface;
+}
+
+CardItem.--highlight,
+CardItem:hover {
+    border-left: thick $accent;
+}
+
+.card-head {
+    text-style: bold;
+}
+
+.card-summary {
+    color: $text-muted;
+}
+
+.card-meta {
+    color: $accent;
+}
+
+/* ---- modals ---- */
+
+ModalScreen {
+    align: center middle;
+}
+
+#dialog {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: thick $primary;
+    background: $surface;
+}
+
+#dialog Label {
+    margin-bottom: 1;
+    text-style: bold;
+}
+
+#dialog Input {
+    margin-bottom: 1;
+}
+
+#dialog ListView {
+    height: auto;
+    max-height: 12;
+}
+
+#buttons {
+    height: auto;
+    align: center middle;
+}
+
+#buttons Button {
+    margin: 0 1;
+}
