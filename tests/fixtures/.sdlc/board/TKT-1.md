@@ -2,7 +2,7 @@
 type: Story
 status: To Do
 priority: High
-assignee: raymond
+assignee: alice
 labels: []
 blocked_by: []
 blocks: []

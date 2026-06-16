@@ -6,7 +6,7 @@ project  = "TKT"
 [markdown]
 board_dir = ".sdlc/board"
 state_dir = ".sdlc/state"
-me        = "raymond"
+me        = "alice"
 
 [board.roles]
 backlog     = "Backlog"

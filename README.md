@@ -1,6 +1,6 @@
 # tktban
 
-A terminal **kanban board for [tkt](../tkt)**, built with [Textual](https://textual.textualize.io/).
+A terminal **kanban board for tkt**, built with [Textual](https://textual.textualize.io/).
 
 tktban renders a tkt board as columns and lets you move, comment on, and create
 tickets — all through tkt verbs. It speaks **only the tkt CLI verb contract**

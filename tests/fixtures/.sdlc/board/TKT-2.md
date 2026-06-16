@@ -2,7 +2,7 @@
 type: Bug
 status: In Progress
 priority: Highest
-assignee: raymond
+assignee: alice
 labels: []
 blocked_by: []
 blocks: []
