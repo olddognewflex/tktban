@@ -163,9 +163,10 @@ def test_lane_time_badge_populated_and_graceful():
 
     async def go():
         app = BanApp(Tkt(config=FIX))
-        # Deterministic: stub the read-only lane-time call (TKT-1 has time,
-        # everything else has no history -> None -> no badge).
-        app.tkt.lane_time = lambda key, role: {"human": "2h 5m"} if key == "TKT-1" else None
+        app.tkt.lane_time_batch = lambda items: {
+            key: ({"key": key, "human": "2h 5m"} if key == "TKT-1" else {"key": key, "human": ""})
+            for key, _ in items
+        }
         async with app.run_test() as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
