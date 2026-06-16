@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out tktban
+        uses: actions/checkout@v4
+
+      - name: Check out tkt (runtime CLI dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: olddognewflex/tkt
+          path: tkt
+
+      # tktban shells out to `tkt`; the integration tests need the real binary.
+      # tkt is a dependency-free, self-locating stdlib script in a public repo.
+      # Putting its dir on PATH keeps the binary name `tkt` (argv assertions rely on it).
+      - name: Put tkt on PATH
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/tkt/tkt"
+          echo "$GITHUB_WORKSPACE/tkt" >> "$GITHUB_PATH"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: Smoke-check tkt
+        run: tkt --help
+
+      - name: Run tests
+        run: python -m pytest -q

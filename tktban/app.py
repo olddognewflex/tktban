@@ -198,7 +198,7 @@ class BanApp(App):
 
     def _filter_label(self) -> str:
         """Human suffix describing the active filter, e.g.
-        '  ·  filter: @raymond, TKB'. Empty when no filter is set."""
+        '  ·  filter: @alice, TKB'. Empty when no filter is set."""
         parts = []
         if self._filter["assignee"]:
             parts.append(f"@{self._filter['assignee']}")

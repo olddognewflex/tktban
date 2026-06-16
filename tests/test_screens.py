@@ -26,7 +26,7 @@ def _orig(**over):
         "summary": "old summary",
         "description": "old description",
         "priority": "Low",
-        "assignee": "raymond",
+        "assignee": "alice",
         "labels": ["a", "b"],
     }
     base.update(over)
@@ -75,7 +75,7 @@ def _ticket(**over):
         "summary": "Add OAuth login",
         "status": "In Review",
         "status_role": "review",
-        "assignee": "raymond",
+        "assignee": "alice",
         "priority": "High",
         "description": "Body text here.",
         "acceptance": ["criterion one", "criterion two"],
@@ -91,7 +91,7 @@ def test_includes_header_meta_description_acceptance_labels():
     assert md.startswith("# TKT-1 — Add OAuth login")
     assert "**Type:** Story (full_sdlc)" in md
     assert "**Status:** In Review (review)" in md
-    assert "**Assignee:** raymond" in md
+    assert "**Assignee:** alice" in md
     assert "**Priority:** High" in md
     assert "## Description\nBody text here." in md
     assert "## Acceptance" in md
