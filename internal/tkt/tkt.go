@@ -153,6 +153,18 @@ func (t *Tkt) Roles() ([]model.RolePair, error) {
 	return pairs, nil
 }
 
+// BoardHiddenRoles returns the optional `[ui.board] hidden_roles` config
+// default — roles hidden on a board's first run. It is best-effort: a missing
+// key or any read error yields nil, since this is only a default and must never
+// block startup.
+func (t *Tkt) BoardHiddenRoles() []string {
+	var out []string
+	if err := t.runJSON([]string{"cfg", "ui.board.hidden_roles", "--json"}, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 // ListAll returns every ticket on the board. Requires a [queries].all query.
 func (t *Tkt) ListAll() ([]model.Ticket, error) {
 	var out []model.Ticket

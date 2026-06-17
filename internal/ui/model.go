@@ -7,6 +7,9 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,8 +28,15 @@ type filterState struct {
 type Model struct {
 	tkt     *tkt.Tkt
 	roles   []model.RolePair
-	columns []model.Column
+	columns []model.Column // visible columns (allColumns minus hidden), rendered
 	filter  filterState
+
+	// allColumns is the full board from the last refresh; columns is allColumns
+	// with hidden roles removed. hidden is the set of role keys the user has
+	// hidden, persisted to settings.toml and seeded from the [ui.board]
+	// hidden_roles config default on first run.
+	allColumns []model.Column
+	hidden     map[string]bool
 
 	focusCol int
 	sel      map[string]int // role -> selected card index
@@ -72,10 +82,28 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 	if !ok {
 		th, _ = themeByName("textual-dark")
 	}
+	// Seed the hidden set: from persisted settings once the file exists,
+	// otherwise from the [ui.board] hidden_roles config default. "First run" is
+	// "no settings.toml yet", so the config default is re-applied on every launch
+	// until the first Save — which is correct for a default (a later change to
+	// the config default is then honoured). The seed is written into the settings
+	// map, so the first Save (a theme cycle or a hide/show toggle) persists it
+	// rather than clobbering it with an empty value; from then on the persisted
+	// value is authoritative and the config default is ignored.
+	if !fileExists(settingsPath) {
+		if def := tk.BoardHiddenRoles(); len(def) > 0 {
+			s["hidden_roles"] = strings.Join(def, ",")
+		}
+	}
+	hidden := map[string]bool{}
+	for _, r := range parseLabels(str(s["hidden_roles"])) {
+		hidden[r] = true
+	}
 	return Model{
 		tkt:          tk,
 		filter:       filterState{},
 		sel:          map[string]int{},
+		hidden:       hidden,
 		settings:     s,
 		settingsPath: settingsPath,
 		themeName:    th.name,
@@ -83,6 +111,13 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 		refreshSecs:  secs,
 		autoOn:       autoRefresh && refreshInterval > 0,
 	}
+}
+
+// fileExists reports whether path is an existing file (used to detect a board's
+// first run for config-default seeding).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (m Model) Init() tea.Cmd {
@@ -265,6 +300,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n":
 		return m, issueTypesCmd(m.tkt)
+	case "x":
+		return m.hideFocusedColumn()
+	case "X":
+		return m.showAllColumns()
 	case "/":
 		m.modal = newFilterModal(m.filter, m.styles.t.surface)
 		return m, nil
@@ -312,7 +351,8 @@ func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
 	}
 	curRole, curKey := m.currentLocation()
 	m.roles = msg.roles
-	m.columns = msg.columns
+	m.allColumns = msg.columns
+	m.applyHidden()
 	m.loaded = true
 	m.restoreSelection(curRole, curKey)
 	if msg.warn != "" {
@@ -361,6 +401,74 @@ func (m *Model) setStatus(text, kind string) tea.Cmd {
 }
 
 // ---- selection ----
+
+// applyHidden recomputes the visible columns from allColumns minus the hidden
+// set. As a safety net it never hides every column (a board with nothing
+// visible would be useless), so an over-broad or invalid hidden set falls back
+// to showing all columns.
+func (m *Model) applyHidden() {
+	if len(m.hidden) == 0 {
+		m.columns = m.allColumns
+		return
+	}
+	vis := make([]model.Column, 0, len(m.allColumns))
+	for _, c := range m.allColumns {
+		if !m.hidden[c.Role] {
+			vis = append(vis, c)
+		}
+	}
+	if len(vis) == 0 {
+		vis = m.allColumns
+	}
+	m.columns = vis
+}
+
+// hideFocusedColumn hides the focused column, keeps focus on a still-visible
+// column, and persists the new hidden set. It refuses to hide the last visible
+// column.
+func (m Model) hideFocusedColumn() (tea.Model, tea.Cmd) {
+	if m.focusCol < 0 || m.focusCol >= len(m.columns) {
+		return m, nil
+	}
+	if len(m.columns) <= 1 {
+		return m, m.setStatus("Can't hide the last visible column", "warn")
+	}
+	role := m.columns[m.focusCol].Role
+	lane := m.columns[m.focusCol].Lane
+	m.hidden[role] = true
+	m.applyHidden()
+	// The focused column is gone; clamp focus so it lands on a visible column
+	// (the one that shifted into its slot, or the new last column).
+	m.focusCol = clamp(m.focusCol, 0, len(m.columns)-1)
+	return m, m.persistHidden("Hid " + lane + " (X shows all)")
+}
+
+// showAllColumns clears the hidden set and persists it.
+func (m Model) showAllColumns() (tea.Model, tea.Cmd) {
+	if len(m.hidden) == 0 {
+		return m, m.setStatus("No hidden columns", "")
+	}
+	m.hidden = map[string]bool{}
+	m.applyHidden()
+	return m, m.persistHidden("Showing all columns")
+}
+
+// persistHidden stores the hidden set (sorted, comma-joined) in settings.toml,
+// mirroring how the theme is persisted, and reports status.
+func (m *Model) persistHidden(okMsg string) tea.Cmd {
+	roles := make([]string, 0, len(m.hidden))
+	for r := range m.hidden {
+		roles = append(roles, r)
+	}
+	sort.Strings(roles)
+	// Writing "" (show-all) is load-bearing: it makes settings.toml exist, which
+	// suppresses re-seeding from the config default on the next launch.
+	m.settings["hidden_roles"] = strings.Join(roles, ",")
+	if err := settings.Save(m.settingsPath, m.settings); err != nil {
+		return m.setStatus(okMsg+" (not saved: "+err.Error()+")", "warn")
+	}
+	return m.setStatus(okMsg, "")
+}
 
 func (m Model) roleKeys() []string {
 	out := make([]string, len(m.roles))

@@ -69,7 +69,7 @@ func (m Model) autoLabel() string {
 }
 
 func (m Model) renderStatus() string {
-	keys := "r refresh · a auto · t theme · f filter · v view · e edit · m move · c comment · n new · q quit"
+	keys := "r refresh · a auto · t theme · f filter · v view · e edit · m move · c comment · n new · x hide · X show all · q quit"
 	if m.status != "" {
 		st := m.styles.statusBar
 		switch m.statusKind {

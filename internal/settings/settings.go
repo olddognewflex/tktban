@@ -25,7 +25,7 @@ import (
 // Defaults are the known UI preferences and their default values. Extend this
 // as more state is persisted; unknown keys read from disk are ignored so an
 // old/newer file never breaks startup.
-var Defaults = map[string]any{"theme": "textual-dark"}
+var Defaults = map[string]any{"theme": "textual-dark", "hidden_roles": ""}
 
 // DefaultPath is $XDG_CONFIG_HOME/tktban/settings.toml, falling back to
 // ~/.config/tktban/settings.toml.
