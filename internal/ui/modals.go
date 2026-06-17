@@ -490,9 +490,9 @@ func (m createModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 		return m, nil
 	}
 	if m.focus == 0 { // type picker
-		if keyIn(msg, "left", "h") && len(m.types) > 0 {
+		if keyIn(msg, "left", "h", "up", "k") && len(m.types) > 0 {
 			m.typeIdx = (m.typeIdx - 1 + len(m.types)) % len(m.types)
-		} else if keyIn(msg, "right", "l") && len(m.types) > 0 {
+		} else if keyIn(msg, "right", "l", "down", "j") && len(m.types) > 0 {
 			m.typeIdx = (m.typeIdx + 1) % len(m.types)
 		}
 		return m, nil
