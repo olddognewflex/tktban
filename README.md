@@ -1,6 +1,6 @@
 # tktban
 
-A terminal **kanban board for tkt**, built with [Textual](https://textual.textualize.io/).
+A terminal **kanban board for tkt**, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 tktban renders a tkt board as columns and lets you move, comment on, and create
 tickets — all through tkt verbs. It speaks **only the tkt CLI verb contract**
@@ -12,10 +12,10 @@ behaves identically, because all it knows are roles, lanes, and the ticket shape
 ## Install
 
 ```sh
-pip install -e .          # editable; or `pip install .`
+go install github.com/olddognewflex/tktban/cmd/tktban@latest   # or: go build -o tktban ./cmd/tktban
 ```
 
-Requires Python ≥ 3.11 and `tkt` on your `PATH` (or set `TKT_BIN=/path/to/tkt`).
+Requires Go ≥ 1.26 and `tkt` on your `PATH` (or set `TKT_BIN=/path/to/tkt`).
 
 ## The one prerequisite: an `all` query
 
@@ -59,7 +59,7 @@ unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 
 ## How it talks to tkt
 
-`tktban/tkt.py` is the entire coupling surface — a thin subprocess wrapper:
+`internal/tkt/tkt.go` is the entire coupling surface — a thin subprocess wrapper:
 
 | tktban call | tkt verb |
 |-------------|----------|
@@ -76,10 +76,10 @@ every verb).
 ## Development
 
 ```sh
-pip install -e '.[dev]'
-python -m pytest -q
+go build ./...
+go test ./...
 ```
 
-Tests cover the wrapper (subprocess mocked), the board model (pure grouping/sort),
-and the app (Textual headless pilot + a real-tkt write round-trip against
-`tests/fixtures/.sdlc`).
+Tests cover the wrapper (subprocess faked via an injected runner), the board model
+(pure grouping/sort), settings persistence, and the UI model/modals (rendered to
+strings and asserted).
