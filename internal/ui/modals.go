@@ -594,8 +594,9 @@ func (m viewerModal) View(st styles, width, height int) string {
 }
 
 func glamourStyle(t theme) string {
-	// Glamour ships "dark"/"light" base styles; pick by the theme's surface.
-	if t.name == "textual-light" {
+	// Glamour ships "dark"/"light" base styles; pick by the theme's surface
+	// luminance so every light theme (textual-light, catppuccin-latte, …) reads.
+	if t.isLight() {
 		return "light"
 	}
 	return "dark"
