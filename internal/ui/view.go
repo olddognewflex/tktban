@@ -111,7 +111,9 @@ func (m Model) renderBoard(height int) string {
 
 func (m Model) renderColumn(col model.Column, colIdx, innerWidth, innerHeight int) string {
 	focused := colIdx == m.focusCol
-	title := m.styles.colTitle.Width(innerWidth).Render(fmt.Sprintf("%s  (%d)", col.Lane, len(col.Cards)))
+	// The column's Padding(0,1) consumes 2 cols inside innerWidth, so the title's
+	// background bar must be innerWidth-2 wide or it wraps onto a second line.
+	title := m.styles.colTitle.Width(max(innerWidth-2, 1)).Render(fmt.Sprintf("%s  (%d)", col.Lane, len(col.Cards)))
 
 	selIdx := -1
 	if focused && len(col.Cards) > 0 {

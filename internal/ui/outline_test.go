@@ -111,3 +111,21 @@ func TestBoardFillsWidth(t *testing.T) {
 		}
 	}
 }
+
+// Regression: the column title bar must fit on a single line. It has a
+// background, so if it's sized wider than the column's text area it wraps,
+// pushing every card down by a row (the stray block under the title).
+func TestColumnTitleDoesNotWrap(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	defer lipgloss.SetColorProfile(termenv.TrueColor)
+
+	th, _ := themeByName("textual-dark")
+	m := Model{styles: newStyles(th)}
+	col := m.renderColumn(model.Column{Lane: "In Progress", Role: "wip", Cards: []model.Card{{Key: "TKB-1", Summary: "x"}}}, 0, 30, 12)
+
+	lines := strings.Split(col, "\n")
+	// line 0 = column top border, line 1 = title, line 2 = first card's top border.
+	if len(lines) < 3 || !strings.Contains(lines[2], "╭") {
+		t.Fatalf("title appears to wrap (first card not on line 3):\n%s", col)
+	}
+}
