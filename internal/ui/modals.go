@@ -58,6 +58,31 @@ type createCancelMsg struct{}
 
 func send(msg tea.Msg) tea.Cmd { return func() tea.Msg { return msg } }
 
+// opaqueInput paints a text input's text, placeholder, prompt and trailing
+// padding cells with bg so the field reads as solid inside the dialog instead of
+// letting the terminal background show through — bubbles inputs default to no
+// background, which is what made the create/edit box look transparent.
+func opaqueInput(ti textinput.Model, bg lipgloss.Color) textinput.Model {
+	ti.TextStyle = ti.TextStyle.Background(bg)
+	ti.PlaceholderStyle = ti.PlaceholderStyle.Background(bg)
+	ti.PromptStyle = ti.PromptStyle.Background(bg)
+	ti.CompletionStyle = ti.CompletionStyle.Background(bg)
+	return ti
+}
+
+// opaqueArea does the same for a multi-line text area. Every sub-style inherits
+// from Base, so a Base background covers the typed text, prompt, line numbers and
+// the empty rows below the content; CursorLine carries its own background, so set
+// it explicitly too. Apply this before the final Focus/Blur so the textarea's
+// internal active-style pointer repoints into these updated styles.
+func opaqueArea(ta textarea.Model, bg lipgloss.Color) textarea.Model {
+	ta.FocusedStyle.Base = ta.FocusedStyle.Base.Background(bg)
+	ta.FocusedStyle.CursorLine = ta.FocusedStyle.CursorLine.Background(bg)
+	ta.BlurredStyle.Base = ta.BlurredStyle.Base.Background(bg)
+	ta.BlurredStyle.CursorLine = ta.BlurredStyle.CursorLine.Background(bg)
+	return ta
+}
+
 func isKey(msg tea.Msg, names ...string) (string, bool) {
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -130,11 +155,12 @@ type commentModal struct {
 	input textinput.Model
 }
 
-func newCommentModal(card model.Card) commentModal {
+func newCommentModal(card model.Card, surface lipgloss.Color) commentModal {
 	ti := textinput.New()
 	ti.Placeholder = "comment… (enter to submit, esc to cancel)"
 	ti.Focus()
 	ti.Width = 50
+	ti = opaqueInput(ti, surface)
 	return commentModal{card: card, input: ti}
 }
 
@@ -166,7 +192,7 @@ type filterModal struct {
 	focus  int
 }
 
-func newFilterModal(current filterState) filterModal {
+func newFilterModal(current filterState, surface lipgloss.Color) filterModal {
 	assignee := textinput.New()
 	assignee.Placeholder = "assignee (blank = any)"
 	assignee.SetValue(current.assignee)
@@ -176,6 +202,8 @@ func newFilterModal(current filterState) filterModal {
 	prefix.Placeholder = "key prefix, e.g. TKB (blank = any)"
 	prefix.SetValue(current.prefix)
 	prefix.Width = 40
+	assignee = opaqueInput(assignee, surface)
+	prefix = opaqueInput(prefix, surface)
 	return filterModal{inputs: []textinput.Model{assignee, prefix}}
 }
 
@@ -236,7 +264,7 @@ type editModal struct {
 	focus   int // 0..4
 }
 
-func newEditModal(t model.Ticket) editModal {
+func newEditModal(t model.Ticket, surface lipgloss.Color) editModal {
 	orig := ticket.Fields{
 		Summary:     str(t["summary"]),
 		Description: str(t["description"]),
@@ -249,12 +277,13 @@ func newEditModal(t model.Ticket) editModal {
 		ti.Placeholder = ph
 		ti.SetValue(val)
 		ti.Width = 50
-		return ti
+		return opaqueInput(ti, surface)
 	}
 	ta := textarea.New()
 	ta.SetValue(orig.Description)
 	ta.SetHeight(4)
 	ta.SetWidth(52)
+	ta = opaqueArea(ta, surface)
 	em := editModal{
 		key:     str(t["key"]),
 		orig:    orig,
@@ -358,18 +387,18 @@ type createModal struct {
 	errMsg  string
 }
 
-func newCreateModal(types []string) createModal {
+func newCreateModal(types []string, surface lipgloss.Color) createModal {
 	mk := func(ph string) textinput.Model {
 		ti := textinput.New()
 		ti.Placeholder = ph
 		ti.Width = 50
-		return ti
+		return opaqueInput(ti, surface)
 	}
 	mkArea := func() textarea.Model {
 		ta := textarea.New()
 		ta.SetHeight(3)
 		ta.SetWidth(52)
-		return ta
+		return opaqueArea(ta, surface)
 	}
 	cm := createModal{
 		types:   types,
