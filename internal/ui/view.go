@@ -88,14 +88,22 @@ func (m Model) renderBoard(height int) string {
 		return m.styles.statusBar.Render("(no columns — press r to refresh)")
 	}
 	n := len(m.columns)
-	// Account for each column's border+padding (4 cols of chrome) when splitting
-	// the terminal width between columns.
-	colOuter := m.width / n
-	colInner := max(colOuter-4, 8)
+	// Split the full terminal width across columns. lipgloss adds each column's
+	// border (2 cols) outside its set width, while the padding sits inside it, so
+	// only 2 cols of chrome are reserved per column. The width/n remainder is
+	// handed out one col at a time to the leftmost columns so the row fills the
+	// terminal with no dead space on the right.
+	base := m.width / n
+	extra := m.width % n
 	inner := height - 2 // column border top/bottom
 
 	rendered := make([]string, n)
 	for i, col := range m.columns {
+		outer := base
+		if i < extra {
+			outer++
+		}
+		colInner := max(outer-2, 8)
 		rendered[i] = m.renderColumn(col, i, colInner, inner)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, rendered...)

@@ -89,3 +89,25 @@ func TestCardOutlineFitsInColumn(t *testing.T) {
 		t.Fatalf("card outlines fragmented in column (intact top runs=%d bottom=%d, want >=3 each):\n%s", topRuns, botRuns, col)
 	}
 }
+
+// Regression: the board fills the full terminal width with no dead space on the
+// right, for any width (the leftover from width/n is distributed across columns).
+func TestBoardFillsWidth(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	defer lipgloss.SetColorProfile(termenv.TrueColor)
+
+	th, _ := themeByName("textual-dark")
+	var cols []model.Column
+	for _, name := range []string{"Backlog", "To Do", "In Progress", "In Review", "Done", "Blocked"} {
+		cols = append(cols, model.Column{Lane: name, Role: name})
+	}
+	for _, w := range []int{120, 160, 200, 203, 257} {
+		m := Model{styles: newStyles(th), loaded: true, columns: cols, width: w}
+		board := m.renderBoard(20)
+		for ln := range strings.SplitSeq(board, "\n") {
+			if got := lipgloss.Width(ln); got != w {
+				t.Fatalf("width %d: board line is %d cols wide (dead space):\n%q", w, got, ln)
+			}
+		}
+	}
+}
