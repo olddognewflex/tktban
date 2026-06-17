@@ -115,7 +115,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.fail(msg.err)
 		}
 		if msg.purpose == "edit" {
-			m.modal = newEditModal(msg.ticket)
+			m.modal = newEditModal(msg.ticket, m.styles.t.surface)
 		} else {
 			m.modal = newViewerModal(msg.ticket)
 		}
@@ -125,7 +125,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m.fail(msg.err)
 		}
-		m.modal = newCreateModal(msg.types)
+		m.modal = newCreateModal(msg.types, m.styles.t.surface)
 		return m, nil
 
 	case createMsg:
@@ -210,7 +210,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		return m.cycleTheme()
 	case "f":
-		m.modal = newFilterModal(m.filter)
+		m.modal = newFilterModal(m.filter, m.styles.t.surface)
 		return m, nil
 	case "v":
 		return m.openForCard("view")
@@ -228,7 +228,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, m.setStatus("Select a card first", "warn")
 		}
-		m.modal = newCommentModal(card)
+		m.modal = newCommentModal(card, m.styles.t.surface)
 		return m, nil
 	case "n":
 		return m, issueTypesCmd(m.tkt)
