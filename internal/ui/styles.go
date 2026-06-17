@@ -2,6 +2,7 @@ package ui
 
 import (
 	"sort"
+	"strconv"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -24,6 +25,13 @@ type theme struct {
 // themes is the registry, in display (name-sorted) order to match the Python's
 // `sorted(available_themes)` cycle.
 var themes = []theme{
+	// Catppuccin (https://catppuccin.com) — all four official flavors. Fields map
+	// to the palette as: primary=blue, accent=teal, muted=overlay1, surface=base,
+	// boost=surface0, errc=red, fg=text.
+	{"catppuccin-frappe", "#8CAAEE", "#81C8BE", "#838BA7", "#303446", "#414559", "#E78284", "#C6D0F5"},
+	{"catppuccin-latte", "#1E66F5", "#179299", "#8C8FA1", "#EFF1F5", "#CCD0DA", "#D20F39", "#4C4F69"},
+	{"catppuccin-macchiato", "#8AADF4", "#8BD5CA", "#8087A2", "#24273A", "#363A4F", "#ED8796", "#CAD3F5"},
+	{"catppuccin-mocha", "#89B4FA", "#94E2D5", "#7F849C", "#1E1E2E", "#313244", "#F38BA8", "#CDD6F4"},
 	{"dracula", "#BD93F9", "#8BE9FD", "#6272A4", "#282A36", "#44475A", "#FF5555", "#F8F8F2"},
 	{"gruvbox", "#83A598", "#8EC07C", "#928374", "#282828", "#3C3836", "#FB4934", "#EBDBB2"},
 	{"nord", "#81A1C1", "#88C0D0", "#7B88A1", "#2E3440", "#3B4252", "#BF616A", "#ECEFF4"},
@@ -33,6 +41,20 @@ var themes = []theme{
 
 func init() {
 	sort.Slice(themes, func(i, j int) bool { return themes[i].name < themes[j].name })
+}
+
+// isLight reports whether the theme's surface is a light colour, via perceived
+// luminance. Used to pick light/dark variants of derived styles (e.g. glamour)
+// without hardcoding theme names.
+func (t theme) isLight() bool {
+	s := string(t.surface)
+	if len(s) != 7 || s[0] != '#' {
+		return false
+	}
+	r, _ := strconv.ParseInt(s[1:3], 16, 0)
+	g, _ := strconv.ParseInt(s[3:5], 16, 0)
+	b, _ := strconv.ParseInt(s[5:7], 16, 0)
+	return 0.299*float64(r)+0.587*float64(g)+0.114*float64(b) > 128
 }
 
 // themeByName returns the theme with the given name and whether it was found.
