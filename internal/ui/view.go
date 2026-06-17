@@ -135,7 +135,8 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		badge = fmt.Sprintf("  ⛔%d", c.BlockerCount)
 	}
 	head := m.styles.cardHead.Render(prio + c.Key + badge)
-	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-2))
+	// width-4: the card's rounded border (1 each side) plus padding (1 each side).
+	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-4))
 	lines := head + "\n" + summary
 
 	var meta []string
