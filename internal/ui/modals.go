@@ -280,6 +280,7 @@ func newEditModal(t model.Ticket, surface lipgloss.Color) editModal {
 		return opaqueInput(ti, surface)
 	}
 	ta := textarea.New()
+	ta.ShowLineNumbers = false // prose, not code; keeps the blurred preview gutter simple
 	ta.SetValue(orig.Description)
 	ta.SetHeight(4)
 	ta.SetWidth(52)
@@ -363,7 +364,7 @@ func (m editModal) View(st styles, width, height int) string {
 	var b strings.Builder
 	b.WriteString(st.dialogTitle.Render("Edit "+m.key) + "\n")
 	b.WriteString(st.fieldLabel.Render("summary") + "\n" + m.summary.View() + "\n")
-	b.WriteString(st.fieldLabel.Render("description") + "\n" + m.desc.View() + "\n")
+	b.WriteString(st.fieldLabel.Render("description") + "\n" + areaView(m.desc, st) + "\n")
 	b.WriteString(st.fieldLabel.Render("priority") + "\n" + m.prio.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("assignee") + "\n" + m.asgn.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("labels") + "\n" + m.labels.View() + "\n\n")
@@ -396,6 +397,7 @@ func newCreateModal(types []string, surface lipgloss.Color) createModal {
 	}
 	mkArea := func() textarea.Model {
 		ta := textarea.New()
+		ta.ShowLineNumbers = false // prose, not code; keeps the blurred preview gutter simple
 		ta.SetHeight(3)
 		ta.SetWidth(52)
 		return opaqueArea(ta, surface)
@@ -531,8 +533,8 @@ func (m createModal) View(st styles, width, height int) string {
 	b.WriteString(st.dialogTitle.Render("New ticket") + "\n")
 	b.WriteString(typeLine + "\n\n")
 	b.WriteString(st.fieldLabel.Render("summary") + "\n" + m.summary.View() + "\n")
-	b.WriteString(st.fieldLabel.Render("description") + "\n" + m.desc.View() + "\n")
-	b.WriteString(st.fieldLabel.Render("acceptance — one per line") + "\n" + m.accept.View() + "\n")
+	b.WriteString(st.fieldLabel.Render("description") + "\n" + areaView(m.desc, st) + "\n")
+	b.WriteString(st.fieldLabel.Render("acceptance — one per line") + "\n" + areaView(m.accept, st) + "\n")
 	b.WriteString(st.fieldLabel.Render("priority") + "\n" + m.prio.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("assignee") + "\n" + m.asgn.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("labels") + "\n" + m.labels.View() + "\n")
