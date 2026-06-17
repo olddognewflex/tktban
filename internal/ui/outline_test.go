@@ -56,3 +56,36 @@ func TestCardOutlineBrightensWhenSelected(t *testing.T) {
 		t.Fatalf("unselected card border should be muted %q:\n%q", muted, unselected)
 	}
 }
+
+// Regression: a card's full outline must fit within the column's inner width.
+// If it overflows, the column wraps the card and its top/bottom borders split
+// across two lines (the bug that fragmented the board). Assert each card's top
+// and bottom border render as a complete ╭…╮ / ╰…╯ run on a single line.
+func TestCardOutlineFitsInColumn(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+
+	th, _ := themeByName("textual-dark")
+	m := Model{styles: newStyles(th)}
+	cards := []model.Card{
+		{Key: "TKB-1", Summary: "a long summary that will need to be truncated to fit", Priority: "High", Assignee: "raymond", LaneHuman: "10h 5m"},
+		{Key: "TKB-2", Summary: "another card"},
+	}
+	col := m.renderColumn(model.Column{Lane: "To Do", Role: "todo", Cards: cards}, 0, 30, 22)
+
+	var topRuns, botRuns int
+	for ln := range strings.SplitSeq(col, "\n") {
+		// A card border line contains its left+right corner on the same line.
+		if strings.Contains(ln, "╭") && strings.Contains(ln, "╮") && strings.Count(ln, "╭") == 1 {
+			topRuns++
+		}
+		if strings.Contains(ln, "╰") && strings.Contains(ln, "╯") && strings.Count(ln, "╰") == 1 {
+			botRuns++
+		}
+	}
+	// The column itself contributes one ╭…╮ and one ╰…╯; each of the 2 cards adds
+	// one of each. Anything less means a card outline wrapped/fragmented.
+	if topRuns < 3 || botRuns < 3 {
+		t.Fatalf("card outlines fragmented in column (intact top runs=%d bottom=%d, want >=3 each):\n%s", topRuns, botRuns, col)
+	}
+}

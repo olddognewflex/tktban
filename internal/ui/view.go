@@ -135,8 +135,9 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		badge = fmt.Sprintf("  ⛔%d", c.BlockerCount)
 	}
 	head := m.styles.cardHead.Render(prio + c.Key + badge)
-	// width-4: the card's rounded border (1 each side) plus padding (1 each side).
-	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-4))
+	// Card text area = card width minus its border (2) and padding (2). The card
+	// itself is rendered at width-4 (see below), so usable text is width-6.
+	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-6))
 	lines := head + "\n" + summary
 
 	var meta []string
@@ -154,7 +155,11 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	if selected {
 		style = m.styles.cardSelected
 	}
-	return style.Width(width).Render(lines)
+	// The card must fit inside the column's text area, which is the column's
+	// inner width minus its own border+padding. lipgloss also adds the card's
+	// border outside the set width, so the card box is width-4 — otherwise the
+	// card's right border is clipped by the column and the outline fragments.
+	return style.Width(width - 4).Render(lines)
 }
 
 // windowBlocks joins card blocks to fit maxLines, scrolling so the selected
