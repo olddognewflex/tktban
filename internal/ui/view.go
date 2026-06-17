@@ -175,7 +175,7 @@ func windowBlocks(blocks []string, sel, maxLines int) string {
 	for {
 		lines, lastVisible := 0, start-1
 		for i := start; i < len(blocks); i++ {
-			h := strings.Count(blocks[i], "\n") + 1 + 1 // block + margin row
+			h := strings.Count(blocks[i], "\n") + 1 // block lines
 			if lines+h > maxLines {
 				break
 			}
@@ -187,10 +187,10 @@ func windowBlocks(blocks []string, sel, maxLines int) string {
 			for i := start; i <= lastVisible && i < len(blocks); i++ {
 				out = append(out, blocks[i])
 			}
-			// Blank line between cards so they read as visibly separate; the
-			// per-card margin row reserved in the height math above accounts
-			// for it (mirrors the Python's CardItem margin-bottom: 1).
-			return strings.Join(out, "\n\n")
+			// Cards are joined directly: each card's full outline already
+			// separates it from its neighbours, so no extra blank margin row is
+			// needed (that was only required before cards had a border).
+			return strings.Join(out, "\n")
 		}
 		start++ // selected card is below the fold; scroll down
 	}
