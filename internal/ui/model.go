@@ -31,6 +31,12 @@ type Model struct {
 	focusCol int
 	sel      map[string]int // role -> selected card index
 
+	// Vim motion state: pendingCount accumulates a numeric prefix (e.g. 3j),
+	// pendingG records a half-typed `gg` sequence. Both reset on the next
+	// non-digit / non-g key.
+	pendingCount int
+	pendingG     bool
+
 	settings     map[string]any
 	settingsPath string
 	themeName    string
@@ -195,7 +201,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	s := msg.String()
+
+	// Numeric count prefix (vim): 1-9 starts a count, 0 extends one already in
+	// progress. The count is consumed by the next motion.
+	if (len(s) == 1 && s[0] >= '1' && s[0] <= '9') || (m.pendingCount > 0 && s == "0") {
+		if m.pendingCount < 100000 { // cap to avoid overflow on mashed digits
+			m.pendingCount = m.pendingCount*10 + int(s[0]-'0')
+		}
+		return m, nil
+	}
+
+	// `gg` jumps to the first card: the first g arms, the second fires.
+	if s == "g" {
+		if m.pendingG {
+			m.pendingG, m.pendingCount = false, 0
+			m.moveToFirst()
+			return m, nil
+		}
+		m.pendingG = true
+		return m, nil
+	}
+
+	// Any other key ends a pending count / half-typed gg. Motions below consume
+	// the count (default 1); non-motion keys just discard it.
+	count := max(m.pendingCount, 1)
+	m.pendingCount, m.pendingG = 0, false
+
+	switch s {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "r":
@@ -232,17 +265,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n":
 		return m, issueTypesCmd(m.tkt)
+	case "/":
+		m.modal = newFilterModal(m.filter, m.styles.t.surface)
+		return m, nil
 	case "left", "h":
-		m.moveColumn(-1)
+		m.moveColumn(-count)
 		return m, nil
 	case "right", "l":
-		m.moveColumn(1)
+		m.moveColumn(count)
 		return m, nil
 	case "up", "k":
-		m.moveRow(-1)
+		m.moveRow(-count)
 		return m, nil
 	case "down", "j":
-		m.moveRow(1)
+		m.moveRow(count)
+		return m, nil
+	case "G":
+		m.moveToLast()
 		return m, nil
 	}
 	return m, nil
@@ -391,6 +430,26 @@ func (m *Model) moveRow(delta int) {
 		return
 	}
 	m.sel[col.Role] = clamp(m.sel[col.Role]+delta, 0, len(col.Cards)-1)
+}
+
+// moveToFirst / moveToLast jump the selection to the top / bottom card of the
+// focused column (vim gg / G).
+func (m *Model) moveToFirst() {
+	if m.focusCol < 0 || m.focusCol >= len(m.columns) {
+		return
+	}
+	if col := m.columns[m.focusCol]; len(col.Cards) > 0 {
+		m.sel[col.Role] = 0
+	}
+}
+
+func (m *Model) moveToLast() {
+	if m.focusCol < 0 || m.focusCol >= len(m.columns) {
+		return
+	}
+	if col := m.columns[m.focusCol]; len(col.Cards) > 0 {
+		m.sel[col.Role] = len(col.Cards) - 1
+	}
 }
 
 func clamp(v, lo, hi int) int {
