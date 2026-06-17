@@ -88,14 +88,22 @@ func (m Model) renderBoard(height int) string {
 		return m.styles.statusBar.Render("(no columns — press r to refresh)")
 	}
 	n := len(m.columns)
-	// Account for each column's border+padding (4 cols of chrome) when splitting
-	// the terminal width between columns.
-	colOuter := m.width / n
-	colInner := max(colOuter-4, 8)
+	// Split the full terminal width across columns. lipgloss adds each column's
+	// border (2 cols) outside its set width, while the padding sits inside it, so
+	// only 2 cols of chrome are reserved per column. The width/n remainder is
+	// handed out one col at a time to the leftmost columns so the row fills the
+	// terminal with no dead space on the right.
+	base := m.width / n
+	extra := m.width % n
 	inner := height - 2 // column border top/bottom
 
 	rendered := make([]string, n)
 	for i, col := range m.columns {
+		outer := base
+		if i < extra {
+			outer++
+		}
+		colInner := max(outer-2, 8)
 		rendered[i] = m.renderColumn(col, i, colInner, inner)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
@@ -103,7 +111,9 @@ func (m Model) renderBoard(height int) string {
 
 func (m Model) renderColumn(col model.Column, colIdx, innerWidth, innerHeight int) string {
 	focused := colIdx == m.focusCol
-	title := m.styles.colTitle.Width(innerWidth).Render(fmt.Sprintf("%s  (%d)", col.Lane, len(col.Cards)))
+	// The column's Padding(0,1) consumes 2 cols inside innerWidth, so the title's
+	// background bar must be innerWidth-2 wide or it wraps onto a second line.
+	title := m.styles.colTitle.Width(max(innerWidth-2, 1)).Render(fmt.Sprintf("%s  (%d)", col.Lane, len(col.Cards)))
 
 	selIdx := -1
 	if focused && len(col.Cards) > 0 {
@@ -135,7 +145,9 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		badge = fmt.Sprintf("  ⛔%d", c.BlockerCount)
 	}
 	head := m.styles.cardHead.Render(prio + c.Key + badge)
-	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-2))
+	// Card text area = card width minus its border (2) and padding (2). The card
+	// itself is rendered at width-4 (see below), so usable text is width-6.
+	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-6))
 	lines := head + "\n" + summary
 
 	var meta []string
@@ -153,7 +165,11 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	if selected {
 		style = m.styles.cardSelected
 	}
-	return style.Width(width).Render(lines)
+	// The card must fit inside the column's text area, which is the column's
+	// inner width minus its own border+padding. lipgloss also adds the card's
+	// border outside the set width, so the card box is width-4 — otherwise the
+	// card's right border is clipped by the column and the outline fragments.
+	return style.Width(width - 4).Render(lines)
 }
 
 // windowBlocks joins card blocks to fit maxLines, scrolling so the selected
@@ -169,7 +185,7 @@ func windowBlocks(blocks []string, sel, maxLines int) string {
 	for {
 		lines, lastVisible := 0, start-1
 		for i := start; i < len(blocks); i++ {
-			h := strings.Count(blocks[i], "\n") + 1 + 1 // block + margin row
+			h := strings.Count(blocks[i], "\n") + 1 // block lines
 			if lines+h > maxLines {
 				break
 			}
@@ -181,10 +197,10 @@ func windowBlocks(blocks []string, sel, maxLines int) string {
 			for i := start; i <= lastVisible && i < len(blocks); i++ {
 				out = append(out, blocks[i])
 			}
-			// Blank line between cards so they read as visibly separate; the
-			// per-card margin row reserved in the height math above accounts
-			// for it (mirrors the Python's CardItem margin-bottom: 1).
-			return strings.Join(out, "\n\n")
+			// Cards are joined directly: each card's full outline already
+			// separates it from its neighbours, so no extra blank margin row is
+			// needed (that was only required before cards had a border).
+			return strings.Join(out, "\n")
 		}
 		start++ // selected card is below the fold; scroll down
 	}
