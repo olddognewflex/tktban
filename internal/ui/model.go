@@ -169,6 +169,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modal = newCreateModal(msg.types, msg.priorities, m.styles.t.surface, m.width, m.height)
 		return m, nil
 
+	case editorPrepMsg:
+		if msg.err != nil {
+			return m.fail(msg.err)
+		}
+		return m, launchEditorCmd(msg)
+
+	case editorClosedMsg:
+		return m.onEditorClosed(msg)
+
+	case applyDoneMsg:
+		return m.onApplyDone(msg)
+
 	case createMsg:
 		return m.onCreate(msg)
 
@@ -300,6 +312,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n":
 		return m, issueTypesCmd(m.tkt)
+	case "N":
+		return m, prepEditorCreateCmd(m.tkt)
+	case "E":
+		card, ok := m.selectedCard()
+		if !ok {
+			return m, m.setStatus("Select a card first", "warn")
+		}
+		return m, prepEditorEditCmd(m.tkt, card.Key)
 	case "x":
 		return m.hideFocusedColumn()
 	case "X":

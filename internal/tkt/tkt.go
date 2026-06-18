@@ -153,6 +153,37 @@ func (t *Tkt) Roles() ([]model.RolePair, error) {
 	return pairs, nil
 }
 
+// ApplyTemplate returns the create-document markdown template
+// (`tkt apply --template`) used to pre-fill a new ticket in $EDITOR.
+func (t *Tkt) ApplyTemplate() (string, error) {
+	out, err := t.runArgs([]string{"apply", "--template"})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// Apply ingests a full ticket markdown file via `tkt apply`. isNew creates a new
+// ticket (key ignored); otherwise it updates key. Returns the resulting ticket
+// key (the backend assigns it on create).
+func (t *Tkt) Apply(key string, isNew bool, file string) (string, error) {
+	args := []string{"apply"}
+	if isNew {
+		args = append(args, "--new")
+	} else {
+		args = append(args, key)
+	}
+	args = append(args, "--file", file, "--json")
+	var out model.Ticket
+	if err := t.runJSON(args, &out); err != nil {
+		return "", err
+	}
+	if k, _ := out["key"].(string); k != "" {
+		return k, nil
+	}
+	return key, nil
+}
+
 // Priorities returns the configured priority names from `tkt cfg priorities
 // --json`, in configured order. Empty on error so the create/edit forms degrade
 // to a blank (backend-default) selection rather than failing to open.

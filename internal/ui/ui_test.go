@@ -34,6 +34,10 @@ func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int
 		return []byte(`{"full_sdlc":["Story","Bug"],"deliverable":["Task"]}`), nil, 0, nil
 	case eq(args, "cfg", "priorities", "--json"):
 		return []byte(`["Highest","High","Medium","Low","Lowest"]`), nil, 0, nil
+	case len(args) >= 2 && args[0] == "apply" && args[1] == "--template":
+		return []byte("---\ntype: Story\npriority: Medium\n---\n# summary\n\nbody\n"), nil, 0, nil
+	case len(args) >= 1 && args[0] == "apply":
+		return []byte(`{"key":"TKB-99"}`), nil, 0, nil
 	default: // transition, comment, edit, create
 		return []byte(`{"key":"TKT-1"}`), nil, 0, nil
 	}
