@@ -23,7 +23,7 @@ func withTrueColor(t *testing.T) {
 func TestHighlightAreaMatchesTextareaFootprint(t *testing.T) {
 	withTrueColor(t)
 	th, _ := themeByName("textual-dark")
-	cm := newCreateModal([]string{"Story"}, th.surface)
+	cm := newCreateModal([]string{"Story"}, nil, th.surface)
 	ta := cm.desc
 	ta.SetValue("# Heading\n- item one\n`code` and **bold**")
 
@@ -68,7 +68,7 @@ func TestAreaViewLeavesValueByteIdentical(t *testing.T) {
 	withTrueColor(t)
 	th, _ := themeByName("textual-dark")
 	st := newStyles(th)
-	cm := newCreateModal([]string{"Story"}, th.surface)
+	cm := newCreateModal([]string{"Story"}, nil, th.surface)
 	const body = "# Title\n\n- a\n- b\n\n`x` **y** _z_"
 	cm.desc.SetValue(body)
 	cm.desc.Blur()
@@ -85,7 +85,7 @@ func TestAreaViewFocusedIsPlain(t *testing.T) {
 	withTrueColor(t)
 	th, _ := themeByName("textual-dark")
 	st := newStyles(th)
-	cm := newCreateModal([]string{"Story"}, th.surface)
+	cm := newCreateModal([]string{"Story"}, nil, th.surface)
 	cm.desc.SetValue("# Heading")
 	cm.desc.Focus()
 	if got, want := areaView(cm.desc, st), cm.desc.View(); got != want {
@@ -99,7 +99,7 @@ func TestAreaViewFallbacks(t *testing.T) {
 	withTrueColor(t)
 	th, _ := themeByName("textual-dark")
 	st := newStyles(th)
-	cm := newCreateModal([]string{"Story"}, th.surface)
+	cm := newCreateModal([]string{"Story"}, nil, th.surface)
 	cm.desc.Blur() // empty + blurred
 	if got, want := areaView(cm.desc, st), cm.desc.View(); got != want {
 		t.Fatal("empty blurred editor should render plain textarea view")
@@ -141,7 +141,7 @@ func TestEditModalDescriptionHighlights(t *testing.T) {
 	withTrueColor(t)
 	th, _ := themeByName("textual-dark")
 	st := newStyles(th)
-	em := newEditModal(model.Ticket{"key": "TKB-1", "summary": "x", "description": "# Heading\n- item"}, th.surface)
+	em := newEditModal(model.Ticket{"key": "TKB-1", "summary": "x", "description": "# Heading\n- item"}, nil, th.surface)
 	em.focus = 0 // summary focused → description blurred
 	em.refocus()
 	out := em.View(st, 80, 30)

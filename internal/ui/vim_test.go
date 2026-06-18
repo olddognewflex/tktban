@@ -153,7 +153,7 @@ func TestVimGDiscardsCount(t *testing.T) {
 // j/k drive the create modal's type picker (a select list).
 func TestVimCreateTypePickerJK(t *testing.T) {
 	th, _ := themeByName("textual-dark")
-	cm := newCreateModal([]string{"Story", "Bug", "Task"}, th.surface)
+	cm := newCreateModal([]string{"Story", "Bug", "Task"}, nil, th.surface)
 	// focus 0 is the type picker by default; typeIdx starts at -1 (none chosen).
 	nm, _ := cm.Update(key("j"))
 	cm = nm.(createModal)

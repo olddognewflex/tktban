@@ -21,16 +21,20 @@ type boardMsg struct {
 }
 
 // ticketMsg is a fetched ticket for the viewer or editor (purpose distinguishes).
+// priorities feeds the editor's priority select box.
 type ticketMsg struct {
-	ticket  model.Ticket
-	purpose string // "view" | "edit"
-	err     error
+	ticket     model.Ticket
+	purpose    string // "view" | "edit"
+	priorities []string
+	err        error
 }
 
-// issueTypesMsg is the flattened list of configured issue types for the creator.
+// issueTypesMsg is the flattened list of configured issue types for the creator,
+// plus the configured priorities for its priority select box.
 type issueTypesMsg struct {
-	types []string
-	err   error
+	types      []string
+	priorities []string
+	err        error
 }
 
 // writeMsg is the result of a transition/comment/edit write.
@@ -105,7 +109,13 @@ func attachLaneTime(tk *tkt.Tkt, tickets []model.Ticket) string {
 func viewCmd(tk *tkt.Tkt, key, purpose string) tea.Cmd {
 	return func() tea.Msg {
 		t, err := tk.View(key)
-		return ticketMsg{ticket: t, purpose: purpose, err: err}
+		// Priorities feed the editor's select box; best-effort (the editor still
+		// opens with a blank/default selection if the lookup fails).
+		var priorities []string
+		if purpose == "edit" {
+			priorities = tk.Priorities()
+		}
+		return ticketMsg{ticket: t, purpose: purpose, priorities: priorities, err: err}
 	}
 }
 
@@ -115,7 +125,7 @@ func issueTypesCmd(tk *tkt.Tkt) tea.Cmd {
 		if err != nil {
 			return issueTypesMsg{err: err}
 		}
-		return issueTypesMsg{types: flattenTypes(types)}
+		return issueTypesMsg{types: flattenTypes(types), priorities: tk.Priorities()}
 	}
 }
 

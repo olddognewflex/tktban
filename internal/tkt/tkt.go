@@ -153,6 +153,17 @@ func (t *Tkt) Roles() ([]model.RolePair, error) {
 	return pairs, nil
 }
 
+// Priorities returns the configured priority names from `tkt cfg priorities
+// --json`, in configured order. Empty on error so the create/edit forms degrade
+// to a blank (backend-default) selection rather than failing to open.
+func (t *Tkt) Priorities() []string {
+	var out []string
+	if err := t.runJSON([]string{"cfg", "priorities", "--json"}, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 // BoardHiddenRoles returns the optional `[ui.board] hidden_roles` config
 // default — roles hidden on a board's first run. It is best-effort: a missing
 // key or any read error yields nil, since this is only a default and must never

@@ -83,6 +83,87 @@ func opaqueArea(ta textarea.Model, bg lipgloss.Color) textarea.Model {
 	return ta
 }
 
+// selectField is a horizontal option picker (like the create modal's type
+// picker) used for priority. The selection cycles through the configured options
+// plus a blank slot (idx -1) meaning "no selection" — which submits without a
+// --priority flag so the backend default applies.
+type selectField struct {
+	options []string
+	idx     int // -1 = blank/default
+}
+
+// newSelectField builds a picker over options, pre-selecting current. A non-empty
+// current that isn't among the configured options is appended so a ticket with a
+// stored-but-unconfigured priority still displays and stays editable.
+func newSelectField(options []string, current string) selectField {
+	opts := append([]string(nil), options...)
+	idx := -1
+	for i, o := range opts {
+		if o == current {
+			idx = i
+			break
+		}
+	}
+	if current != "" && idx == -1 {
+		opts = append(opts, current)
+		idx = len(opts) - 1
+	}
+	return selectField{options: opts, idx: idx}
+}
+
+func (s selectField) value() string {
+	if s.idx < 0 || s.idx >= len(s.options) {
+		return ""
+	}
+	return s.options[s.idx]
+}
+
+// display is the label shown in the form; blank reads as "(default)".
+func (s selectField) display() string {
+	if v := s.value(); v != "" {
+		return v
+	}
+	return "(default)"
+}
+
+// next/prev cycle through the options and the blank slot.
+func (s *selectField) next() {
+	if s.idx >= len(s.options)-1 {
+		s.idx = -1
+	} else {
+		s.idx++
+	}
+}
+
+func (s *selectField) prev() {
+	if s.idx <= -1 {
+		s.idx = len(s.options) - 1
+	} else {
+		s.idx--
+	}
+}
+
+// cyclePicker advances a selectField on the picker navigation keys (arrows,
+// vim h/l/j/k). Other keys are ignored, so the field is inert to typing.
+func cyclePicker(s *selectField, msg tea.Msg) {
+	switch {
+	case keyIn(msg, "left", "h", "up", "k"):
+		s.prev()
+	case keyIn(msg, "right", "l", "down", "j"):
+		s.next()
+	}
+}
+
+// pickerLine renders a single-line horizontal picker (type, priority), showing
+// the ◄ ► affordance and a ▸ marker when focused — mirrors the type picker.
+func pickerLine(st styles, label, value string, focused bool) string {
+	line := label + ": " + value
+	if focused {
+		return st.cardMeta.Render("▸ " + line + "  ◄ ►")
+	}
+	return "  " + line
+}
+
 func isKey(msg tea.Msg, names ...string) (string, bool) {
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -258,13 +339,13 @@ type editModal struct {
 	orig    ticket.Fields
 	summary textinput.Model
 	desc    textarea.Model
-	prio    textinput.Model
+	prio    selectField
 	asgn    textinput.Model
 	labels  textinput.Model
-	focus   int // 0..4
+	focus   int // 0..4 (2 = priority picker)
 }
 
-func newEditModal(t model.Ticket, surface lipgloss.Color) editModal {
+func newEditModal(t model.Ticket, priorities []string, surface lipgloss.Color) editModal {
 	orig := ticket.Fields{
 		Summary:     str(t["summary"]),
 		Description: str(t["description"]),
@@ -290,7 +371,7 @@ func newEditModal(t model.Ticket, surface lipgloss.Color) editModal {
 		orig:    orig,
 		summary: mk(orig.Summary, "summary"),
 		desc:    ta,
-		prio:    mk(orig.Priority, "priority"),
+		prio:    newSelectField(priorities, orig.Priority),
 		asgn:    mk(orig.Assignee, "assignee"),
 		labels:  mk(strings.Join(orig.Labels, ", "), "labels (comma-separated)"),
 	}
@@ -301,7 +382,6 @@ func newEditModal(t model.Ticket, surface lipgloss.Color) editModal {
 func (m *editModal) refocus() {
 	m.summary.Blur()
 	m.desc.Blur()
-	m.prio.Blur()
 	m.asgn.Blur()
 	m.labels.Blur()
 	switch m.focus {
@@ -309,20 +389,19 @@ func (m *editModal) refocus() {
 		m.summary.Focus()
 	case 1:
 		m.desc.Focus()
-	case 2:
-		m.prio.Focus()
 	case 3:
 		m.asgn.Focus()
 	case 4:
 		m.labels.Focus()
 	}
+	// case 2 is the priority picker — a selectField with no focus state.
 }
 
 func (m editModal) current() ticket.Fields {
 	return ticket.Fields{
 		Summary:     m.summary.Value(),
 		Description: m.desc.Value(),
-		Priority:    m.prio.Value(),
+		Priority:    m.prio.value(),
 		Assignee:    m.asgn.Value(),
 		Labels:      parseLabels(m.labels.Value()),
 	}
@@ -344,14 +423,16 @@ func (m editModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 		m.refocus()
 		return m, nil
 	}
+	if m.focus == 2 { // priority picker
+		cyclePicker(&m.prio, msg)
+		return m, nil
+	}
 	var cmd tea.Cmd
 	switch m.focus {
 	case 0:
 		m.summary, cmd = m.summary.Update(msg)
 	case 1:
 		m.desc, cmd = m.desc.Update(msg)
-	case 2:
-		m.prio, cmd = m.prio.Update(msg)
 	case 3:
 		m.asgn, cmd = m.asgn.Update(msg)
 	case 4:
@@ -365,10 +446,10 @@ func (m editModal) View(st styles, width, height int) string {
 	b.WriteString(st.dialogTitle.Render("Edit "+m.key) + "\n")
 	b.WriteString(st.fieldLabel.Render("summary") + "\n" + m.summary.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("description") + "\n" + areaView(m.desc, st) + "\n")
-	b.WriteString(st.fieldLabel.Render("priority") + "\n" + m.prio.View() + "\n")
+	b.WriteString(pickerLine(st, "priority", m.prio.display(), m.focus == 2) + "\n")
 	b.WriteString(st.fieldLabel.Render("assignee") + "\n" + m.asgn.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("labels") + "\n" + m.labels.View() + "\n\n")
-	b.WriteString(st.fieldLabel.Render("tab next field · ctrl+s save · esc cancel"))
+	b.WriteString(st.fieldLabel.Render("tab next field · ◄/► priority · ctrl+s save · esc cancel"))
 	return dialogBox(st, width, height, b.String())
 }
 
@@ -380,15 +461,15 @@ type createModal struct {
 	summary textinput.Model
 	desc    textarea.Model
 	accept  textarea.Model
-	prio    textinput.Model
+	prio    selectField
 	asgn    textinput.Model
 	labels  textinput.Model
-	focus   int // 0..6 (0 = type picker)
+	focus   int // 0..6 (0 = type picker, 4 = priority picker)
 	busy    bool
 	errMsg  string
 }
 
-func newCreateModal(types []string, surface lipgloss.Color) createModal {
+func newCreateModal(types, priorities []string, surface lipgloss.Color) createModal {
 	mk := func(ph string) textinput.Model {
 		ti := textinput.New()
 		ti.Placeholder = ph
@@ -408,7 +489,7 @@ func newCreateModal(types []string, surface lipgloss.Color) createModal {
 		summary: mk("summary"),
 		desc:    mkArea(),
 		accept:  mkArea(),
-		prio:    mk("priority (optional)"),
+		prio:    newSelectField(priorities, ""),
 		asgn:    mk("assignee (optional, blank = you)"),
 		labels:  mk("labels (optional, comma-separated)"),
 	}
@@ -420,7 +501,6 @@ func (m *createModal) refocus() {
 	m.summary.Blur()
 	m.desc.Blur()
 	m.accept.Blur()
-	m.prio.Blur()
 	m.asgn.Blur()
 	m.labels.Blur()
 	switch m.focus {
@@ -430,13 +510,12 @@ func (m *createModal) refocus() {
 		m.desc.Focus()
 	case 3:
 		m.accept.Focus()
-	case 4:
-		m.prio.Focus()
 	case 5:
 		m.asgn.Focus()
 	case 6:
 		m.labels.Focus()
 	}
+	// case 4 is the priority picker — a selectField with no focus state.
 }
 
 func (m createModal) typeName() string {
@@ -457,7 +536,7 @@ func (m createModal) validate() (createPayload, string) {
 	return createPayload{
 		issueType: m.types[m.typeIdx],
 		summary:   summary,
-		priority:  strings.TrimSpace(m.prio.Value()),
+		priority:  m.prio.value(),
 		assignee:  strings.TrimSpace(m.asgn.Value()),
 		body:      ticket.BuildBody(m.desc.Value(), m.accept.Value()),
 		labels:    parseLabels(m.labels.Value()),
@@ -497,6 +576,10 @@ func (m createModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.focus == 4 { // priority picker
+		cyclePicker(&m.prio, msg)
+		return m, nil
+	}
 	var cmd tea.Cmd
 	switch m.focus {
 	case 1:
@@ -505,8 +588,6 @@ func (m createModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 		m.desc, cmd = m.desc.Update(msg)
 	case 3:
 		m.accept, cmd = m.accept.Update(msg)
-	case 4:
-		m.prio, cmd = m.prio.Update(msg)
 	case 5:
 		m.asgn, cmd = m.asgn.Update(msg)
 	case 6:
@@ -523,25 +604,19 @@ func (m createModal) withError(message string) createModal {
 }
 
 func (m createModal) View(st styles, width, height int) string {
-	typeLine := "type: " + m.typeName()
-	if m.focus == 0 {
-		typeLine = st.cardMeta.Render("▸ " + typeLine + "  ◄ ►")
-	} else {
-		typeLine = "  " + typeLine
-	}
 	var b strings.Builder
 	b.WriteString(st.dialogTitle.Render("New ticket") + "\n")
-	b.WriteString(typeLine + "\n\n")
+	b.WriteString(pickerLine(st, "type", m.typeName(), m.focus == 0) + "\n\n")
 	b.WriteString(st.fieldLabel.Render("summary") + "\n" + m.summary.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("description") + "\n" + areaView(m.desc, st) + "\n")
 	b.WriteString(st.fieldLabel.Render("acceptance — one per line") + "\n" + areaView(m.accept, st) + "\n")
-	b.WriteString(st.fieldLabel.Render("priority") + "\n" + m.prio.View() + "\n")
+	b.WriteString(pickerLine(st, "priority", m.prio.display(), m.focus == 4) + "\n")
 	b.WriteString(st.fieldLabel.Render("assignee") + "\n" + m.asgn.View() + "\n")
 	b.WriteString(st.fieldLabel.Render("labels") + "\n" + m.labels.View() + "\n")
 	if m.errMsg != "" {
 		b.WriteString("\n" + st.errorText.Render(m.errMsg) + "\n")
 	}
-	hint := "tab next · ←/→ pick type · ctrl+s create · esc cancel"
+	hint := "tab next · ←/► pick type/priority · ctrl+s create · esc cancel"
 	if m.busy {
 		hint = "Creating…"
 	}

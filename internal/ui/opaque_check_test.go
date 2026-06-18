@@ -36,7 +36,7 @@ func TestCreateModalIsOpaque(t *testing.T) {
 	defer lipgloss.SetColorProfile(termenv.Ascii)
 
 	th, _ := themeByName("textual-dark")
-	cm := newCreateModal([]string{"Story", "Bug"}, th.surface)
+	cm := newCreateModal([]string{"Story", "Bug"}, nil, th.surface)
 	out := cm.View(newStyles(th), 80, 30)
 	fieldRowsAreOpaque(t, out, "summary", "priority", "labels")
 }
@@ -46,7 +46,7 @@ func TestEditModalIsOpaque(t *testing.T) {
 	defer lipgloss.SetColorProfile(termenv.Ascii)
 
 	th, _ := themeByName("textual-dark")
-	em := newEditModal(model.Ticket{"key": "TKB-1", "summary": "x"}, th.surface)
+	em := newEditModal(model.Ticket{"key": "TKB-1", "summary": "x"}, nil, th.surface)
 	out := em.View(newStyles(th), 80, 30)
 	fieldRowsAreOpaque(t, out, "summary", "priority", "labels")
 }
