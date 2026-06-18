@@ -173,6 +173,16 @@ func isKey(msg tea.Msg, names ...string) (string, bool) {
 	return s, slices.Contains(names, s)
 }
 
+// modalFieldWidth returns the input width for the create/edit forms: about 80%
+// of the screen (mirroring the viewer), bounded so it never underflows on a tiny
+// terminal or overflows the dialog's border+padding chrome.
+func modalFieldWidth(width int) int {
+	if width <= 0 {
+		return 52 // unsized (e.g. before the first WindowSizeMsg): legacy default
+	}
+	return clamp(width*8/10, 40, max(width-10, 40))
+}
+
 // dialogBox centers a rendered dialog body on screen.
 func dialogBox(st styles, width, height int, body string) string {
 	box := st.dialog.Render(body)
@@ -345,7 +355,7 @@ type editModal struct {
 	focus   int // 0..4 (2 = priority picker)
 }
 
-func newEditModal(t model.Ticket, priorities []string, surface lipgloss.Color) editModal {
+func newEditModal(t model.Ticket, priorities []string, surface lipgloss.Color, width, height int) editModal {
 	orig := ticket.Fields{
 		Summary:     str(t["summary"]),
 		Description: str(t["description"]),
@@ -353,18 +363,22 @@ func newEditModal(t model.Ticket, priorities []string, surface lipgloss.Color) e
 		Assignee:    str(t["assignee"]),
 		Labels:      strList(t["labels"]),
 	}
+	// Size the form to roughly the viewer's 80%×80% footprint (TKB-18). The
+	// single description area takes the vertical space left after the form chrome.
+	fieldW := modalFieldWidth(width)
+	descH := max(height*8/10-15, 4)
 	mk := func(val, ph string) textinput.Model {
 		ti := textinput.New()
 		ti.Placeholder = ph
 		ti.SetValue(val)
-		ti.Width = 50
+		ti.Width = fieldW
 		return opaqueInput(ti, surface)
 	}
 	ta := textarea.New()
 	ta.ShowLineNumbers = false // prose, not code; keeps the blurred preview gutter simple
 	ta.SetValue(orig.Description)
-	ta.SetHeight(4)
-	ta.SetWidth(52)
+	ta.SetHeight(descH)
+	ta.SetWidth(fieldW + 2)
 	ta = opaqueArea(ta, surface)
 	em := editModal{
 		key:     str(t["key"]),
@@ -469,18 +483,22 @@ type createModal struct {
 	errMsg  string
 }
 
-func newCreateModal(types, priorities []string, surface lipgloss.Color) createModal {
+func newCreateModal(types, priorities []string, surface lipgloss.Color, width, height int) createModal {
+	// Size the form to roughly the viewer's 80%×80% footprint (TKB-18). The two
+	// text areas split the vertical space left after the form chrome.
+	fieldW := modalFieldWidth(width)
+	areaH := max((height*8/10-18)/2, 3)
 	mk := func(ph string) textinput.Model {
 		ti := textinput.New()
 		ti.Placeholder = ph
-		ti.Width = 50
+		ti.Width = fieldW
 		return opaqueInput(ti, surface)
 	}
 	mkArea := func() textarea.Model {
 		ta := textarea.New()
 		ta.ShowLineNumbers = false // prose, not code; keeps the blurred preview gutter simple
-		ta.SetHeight(3)
-		ta.SetWidth(52)
+		ta.SetHeight(areaH)
+		ta.SetWidth(fieldW + 2)
 		return opaqueArea(ta, surface)
 	}
 	cm := createModal{

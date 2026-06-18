@@ -156,7 +156,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.fail(msg.err)
 		}
 		if msg.purpose == "edit" {
-			m.modal = newEditModal(msg.ticket, msg.priorities, m.styles.t.surface)
+			m.modal = newEditModal(msg.ticket, msg.priorities, m.styles.t.surface, m.width, m.height)
 		} else {
 			m.modal = newViewerModal(msg.ticket)
 		}
@@ -166,7 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m.fail(msg.err)
 		}
-		m.modal = newCreateModal(msg.types, msg.priorities, m.styles.t.surface)
+		m.modal = newCreateModal(msg.types, msg.priorities, m.styles.t.surface, m.width, m.height)
 		return m, nil
 
 	case createMsg:
