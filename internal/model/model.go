@@ -50,6 +50,9 @@ type Card struct {
 	StatusRole   string
 	BlockerCount int
 	LaneHuman    string // human time-in-current-lane, e.g. "6h 10m" (empty = unknown)
+	Due          string // optional dates, "YYYY-MM-DD" or "" when unset
+	Scheduled    string
+	Completed    string
 }
 
 // CardFromTicket builds a Card from a normalized ticket dict.
@@ -62,6 +65,9 @@ func CardFromTicket(t Ticket) Card {
 		StatusRole:   getStr(t, "status_role"),
 		BlockerCount: unresolvedBlockers(t),
 		LaneHuman:    getStr(t, "lane_human"),
+		Due:          getStr(t, "due"),
+		Scheduled:    getStr(t, "scheduled"),
+		Completed:    getStr(t, "completed"),
 	}
 }
 

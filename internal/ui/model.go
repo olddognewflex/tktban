@@ -310,6 +310,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.modal = newCommentModal(card, m.styles.t.surface)
 		return m, nil
+	case "d":
+		card, ok := m.selectedCard()
+		if !ok {
+			return m, m.setStatus("Select a card first", "warn")
+		}
+		m.modal = newDateModal(card, today())
+		return m, nil
 	case "n":
 		return m, issueTypesCmd(m.tkt)
 	case "N":
