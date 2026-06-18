@@ -32,6 +32,8 @@ func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int
 		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"todo","description":"d","labels":[],"blocked_by":[]}`), nil, 0, nil
 	case eq(args, "cfg", "issue_types", "--json"):
 		return []byte(`{"full_sdlc":["Story","Bug"],"deliverable":["Task"]}`), nil, 0, nil
+	case eq(args, "cfg", "priorities", "--json"):
+		return []byte(`["Highest","High","Medium","Low","Lowest"]`), nil, 0, nil
 	default: // transition, comment, edit, create
 		return []byte(`{"key":"TKT-1"}`), nil, 0, nil
 	}
