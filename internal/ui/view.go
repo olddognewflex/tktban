@@ -69,7 +69,7 @@ func (m Model) autoLabel() string {
 }
 
 func (m Model) renderStatus() string {
-	keys := "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · n new · N new-in-$EDITOR · x hide · X show all · q quit"
+	keys := "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · n new · N new-in-$EDITOR · x hide · X show all · q quit"
 	if m.status != "" {
 		st := m.styles.statusBar
 		switch m.statusKind {
@@ -159,6 +159,9 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	}
 	if len(meta) > 0 {
 		lines += "\n" + m.styles.cardMeta.Render(strings.Join(meta, "  "))
+	}
+	if dates := m.dateBadges(c, width-6); dates != "" {
+		lines += "\n" + dates
 	}
 
 	style := m.styles.card

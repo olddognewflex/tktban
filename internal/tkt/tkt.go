@@ -349,6 +349,11 @@ type EditOpts struct {
 	Assignee     *string
 	AddLabels    []string
 	RemoveLabels []string
+	// Dates: nil = leave unchanged; a pointer to "" clears the date; otherwise
+	// set it ("YYYY-MM-DD").
+	Due       *string
+	Scheduled *string
+	Completed *string
 }
 
 // Edit edits content/fields via `tkt edit`. Only set fields are sent.
@@ -371,6 +376,15 @@ func (t *Tkt) Edit(key string, opts EditOpts) (model.Ticket, error) {
 	}
 	for _, l := range opts.RemoveLabels {
 		args = append(args, "--remove-label", l)
+	}
+	if opts.Due != nil {
+		args = append(args, "--due", *opts.Due)
+	}
+	if opts.Scheduled != nil {
+		args = append(args, "--scheduled", *opts.Scheduled)
+	}
+	if opts.Completed != nil {
+		args = append(args, "--completed", *opts.Completed)
 	}
 	args = append(args, "--json")
 	var out model.Ticket
