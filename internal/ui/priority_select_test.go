@@ -60,7 +60,7 @@ func TestSelectFieldUnknownStoredValue(t *testing.T) {
 // cycle keys change it, and an untouched picker submits a blank priority.
 func TestCreateModalPriorityPicker(t *testing.T) {
 	th, _ := themeByName("textual-dark")
-	cm := newCreateModal([]string{"Story"}, prios, th.surface)
+	cm := newCreateModal([]string{"Story"}, prios, th.surface, 120, 40)
 	cm.typeIdx = 0 // choose a type so validate() passes
 	cm.summary.SetValue("s")
 	cm.focus = 4 // priority picker
@@ -97,7 +97,7 @@ func TestPriorityPickerNilOptions(t *testing.T) {
 		t.Fatalf("nil options not inert: value=%q display=%q", s.value(), s.display())
 	}
 	th, _ := themeByName("textual-dark")
-	cm := newCreateModal([]string{"Story"}, nil, th.surface)
+	cm := newCreateModal([]string{"Story"}, nil, th.surface, 120, 40)
 	cm.typeIdx = 0
 	cm.summary.SetValue("s")
 	if p, err := cm.validate(); err != "" || p.priority != "" {
@@ -109,7 +109,7 @@ func TestPriorityPickerNilOptions(t *testing.T) {
 // (the picker has no Focus state) — guards the focus-index wiring.
 func TestTabReachesPriorityPicker(t *testing.T) {
 	th, _ := themeByName("textual-dark")
-	cm := newCreateModal([]string{"Story"}, prios, th.surface)
+	cm := newCreateModal([]string{"Story"}, prios, th.surface, 120, 40)
 	for i := 0; i < 4; i++ { // 0(type)->1(summary)->2(desc)->3(accept)->4(priority)
 		nm, _ := cm.Update(key("tab"))
 		cm = nm.(createModal)
@@ -132,7 +132,7 @@ func TestTabReachesPriorityPicker(t *testing.T) {
 func TestEditModalPriorityPreselectAndNoDiff(t *testing.T) {
 	th, _ := themeByName("textual-dark")
 	tk := model.Ticket{"key": "TKB-1", "summary": "s", "priority": "High"}
-	em := newEditModal(tk, prios, th.surface)
+	em := newEditModal(tk, prios, th.surface, 120, 40)
 	if em.prio.value() != "High" {
 		t.Fatalf("priority not pre-selected: %q", em.prio.value())
 	}
