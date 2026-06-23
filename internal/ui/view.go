@@ -145,6 +145,9 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		badge = fmt.Sprintf("  ⛔%d", c.BlockerCount)
 	}
 	head := m.styles.cardHead.Render(prio + c.Key + badge)
+	if ab := agentBadge(c.AgentStatus); ab != "" {
+		head += " " + m.styles.cardAgent.Render(ab)
+	}
 	// Card text area = card width minus its border (2) and padding (2). The card
 	// itself is rendered at width-4 (see below), so usable text is width-6.
 	summary := m.styles.cardSummary.Render(truncate(c.Summary, width-6))
@@ -173,6 +176,24 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	// border outside the set width, so the card box is width-4 — otherwise the
 	// card's right border is clipped by the column and the outline fragments.
 	return style.Width(width - 4).Render(lines)
+}
+
+// agentBadge maps a ticket's agent_status to a card glyph indicating what the
+// agent is doing. Empty and idle render nothing (a card only carries a badge
+// while an agent is actively engaged); unknown states are likewise silent.
+func agentBadge(status string) string {
+	switch status {
+	case "processing":
+		return "⚙"
+	case "waiting":
+		return "⏳"
+	case "done":
+		return "✓"
+	case "blocked":
+		return "🚫"
+	default: // "" | idle | anything unrecognized
+		return ""
+	}
 }
 
 // windowBlocks joins card blocks to fit maxLines, scrolling so the selected

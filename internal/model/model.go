@@ -53,6 +53,7 @@ type Card struct {
 	Due          string // optional dates, "YYYY-MM-DD" or "" when unset
 	Scheduled    string
 	Completed    string
+	AgentStatus  string // agent execution state: ""|idle|processing|waiting|done|blocked
 }
 
 // CardFromTicket builds a Card from a normalized ticket dict.
@@ -68,6 +69,7 @@ func CardFromTicket(t Ticket) Card {
 		Due:          getStr(t, "due"),
 		Scheduled:    getStr(t, "scheduled"),
 		Completed:    getStr(t, "completed"),
+		AgentStatus:  getStr(t, "agent_status"),
 	}
 }
 

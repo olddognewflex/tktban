@@ -65,6 +65,18 @@ func TestCardBlockerCountCountsOnlyUnresolved(t *testing.T) {
 	}
 }
 
+func TestCardCarriesAgentStatus(t *testing.T) {
+	d := ticket("TKT-1", "todo")
+	d["agent_status"] = "processing"
+	if got := CardFromTicket(d).AgentStatus; got != "processing" {
+		t.Fatalf("agent status = %q, want %q", got, "processing")
+	}
+	// Missing field round-trips to empty (no agent engaged).
+	if got := CardFromTicket(ticket("TKT-2", "todo")).AgentStatus; got != "" {
+		t.Fatalf("absent agent_status = %q, want empty", got)
+	}
+}
+
 func TestColumnsFollowRoleOrder(t *testing.T) {
 	cols := BuildBoard(roles, nil)
 	for i, rp := range roles {
