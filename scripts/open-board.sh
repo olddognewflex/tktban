@@ -76,7 +76,8 @@ case "$decision" in
   "CLOSE "*) "$herdr_bin" plugin pane close "${decision#CLOSE }" >/dev/null 2>&1 && exit 0 ;;
 esac
 
+# No --workspace: herdr rejects it for overlays, which always open over the
+# active pane. $ws is only used above to scope the pane scan.
 args=(plugin pane open --plugin "$plugin_id" --entrypoint board --placement overlay --focus)
 [ -n "$cwd" ] && args+=(--cwd "$cwd")
-[ -n "$ws" ] && args+=(--workspace "$ws")
 exec "$herdr_bin" "${args[@]}"
