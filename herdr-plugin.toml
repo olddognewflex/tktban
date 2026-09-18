@@ -1,0 +1,46 @@
+# herdr-plugin.toml: runs tktban as a herdr plugin.
+#
+# The board opens as a full-size popup over the current workspace and reads the
+# tkt config found from that workspace (focused pane dir, then workspace root).
+# Bind the action to a key in ~/.config/herdr/config.toml:
+#
+#   [[keys.command]]
+#   key = "prefix+t"   # prefix+b is taken by herdr's sidebar toggle
+#   type = "plugin_action"
+#   command = "odnf.tktban.open-board"
+#
+# Event hooks (live agent status, notifications, write-back) come later; see
+# docs/herdr-events.md for which events a manifest can hook.
+id = "odnf.tktban"
+name = "tktban"
+version = "0.1.0"
+description = "Kanban board for tkt tickets, opened over any herdr workspace."
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+
+# Built at install time; needs Go on herdr's PATH.
+[[build]]
+command = ["go", "build", "-o", "bin/tktban", "./cmd/tktban"]
+
+# The board TUI. --herdr picks the config from the herdr context and keeps UI
+# settings in the plugin state dir.
+#
+# A popup, not an overlay: herdr 0.9.0 sizes an overlay's (and a tab's)
+# terminal to the pane it covers and never resizes it, so in a split workspace
+# the board rendered at the covered pane's size inside a full-screen overlay.
+# A popup gets a terminal of its declared size.
+[[panes]]
+id = "board"
+title = "tktban"
+placement = "popup"
+width = "100%"
+height = "100%"
+command = ["./bin/tktban", "--herdr"]
+
+# Toggle the board: open it, or close the open popup on a second press.
+[[actions]]
+id = "open-board"
+title = "tktban: open board"
+description = "Toggle the tktban board popup."
+contexts = ["pane", "workspace"]
+command = ["bash", "scripts/open-board.sh"]

@@ -57,6 +57,49 @@ canonical `status_role` and sorted by priority then key. A `⛔N` badge shows
 unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 `(unmapped)` column rather than being dropped.
 
+## Run inside herdr
+
+tktban ships a [herdr](https://herdr.dev) plugin manifest (`herdr-plugin.toml`),
+so the board opens as a full-screen popup over any herdr workspace.
+
+```sh
+herdr plugin install olddognewflex/tktban      # clones and builds bin/tktban (needs Go)
+
+# local development: link the checkout; link does not run the build step
+go build -o bin/tktban ./cmd/tktban
+herdr plugin link .
+```
+
+Bind the action to a key in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+t"   # prefix+b is herdr's sidebar toggle
+type = "plugin_action"
+command = "odnf.tktban.open-board"
+```
+
+The key opens the board and, pressed again, closes it (so does `q`). herdr
+allows one popup at a time; if another plugin's popup is open, the key leaves it
+alone. Toggling needs `python3` on herdr's PATH; without it the key only opens. The board reads the tkt config found from the focused pane's
+directory, falling back to the workspace root, so each project shows its own
+board.
+
+Under herdr the pane runs `tktban --herdr`, which:
+
+- finds `.sdlc/config.toml` from the herdr context when `--config` is not given;
+- keeps UI settings in the plugin state dir
+  (`~/.local/state/herdr/plugins/odnf.tktban/settings.toml`), copied once from
+  your standalone settings so the theme carries over. If that path is a
+  symlink it is ignored and the standalone settings file is used instead;
+- holds a lock on `board.lock` in the same dir while running, which is how the
+  launcher knows the open popup is the board.
+
+Outside herdr the flag does nothing. For publishing, tag the GitHub repo with
+the `herdr-plugin` topic so it shows in the herdr plugin marketplace.
+[docs/herdr-events.md](docs/herdr-events.md) records which herdr events a
+future live-status feature can hook.
+
 ## How it talks to tkt
 
 `internal/tkt/tkt.go` is the entire coupling surface — a thin subprocess wrapper:
