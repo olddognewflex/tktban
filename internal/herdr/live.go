@@ -100,7 +100,7 @@ var ErrProtocol = errors.New("unsupported herdr protocol")
 type SocketSource struct {
 	Client *Client
 	// KeysForDir maps a pane directory to ticket keys; nil means KeysForDir.
-	KeysForDir func(string) []string
+	KeysForDir func(context.Context, string) []string
 }
 
 // NewSocketSource returns a source reading the herdr socket at path.
@@ -133,7 +133,13 @@ func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 	if keysFor == nil {
 		keysFor = KeysForDir
 	}
-	byKey := Resolve(agents, keysFor)
+	// Once ctx ends, stop touching the disk; the result is discarded anyway.
+	byKey := Resolve(agents, func(dir string) []string {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return keysFor(ctx, dir)
+	})
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

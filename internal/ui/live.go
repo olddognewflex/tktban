@@ -13,8 +13,8 @@ import (
 )
 
 // LiveSource is where live agent status comes from (herdr.SocketSource inside
-// herdr). Probe runs once at startup; Poll returns the herdr view of each
-// ticket, keyed by uppercase ticket key.
+// herdr). Probe runs at startup, and again while herdr is unreachable; Poll
+// returns the herdr view of each ticket, keyed by uppercase ticket key.
 type LiveSource interface {
 	Probe(ctx context.Context) error
 	Poll(ctx context.Context) (map[string]herdr.Live, error)
@@ -49,7 +49,7 @@ type liveMsg struct {
 	err   error
 }
 
-// liveTickMsg fires when the next poll is due.
+// liveTickMsg fires when the next scheduled call (probe or poll) is due.
 type liveTickMsg struct{}
 
 // WithLive attaches a live status source. A nil source leaves the board
@@ -84,8 +84,8 @@ func livePollCmd(src LiveSource) tea.Cmd {
 	}
 }
 
-// scheduleLive arms the next poll. Only a poll result calls it, so at most one
-// poll is ever in flight.
+// scheduleLive arms the next tick. Only a probe or poll result calls it, so at
+// most one call to herdr is ever in flight.
 func (m *Model) scheduleLive(d time.Duration) tea.Cmd {
 	m.live.nextPoll = d
 	return tea.Tick(d, func(time.Time) tea.Msg { return liveTickMsg{} })
@@ -135,12 +135,16 @@ func (m Model) onLive(msg liveMsg) (tea.Model, tea.Cmd) {
 	if m.live.fails < liveMaxFails {
 		return m, m.scheduleLive(livePollInterval)
 	}
-	m.live.on = false
-	m.live.byKey = nil
 	var warn tea.Cmd
 	if m.live.fails == liveMaxFails {
-		warn = m.setStatus("herdr live status lost; retrying", "warn")
+		msg := "herdr live status unavailable; retrying" // never went live
+		if m.live.on {
+			msg = "herdr live status lost; retrying"
+		}
+		warn = m.setStatus(msg, "warn")
 	}
+	m.live.on = false
+	m.live.byKey = nil
 	return m, tea.Batch(warn, m.scheduleLive(liveBackoff))
 }
 

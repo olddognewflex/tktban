@@ -106,7 +106,7 @@ func TestResolveReadsEachDirOnce(t *testing.T) {
 	keyFor := func(string) []string { calls++; return []string{"TKB-1"} }
 	Resolve([]Agent{agent("p1", StatusIdle, "", "/a"), agent("p2", StatusIdle, "", "/a")}, keyFor)
 	if calls != 1 {
-		t.Fatalf("keyForDir called %d times for one dir", calls)
+		t.Fatalf("keysForDir called %d times for one dir", calls)
 	}
 }
 
@@ -127,8 +127,10 @@ func TestProbeRejectsProtocolMismatch(t *testing.T) {
 
 func TestPollResolvesAgentList(t *testing.T) {
 	s := &SocketSource{
-		Client:     pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
-		KeysForDir: keysByDir(map[string]string{"/src/tktban-wt": "TKB-22"}),
+		Client: pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
+		KeysForDir: func(_ context.Context, dir string) []string {
+			return keysByDir(map[string]string{"/src/tktban-wt": "TKB-22"})(dir)
+		},
 	}
 	got, err := s.Poll(context.Background())
 	if err != nil {
@@ -164,7 +166,7 @@ func TestPollFailsWhenResolveOutlivesContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &SocketSource{
 		Client:     pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
-		KeysForDir: func(string) []string { cancel(); return []string{"TKB-22"} },
+		KeysForDir: func(context.Context, string) []string { cancel(); return []string{"TKB-22"} },
 	}
 	if _, err := s.Poll(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
