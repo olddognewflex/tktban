@@ -1,0 +1,39 @@
+# herdr-plugin.toml: runs tktban as a herdr plugin.
+#
+# The board opens as an overlay pane over the current workspace and reads the
+# tkt config found from that workspace (focused pane dir, then workspace root).
+# Bind the action to a key in ~/.config/herdr/config.toml:
+#
+#   [[keys.command]]
+#   key = "prefix+t"   # prefix+b is taken by herdr's sidebar toggle
+#   type = "plugin_action"
+#   command = "odnf.tktban.open-board"
+#
+# Event hooks (live agent status, notifications, write-back) come later; see
+# docs/herdr-events.md for which events a manifest can hook.
+id = "odnf.tktban"
+name = "tktban"
+version = "0.1.0"
+description = "Kanban board for tkt tickets, opened over any herdr workspace."
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+
+# Built at install time; needs Go on herdr's PATH.
+[[build]]
+command = ["go", "build", "-o", "bin/tktban", "./cmd/tktban"]
+
+# The board TUI. --herdr picks the config from the herdr context and keeps UI
+# settings in the plugin state dir.
+[[panes]]
+id = "board"
+title = "tktban"
+placement = "overlay"
+command = ["./bin/tktban", "--herdr"]
+
+# Open the board, focus it if it is open but not focused, close it if focused.
+[[actions]]
+id = "open-board"
+title = "tktban: open board"
+description = "Open the tktban board as an overlay (focus or close it if already open)."
+contexts = ["pane", "workspace"]
+command = ["bash", "scripts/open-board.sh"]

@@ -14,3 +14,5 @@ venv/
 /.sdlc/
 # local agent scratch (subagent memory etc.) — never part of the repo
 .claude/agent-memory/
+# herdr plugin build output (herdr-plugin.toml [[build]])
+/bin/
