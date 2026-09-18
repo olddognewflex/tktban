@@ -154,6 +154,30 @@ func TestSettingsPath(t *testing.T) {
 	}
 }
 
+func TestSafeSettingsPath(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "settings.toml")
+	if err := os.WriteFile(regular, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "linked.toml")
+	if err := os.Symlink(filepath.Join(dir, "elsewhere.toml"), link); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.toml")
+
+	for _, c := range []struct{ name, in, want string }{
+		{"regular file kept", regular, regular},
+		{"not yet created kept", missing, missing},
+		{"symlink rejected", link, ""},
+		{"empty stays empty", "", ""},
+	} {
+		if got := SafeSettingsPath(c.in, os.Lstat); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestSeedSettingsCopiesOnce(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "standalone.toml")

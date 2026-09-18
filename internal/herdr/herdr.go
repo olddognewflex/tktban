@@ -101,6 +101,21 @@ func SettingsPath(e Env) string {
 	return filepath.Join(e.StateDir, "settings.toml")
 }
 
+// SafeSettingsPath rejects a plugin settings path that is a symlink, returning
+// "" so the caller falls back to the standalone settings file. tktban only ever
+// creates a regular file there, and settings saves follow symlinks, so a link
+// planted in the state dir could otherwise redirect writes outside it. A path
+// that does not exist yet is fine: the seed or first save creates it.
+func SafeSettingsPath(path string, lstat statFunc) string {
+	if path == "" {
+		return ""
+	}
+	if info, err := lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return ""
+	}
+	return path
+}
+
 // SeedSettings copies the standalone settings file to the plugin path the first
 // time the plugin runs, so a theme or hidden-column choice carries over. It never
 // overwrites an existing plugin file (the create is exclusive, which also

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Launcher for the tktban popup, run by the `open-board` herdr action.
 #
-#   no popup open  -> open the board popup over the active pane
-#   a popup open   -> close it (the key toggles the board)
+#   no popup open            -> open the board popup over the active pane
+#   the tktban popup is open -> close it (the key toggles the board)
+#   another popup is open    -> leave it alone
 #
-# herdr allows one popup at a time and does not list popups in `pane list`, so
-# "is the board open?" is answered by the open call itself: herdr refuses with
-# code ui_busy while a popup is up, and the launcher then closes it. The close
-# is herdr's popup.close, which closes whichever popup is open; pressing the key
-# over another plugin's popup therefore closes that popup.
+# herdr allows one popup at a time, does not list popups in `pane list`, and
+# gives them no pane id, so the launcher cannot target the board pane directly.
+# Instead: herdr refuses the open with code ui_busy while any popup is up, and
+# a running board holds an exclusive flock on $HERDR_PLUGIN_STATE_DIR/board.lock.
+# Only when that lock is held is the open popup ours, and only then is herdr's
+# popup.close (which closes whichever popup is open) sent.
 #
 # The board is opened with --cwd set to the focused pane's directory (else the
 # workspace root) so `tktban --herdr` finds that project's .sdlc/config.toml.
@@ -48,12 +50,33 @@ if [ $status -eq 0 ]; then
   exit 0
 fi
 
-# A popup is already open: toggle it closed.
+# A popup is already open: close it only if it is the running board.
 case "$out" in
   *'"ui_busy"'*)
     if [ "$have_py" = 1 ] && [ -n "${HERDR_SOCKET_PATH:-}" ]; then
       python3 - <<'PY'
-import json, os, socket, sys
+import errno, fcntl, json, os, socket, sys
+
+def board_running():
+    state = os.environ.get("HERDR_PLUGIN_STATE_DIR") or ""
+    if not state:
+        return False
+    try:
+        fd = os.open(os.path.join(state, "board.lock"), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False  # no lock file: no board has run
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError as e:
+        return e.errno in (errno.EWOULDBLOCK, errno.EAGAIN)  # held: board is up
+    finally:
+        os.close(fd)
+    return False  # we got the lock, so no board holds it
+
+if not board_running():
+    print("tktban: another popup is open; leaving it alone", file=sys.stderr)
+    sys.exit(1)
+
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(5)
 s.connect(os.environ["HERDR_SOCKET_PATH"])

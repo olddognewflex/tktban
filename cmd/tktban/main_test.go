@@ -24,6 +24,13 @@ func TestHerdrSetup(t *testing.T) {
 	if err := os.MkdirAll(bare, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	linkState := filepath.Join(base, "linkstate")
+	if err := os.MkdirAll(linkState, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "elsewhere.toml"), filepath.Join(linkState, "settings.toml")); err != nil {
+		t.Fatal(err)
+	}
 	ctx := `{"workspace_id":"w1","focused_pane_cwd":"` + repo + `"}`
 
 	cases := []struct {
@@ -32,29 +39,33 @@ func TestHerdrSetup(t *testing.T) {
 		env          map[string]string
 		wantConfig   string
 		wantSettings string
+		wantState    string
 	}{
 		{"outside herdr is a no-op", "", map[string]string{
 			"HERDR_PLUGIN_STATE_DIR": "/s", "HERDR_PLUGIN_CONTEXT_JSON": ctx,
-		}, "", ""},
-		{"outside herdr keeps explicit config", "/explicit.toml", nil, "/explicit.toml", ""},
+		}, "", "", ""},
+		{"outside herdr keeps explicit config", "/explicit.toml", nil, "/explicit.toml", "", ""},
 		{"explicit config wins in herdr", "/explicit.toml", map[string]string{
 			"HERDR_ENV": "1", "HERDR_PLUGIN_STATE_DIR": "/s", "HERDR_PLUGIN_CONTEXT_JSON": ctx,
-		}, "/explicit.toml", filepath.Join("/s", "settings.toml")},
+		}, "/explicit.toml", filepath.Join("/s", "settings.toml"), "/s"},
 		{"config resolved from context", "", map[string]string{
 			"HERDR_ENV": "1", "HERDR_PLUGIN_STATE_DIR": "/s", "HERDR_PLUGIN_CONTEXT_JSON": ctx,
-		}, found, filepath.Join("/s", "settings.toml")},
+		}, found, filepath.Join("/s", "settings.toml"), "/s"},
 		{"no state dir keeps standalone settings", "", map[string]string{
 			"HERDR_ENV": "1", "HERDR_PLUGIN_CONTEXT_JSON": ctx,
-		}, found, ""},
+		}, found, "", ""},
+		{"symlinked plugin settings fall back to standalone", "", map[string]string{
+			"HERDR_ENV": "1", "HERDR_PLUGIN_STATE_DIR": linkState, "HERDR_PLUGIN_CONTEXT_JSON": ctx,
+		}, found, "", linkState},
 		{"nothing found leaves tkt discovery in charge", "", map[string]string{
 			"HERDR_ENV": "1",
-		}, "", ""},
+		}, "", "", ""},
 	}
 	for _, c := range cases {
-		gotConfig, gotSettings := herdrSetup(c.config, envOf(c.env), bare, os.Stat)
-		if gotConfig != c.wantConfig || gotSettings != c.wantSettings {
-			t.Errorf("%s: got (%q, %q) want (%q, %q)",
-				c.name, gotConfig, gotSettings, c.wantConfig, c.wantSettings)
+		gotConfig, gotSettings, gotState := herdrSetup(c.config, envOf(c.env), bare, os.Stat, os.Lstat)
+		if gotConfig != c.wantConfig || gotSettings != c.wantSettings || gotState != c.wantState {
+			t.Errorf("%s: got (%q, %q, %q) want (%q, %q, %q)",
+				c.name, gotConfig, gotSettings, gotState, c.wantConfig, c.wantSettings, c.wantState)
 		}
 	}
 }

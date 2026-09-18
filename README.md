@@ -80,9 +80,8 @@ command = "odnf.tktban.open-board"
 ```
 
 The key opens the board and, pressed again, closes it (so does `q`). herdr
-allows one popup at a time, so pressing the key while another plugin's popup is
-open closes that popup instead. Toggling needs `python3` on herdr's PATH;
-without it the key only opens. The board reads the tkt config found from the focused pane's
+allows one popup at a time; if another plugin's popup is open, the key leaves it
+alone. Toggling needs `python3` on herdr's PATH; without it the key only opens. The board reads the tkt config found from the focused pane's
 directory, falling back to the workspace root, so each project shows its own
 board.
 
@@ -91,7 +90,10 @@ Under herdr the pane runs `tktban --herdr`, which:
 - finds `.sdlc/config.toml` from the herdr context when `--config` is not given;
 - keeps UI settings in the plugin state dir
   (`~/.local/state/herdr/plugins/odnf.tktban/settings.toml`), copied once from
-  your standalone settings so the theme carries over.
+  your standalone settings so the theme carries over. If that path is a
+  symlink it is ignored and the standalone settings file is used instead;
+- holds a lock on `board.lock` in the same dir while running, which is how the
+  launcher knows the open popup is the board.
 
 Outside herdr the flag does nothing. For publishing, tag the GitHub repo with
 the `herdr-plugin` topic so it shows in the herdr plugin marketplace.
