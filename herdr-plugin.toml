@@ -37,10 +37,10 @@ width = "100%"
 height = "100%"
 command = ["./bin/tktban", "--herdr"]
 
-# Open the board, focus it if it is open but not focused, close it if focused.
+# Toggle the board: open it, or close the open popup on a second press.
 [[actions]]
 id = "open-board"
 title = "tktban: open board"
-description = "Open the tktban board as a popup (focus or close it if already open)."
+description = "Toggle the tktban board popup."
 contexts = ["pane", "workspace"]
 command = ["bash", "scripts/open-board.sh"]

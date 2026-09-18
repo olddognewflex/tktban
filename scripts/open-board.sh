@@ -60,7 +60,8 @@ s.connect(os.environ["HERDR_SOCKET_PATH"])
 s.sendall((json.dumps({"id": "tktban:close", "method": "popup.close", "params": {}}) + "\n").encode())
 reply = s.makefile().readline()
 print(reply.strip())
-sys.exit(0 if '"error"' not in reply else 1)
+# Closed by us, or already gone (e.g. q pressed in between): both mean closed.
+sys.exit(0 if ('"result"' in reply or '"popup_not_open"' in reply) else 1)
 PY
       exit $?
     fi
