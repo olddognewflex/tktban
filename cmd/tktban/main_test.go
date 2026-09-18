@@ -69,3 +69,25 @@ func TestHerdrSetup(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveSourceOnlyInsideHerdr(t *testing.T) {
+	inHerdr := map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock"}
+	cases := []struct {
+		name     string
+		env      map[string]string
+		disabled bool
+		want     bool
+	}{
+		{"outside herdr", map[string]string{"HERDR_SOCKET_PATH": "/run/herdr.sock"}, false, false},
+		{"no socket", map[string]string{"HERDR_ENV": "1"}, false, false},
+		{"--no-herdr-live", inHerdr, true, false},
+		{"inside herdr", inHerdr, false, true},
+	}
+	for _, c := range cases {
+		// Compare the interface itself: a typed nil pointer inside it would read
+		// as "live on" to the board.
+		if got := liveSource(envOf(c.env), c.disabled); (got != nil) != c.want {
+			t.Errorf("%s: live source = %v, want present=%v", c.name, got, c.want)
+		}
+	}
+}

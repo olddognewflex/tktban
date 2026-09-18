@@ -55,6 +55,9 @@ type Model struct {
 	refreshSecs float64
 	autoOn      bool
 
+	// live is herdr agent status for card badges; zero (off) outside herdr.
+	live liveState
+
 	width, height int
 
 	modal modal
@@ -124,6 +127,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		refreshCmd(m.tkt, m.filter),
 		tickCmd(secondsToDuration(m.refreshSecs)),
+		m.liveInit(),
 	)
 }
 
@@ -237,6 +241,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = refreshCmd(m.tkt, m.filter)
 		}
 		return m, tea.Batch(cmd, tickCmd(secondsToDuration(m.refreshSecs)))
+
+	case liveProbeMsg:
+		return m.onLiveProbe(msg)
+
+	case liveMsg:
+		return m.onLive(msg)
+
+	case liveTickMsg:
+		return m.onLiveTick()
 
 	case statusExpireMsg:
 		if int(msg) == m.statusSeq {

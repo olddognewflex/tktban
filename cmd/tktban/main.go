@@ -28,6 +28,7 @@ func run(argv []string) int {
 	interval := fs.Float64("refresh-interval", 10.0, "auto-refresh cadence in seconds (must be > 0)")
 	noAuto := fs.Bool("no-auto-refresh", false, "start with auto-refresh off (toggle at runtime with 'a')")
 	inHerdr := fs.Bool("herdr", false, "running as a herdr plugin pane: pick config from the herdr context, keep settings in the plugin state dir (no-op outside herdr)")
+	noLive := fs.Bool("no-herdr-live", false, "inside herdr, don't read live agent status from the herdr socket for card badges")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: tktban [flags] [board|doctor]")
 		fs.PrintDefaults()
@@ -64,7 +65,7 @@ func run(argv []string) int {
 		// from another plugin's before closing it.
 		release := herdr.HoldBoardLock(stateDir)
 		defer release()
-		return board(tk, *interval, !*noAuto, settingsPath)
+		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive))
 	default:
 		fmt.Fprintf(os.Stderr, "tktban: unknown command %q (want board or doctor)\n", command)
 		return 2
@@ -110,8 +111,23 @@ func herdrSetup(config string, getenv func(string) string, cwd string, stat, lst
 	return config, herdr.SafeSettingsPath(herdr.SettingsPath(e), lstat), e.StateDir
 }
 
-func board(tk *tkt.Tkt, interval float64, auto bool, settingsPath string) int {
-	m := ui.New(tk, interval, auto, settingsPath)
+// liveSource returns the herdr socket as the board's live agent status source
+// when running inside herdr, whether or not --herdr was given (a board in a
+// plain herdr pane benefits too). Outside herdr, with no socket, or with
+// --no-herdr-live it returns nil and badges come from ticket frontmatter only.
+func liveSource(getenv func(string) string, disabled bool) ui.LiveSource {
+	if disabled {
+		return nil
+	}
+	e := herdr.FromEnv(getenv)
+	if !e.InHerdr || e.SocketPath == "" {
+		return nil
+	}
+	return herdr.NewSocketSource(e.SocketPath)
+}
+
+func board(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource) int {
+	m := ui.New(tk, interval, auto, settingsPath).WithLive(live)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tktban:", err)
 		return 1

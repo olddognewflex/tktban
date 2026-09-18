@@ -97,8 +97,38 @@ Under herdr the pane runs `tktban --herdr`, which:
 
 Outside herdr the flag does nothing. For publishing, tag the GitHub repo with
 the `herdr-plugin` topic so it shows in the herdr plugin marketplace.
-[docs/herdr-events.md](docs/herdr-events.md) records which herdr events a
-future live-status feature can hook.
+[docs/herdr-events.md](docs/herdr-events.md) records which herdr events the
+live status below and future hooks can use.
+
+### Live agent badges
+
+Inside herdr (any pane, with or without `--herdr`) the board polls herdr's
+socket every 500 ms and badges each card whose ticket has an agent running,
+with no refresh key needed. The subtitle shows `herdr live` while this is on.
+
+| Badge | Meaning | Source |
+|-------|---------|--------|
+| ⚙ | agent working | herdr (or frontmatter `processing` when live is off) |
+| 🙋 | agent waiting on you: a permission prompt or question | herdr |
+| ⏳ | waiting | frontmatter `agent_status` |
+| 🚫 | blocked | frontmatter `agent_status` |
+| ✓ | done | frontmatter `agent_status` |
+
+herdr `idle` and `done` show no badge. While live is on, herdr's 🙋 / ⚙ win
+over the ticket's frontmatter; otherwise the frontmatter badge shows, except
+`processing`, which is hidden because herdr says no agent is working (a killed
+pane clears its badge on the next poll even though the file still says
+`processing`). Outside herdr, with `--no-herdr-live`, or when herdr stops
+answering (3 failed polls) or speaks an unsupported protocol, badges come from
+frontmatter alone, exactly as without herdr. A lost connection shows one
+warning and recovers on its own when herdr is back.
+
+Panes are matched to tickets by branch: the board reads the git branch checked
+out in each agent pane's directory (linked worktrees included) and takes the
+ticket key from it, following the `.sdlc` branch convention
+`feature/{key-lower}-{slug}` or `hotfix/{key-lower}-{slug}`, e.g.
+`feature/tkb-22-live-herdr-status` → `TKB-22`. Agents on a branch with no key
+are ignored. When several agent panes work one ticket, 🙋 beats ⚙.
 
 ## How it talks to tkt
 
