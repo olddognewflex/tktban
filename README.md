@@ -118,17 +118,22 @@ herdr `idle` and `done` show no badge. While live is on, herdr's 🙋 / ⚙ win
 over the ticket's frontmatter; otherwise the frontmatter badge shows, except
 `processing`, which is hidden because herdr says no agent is working (a killed
 pane clears its badge on the next poll even though the file still says
-`processing`). Outside herdr, with `--no-herdr-live`, or when herdr stops
-answering (3 failed polls) or speaks an unsupported protocol, badges come from
-frontmatter alone, exactly as without herdr. A lost connection shows one
-warning and recovers on its own when herdr is back.
+`processing`). Outside herdr, with `--no-herdr-live`, or while herdr is not
+answering, badges come from frontmatter alone, exactly as without herdr. If
+herdr speaks an unsupported socket protocol, live status stays off for the
+run. Any other failure (herdr not answering at startup, or 3 failed polls
+later) shows one warning, retries every 2 s, and goes live again on its own
+once herdr is back.
 
 Panes are matched to tickets by branch: the board reads the git branch checked
 out in each agent pane's directory (linked worktrees included) and takes the
 ticket key from it, following the `.sdlc` branch convention
 `feature/{key-lower}-{slug}` or `hotfix/{key-lower}-{slug}`, e.g.
-`feature/tkb-22-live-herdr-status` → `TKB-22`. Agents on a branch with no key
-are ignored. When several agent panes work one ticket, 🙋 beats ⚙.
+`feature/tkb-22-live-herdr-status` → `TKB-22`. A branch naming several keys
+(`revert-45-feature/tkb-22-x`) badges each of them. Agents on a branch with
+no key are ignored. When several agent panes work one ticket, 🙋 beats ⚙.
+The branch comes from the `.git/HEAD` file; only repos using reftable ref
+storage, where that file is a stub, run `git symbolic-ref` instead.
 
 ## How it talks to tkt
 

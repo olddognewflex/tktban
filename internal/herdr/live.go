@@ -52,11 +52,12 @@ type Live struct {
 
 // Resolve joins herdr's agent panes to ticket keys. A pane counts when it has
 // an agent and its directory's branch names a ticket; the foreground cwd is
-// preferred because that is where the agent actually runs. Keys come back as
-// keyForDir returns them (uppercase for KeyForDir).
-func Resolve(agents []Agent, keyForDir func(string) string) map[string]Live {
+// preferred because that is where the agent actually runs. A branch naming
+// several keys puts the pane under each of them. Keys come back as keysForDir
+// returns them (uppercase for KeysForDir).
+func Resolve(agents []Agent, keysForDir func(string) []string) map[string]Live {
 	out := map[string]Live{}
-	keys := map[string]string{} // dir -> key, so each dir is read once per call
+	cache := map[string][]string{} // dir -> keys, so each dir is read once per call
 	for _, a := range agents {
 		if a.Agent == nil || *a.Agent == "" {
 			continue
@@ -68,26 +69,26 @@ func Resolve(agents []Agent, keyForDir func(string) string) map[string]Live {
 		if dir == "" {
 			continue
 		}
-		key, seen := keys[dir]
+		keys, seen := cache[dir]
 		if !seen {
-			key = keyForDir(dir)
-			keys[dir] = key
+			keys = keysForDir(dir)
+			cache[dir] = keys
 		}
-		if key == "" {
-			continue
-		}
-		l := out[key]
-		if len(l.Panes) == 0 || rank(a.Status) > rank(l.Status) {
-			l.Status = a.Status
-		}
-		l.Panes = append(l.Panes, PaneRef{
+		ref := PaneRef{
 			PaneID:      a.PaneID,
 			WorkspaceID: a.WorkspaceID,
 			TabID:       a.TabID,
 			Status:      a.Status,
 			Focused:     a.Focused,
-		})
-		out[key] = l
+		}
+		for _, key := range keys {
+			l := out[key]
+			if len(l.Panes) == 0 || rank(a.Status) > rank(l.Status) {
+				l.Status = a.Status
+			}
+			l.Panes = append(l.Panes, ref)
+			out[key] = l
+		}
 	}
 	return out
 }
@@ -98,8 +99,8 @@ var ErrProtocol = errors.New("unsupported herdr protocol")
 // SocketSource polls the herdr socket for live ticket status.
 type SocketSource struct {
 	Client *Client
-	// KeyForDir maps a pane directory to a ticket key; nil means KeyForDir.
-	KeyForDir func(string) string
+	// KeysForDir maps a pane directory to ticket keys; nil means KeysForDir.
+	KeysForDir func(string) []string
 }
 
 // NewSocketSource returns a source reading the herdr socket at path.
@@ -121,15 +122,20 @@ func (s *SocketSource) Probe(ctx context.Context) error {
 }
 
 // Poll lists herdr's agent panes and resolves them to tickets. Branches are
-// re-read every call, so a checkout inside a pane shows on the next poll.
+// re-read every call, so a checkout inside a pane shows on the next poll. A
+// resolve that outlives ctx (a hung filesystem) counts as a failed poll.
 func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 	agents, err := s.Client.AgentList(ctx)
 	if err != nil {
 		return nil, err
 	}
-	keyFor := s.KeyForDir
-	if keyFor == nil {
-		keyFor = KeyForDir
+	keysFor := s.KeysForDir
+	if keysFor == nil {
+		keysFor = KeysForDir
 	}
-	return Resolve(agents, keyFor), nil
+	byKey := Resolve(agents, keysFor)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return byKey, nil
 }

@@ -222,8 +222,10 @@ Rechecked against herdr 0.9.0 / protocol 22 while building the live badge
 (`internal/herdr/client.go`, `live.go`):
 
 - `ping` is the cheap protocol probe: `{"result":{"type":"pong","version":"0.9.0","protocol":22,...}}`.
-  tktban calls it once when the board opens and turns live status off on any
-  other protocol, instead of reading `session.snapshot`.
+  tktban calls it when the board opens, instead of reading
+  `session.snapshot`. Any other protocol turns live status off for the run;
+  any other failure (herdr not up yet, a timeout) re-probes every 2 s until
+  herdr answers.
 - `agent.list` replies `{"result":{"type":"agent_list","agents":[...]}}` and
   lists **only agent panes**. A closed pane just drops out of the next reply,
   which is how the board clears a badge without any close event.
@@ -236,6 +238,8 @@ Rechecked against herdr 0.9.0 / protocol 22 while building the live badge
 - AgentInfo has no branch. The ticket join reads git `HEAD` from the pane's
   `foreground_cwd` (falling back to `cwd`), following `.git` files for linked
   worktrees, and takes the key from `feature/{key-lower}-{slug}` or
-  `hotfix/{key-lower}-{slug}`.
+  `hotfix/{key-lower}-{slug}`. With reftable ref storage `HEAD` is the stub
+  `ref: refs/heads/.invalid`, so only then does it ask
+  `git symbolic-ref --short -q HEAD` (checked with git 2.55).
 - `HERDR_SOCKET_PATH` is set in plugin pane environments (seen on a running
   `overlay` plugin pane), not just in hooks.

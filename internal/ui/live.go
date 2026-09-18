@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -21,20 +22,21 @@ type LiveSource interface {
 
 const (
 	livePollInterval = 500 * time.Millisecond
-	liveBackoff      = 2 * time.Second // retry cadence once live status is lost
+	liveBackoff      = 2 * time.Second // retry cadence while herdr is unreachable
 	liveMaxFails     = 3               // consecutive poll failures before falling back
 	liveCallTimeout  = time.Second
 )
 
 // liveState is the board's live agent status. It runs on its own serial loop
-// (poll → result → tick → poll), apart from the tkt auto-refresh, and keeps
-// going while a modal is open. src is nil outside herdr, and is dropped for
-// good when the startup probe fails.
+// (probe → poll → result → tick → poll), apart from the tkt auto-refresh, and
+// keeps going while a modal is open. src is nil outside herdr, and is dropped
+// for good when herdr speaks an unsupported protocol.
 type liveState struct {
 	src      LiveSource
-	on       bool                  // badges follow herdr; false means frontmatter only
+	probed   bool                  // the startup probe passed; ticks poll rather than re-probe
+	on       bool                  // a poll succeeded lately: badges follow herdr
 	byKey    map[string]herdr.Live // last good poll
-	fails    int                   // consecutive failed polls
+	fails    int                   // consecutive failed probes, then polls
 	nextPoll time.Duration         // delay of the tick last scheduled, 0 before any
 }
 
@@ -62,7 +64,10 @@ func (m Model) liveInit() tea.Cmd {
 	if m.live.src == nil {
 		return nil
 	}
-	src := m.live.src
+	return liveProbeCmd(m.live.src)
+}
+
+func liveProbeCmd(src LiveSource) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
 		defer cancel()
@@ -86,24 +91,36 @@ func (m *Model) scheduleLive(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return liveTickMsg{} })
 }
 
-// onLiveProbe starts polling, or turns live status off for this run with one
-// warning. The board works as before either way.
+// onLiveProbe starts polling once herdr answers. An unsupported protocol turns
+// live status off for the run; anything else (herdr not up yet, a timeout)
+// warns once and re-probes at the backoff. Badges stay frontmatter-only until
+// the first good poll, and the board works as before either way. Warnings
+// carry a short reason, never the socket path.
 func (m Model) onLiveProbe(msg liveProbeMsg) (tea.Model, tea.Cmd) {
 	if m.live.src == nil {
 		return m, nil
 	}
-	if msg.err != nil {
-		m.live = liveState{}
-		return m, m.setStatus("herdr live status off: "+msg.err.Error(), "warn")
+	if msg.err == nil {
+		m.live.probed = true
+		m.live.fails = 0
+		return m, livePollCmd(m.live.src)
 	}
-	m.live.on = true
-	return m, livePollCmd(m.live.src)
+	if errors.Is(msg.err, herdr.ErrProtocol) {
+		m.live = liveState{}
+		return m, m.setStatus("herdr live status off: protocol mismatch", "warn")
+	}
+	m.live.fails++
+	var warn tea.Cmd
+	if m.live.fails == 1 {
+		warn = m.setStatus("herdr live status off: unavailable", "warn")
+	}
+	return m, tea.Batch(warn, m.scheduleLive(liveBackoff))
 }
 
-// onLive stores a poll result. A failure keeps the last map for a couple of
-// polls (a blip should not flicker badges); after liveMaxFails the board falls
-// back to frontmatter badges, warns once, and keeps retrying slowly so it
-// recovers when herdr returns.
+// onLive stores a poll result; a good one turns badges live. A failure keeps
+// the last map for a couple of polls (a blip should not flicker badges); after
+// liveMaxFails the board falls back to frontmatter badges, warns once per
+// outage, and keeps retrying slowly so it recovers when herdr returns.
 func (m Model) onLive(msg liveMsg) (tea.Model, tea.Cmd) {
 	if m.live.src == nil {
 		return m, nil
@@ -118,18 +135,23 @@ func (m Model) onLive(msg liveMsg) (tea.Model, tea.Cmd) {
 	if m.live.fails < liveMaxFails {
 		return m, m.scheduleLive(livePollInterval)
 	}
+	m.live.on = false
+	m.live.byKey = nil
 	var warn tea.Cmd
-	if m.live.on {
-		m.live.on = false
-		m.live.byKey = nil
-		warn = m.setStatus("herdr live status lost: "+msg.err.Error(), "warn")
+	if m.live.fails == liveMaxFails {
+		warn = m.setStatus("herdr live status lost; retrying", "warn")
 	}
 	return m, tea.Batch(warn, m.scheduleLive(liveBackoff))
 }
 
+// onLiveTick runs the next scheduled call: a poll, or another probe while
+// herdr has not answered one yet.
 func (m Model) onLiveTick() (tea.Model, tea.Cmd) {
 	if m.live.src == nil {
 		return m, nil
+	}
+	if !m.live.probed {
+		return m, liveProbeCmd(m.live.src)
 	}
 	return m, livePollCmd(m.live.src)
 }

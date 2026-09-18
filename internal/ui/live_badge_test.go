@@ -345,3 +345,35 @@ func TestLiveBadgeFitsCard(t *testing.T) {
 		}
 	}
 }
+
+// herdr not answering at startup is not fatal: warn once, re-probe at the
+// backoff, and go live only after the first good poll.
+func TestLiveProbeUnavailableRetries(t *testing.T) {
+	src := &fakeLive{probeErr: errors.New("dial unix /very/long/socket/path: connection refused"), byKey: live("TKT-1", "working")}
+	m, _ := liveBoard(t, src, "processing")
+	m, _ = update(m, m.liveInit()())
+	if m.live.src == nil || m.live.on || m.live.nextPoll != liveBackoff {
+		t.Fatalf("after failed probe: %+v, want source kept, off, retry at backoff", m.live)
+	}
+	if m.statusKind != "warn" || m.status != "herdr live status off: unavailable" {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+
+	m.status = ""
+	m, reprobe := update(m, liveTickMsg{})
+	m, _ = update(m, reprobe())
+	if src.probes != 2 || src.polls != 0 || m.status != "" {
+		t.Fatalf("second failure: probes=%d polls=%d status=%q, want a quiet re-probe", src.probes, src.polls, m.status)
+	}
+
+	src.probeErr = nil
+	m, reprobe = update(m, liveTickMsg{})
+	m, pollCmd := update(m, reprobe())
+	if m.live.on {
+		t.Fatal("live on before any poll succeeded")
+	}
+	m, _ = update(m, pollCmd())
+	if !m.live.on || m.cardBadge(card(m)) != "⚙" {
+		t.Fatalf("did not go live after recovery: %+v", m.live)
+	}
+}

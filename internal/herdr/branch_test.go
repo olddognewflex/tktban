@@ -29,6 +29,33 @@ func TestKeyFromBranch(t *testing.T) {
 	}
 }
 
+func TestKeysFromBranchTakesEverySegment(t *testing.T) {
+	got := KeysFromBranch("revert-45-feature/tkb-22-x")
+	if len(got) != 2 || got[0] != "REVERT-45" || got[1] != "TKB-22" {
+		t.Fatalf("KeysFromBranch = %q, want [REVERT-45 TKB-22]", got)
+	}
+}
+
+// A reftable repo's HEAD file is a stub; only then does GitBranch ask git.
+func TestGitBranchReftableAsksGit(t *testing.T) {
+	var asked []string
+	orig := symbolicRef
+	symbolicRef = func(dir string) string { asked = append(asked, dir); return "feature/tkb-22-live" }
+	t.Cleanup(func() { symbolicRef = orig })
+
+	repo := t.TempDir()
+	write(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/.invalid\n")
+	if got := GitBranch(repo); got != "feature/tkb-22-live" || len(asked) != 1 || asked[0] != repo {
+		t.Fatalf("reftable: GitBranch = %q, asked %q", got, asked)
+	}
+
+	plain := t.TempDir()
+	write(t, filepath.Join(plain, ".git", "HEAD"), "ref: refs/heads/main\n")
+	if GitBranch(plain); len(asked) != 1 {
+		t.Fatal("ran git for a plain HEAD file")
+	}
+}
+
 func write(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -53,8 +80,8 @@ func TestGitBranchMainCheckout(t *testing.T) {
 	if got := GitBranch(repo); got != "feature/tkb-22-live" {
 		t.Fatalf("GitBranch = %q", got)
 	}
-	if got := KeyForDir(repo); got != "TKB-22" {
-		t.Fatalf("KeyForDir = %q", got)
+	if got := KeysForDir(repo); len(got) != 1 || got[0] != "TKB-22" {
+		t.Fatalf("KeysForDir = %q", got)
 	}
 }
 
@@ -107,8 +134,11 @@ func TestGitBranchDetachedHead(t *testing.T) {
 }
 
 func TestGitBranchNoRepo(t *testing.T) {
-	// t.TempDir lives under the system temp dir, which is not a repo.
-	if got := GitBranch(t.TempDir()); got != "" {
+	dir := t.TempDir()
+	if findGitDir(dir) != "" {
+		t.Skip("temp dir is inside a git repo")
+	}
+	if got := GitBranch(dir); got != "" {
 		t.Fatalf("no repo: GitBranch = %q, want empty", got)
 	}
 	if got := GitBranch(""); got != "" {

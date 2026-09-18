@@ -11,9 +11,14 @@ func agent(pane string, status Status, cwd, fg string) Agent {
 	return Agent{PaneID: pane, WorkspaceID: "w1", TabID: "w1:t1", Agent: &name, Status: status, Cwd: cwd, ForegroundCwd: fg}
 }
 
-// keysByDir fakes the dir -> branch -> key step.
-func keysByDir(m map[string]string) func(string) string {
-	return func(dir string) string { return m[dir] }
+// keysByDir fakes the dir -> branch -> key step with one key per dir.
+func keysByDir(m map[string]string) func(string) []string {
+	return func(dir string) []string {
+		if k := m[dir]; k != "" {
+			return []string{k}
+		}
+		return nil
+	}
 }
 
 func TestResolvePrefersForegroundCwd(t *testing.T) {
@@ -98,7 +103,7 @@ func TestResolveKeepsPaneRefs(t *testing.T) {
 
 func TestResolveReadsEachDirOnce(t *testing.T) {
 	calls := 0
-	keyFor := func(string) string { calls++; return "TKB-1" }
+	keyFor := func(string) []string { calls++; return []string{"TKB-1"} }
 	Resolve([]Agent{agent("p1", StatusIdle, "", "/a"), agent("p2", StatusIdle, "", "/a")}, keyFor)
 	if calls != 1 {
 		t.Fatalf("keyForDir called %d times for one dir", calls)
@@ -122,8 +127,8 @@ func TestProbeRejectsProtocolMismatch(t *testing.T) {
 
 func TestPollResolvesAgentList(t *testing.T) {
 	s := &SocketSource{
-		Client:    pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
-		KeyForDir: keysByDir(map[string]string{"/src/tktban-wt": "TKB-22"}),
+		Client:     pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
+		KeysForDir: keysByDir(map[string]string{"/src/tktban-wt": "TKB-22"}),
 	}
 	got, err := s.Poll(context.Background())
 	if err != nil {
@@ -131,5 +136,37 @@ func TestPollResolvesAgentList(t *testing.T) {
 	}
 	if len(got) != 1 || got["TKB-22"].Status != StatusWorking {
 		t.Fatalf("poll = %+v", got)
+	}
+}
+
+// A branch naming several keys badges each; merging still ranks per key.
+func TestResolveMapsPaneUnderEveryKey(t *testing.T) {
+	keysFor := func(dir string) []string {
+		if dir == "/revert" {
+			return []string{"REVERT-45", "TKB-22"}
+		}
+		return []string{"TKB-22"}
+	}
+	got := Resolve([]Agent{
+		agent("p1", StatusWorking, "", "/revert"),
+		agent("p2", StatusBlocked, "", "/other"),
+	}, keysFor)
+	if got["REVERT-45"].Status != StatusWorking || len(got["REVERT-45"].Panes) != 1 {
+		t.Fatalf("REVERT-45 = %+v", got["REVERT-45"])
+	}
+	if got["TKB-22"].Status != StatusBlocked || len(got["TKB-22"].Panes) != 2 {
+		t.Fatalf("TKB-22 = %+v", got["TKB-22"])
+	}
+}
+
+// A resolve that outlives the poll's context is a failed poll, not a result.
+func TestPollFailsWhenResolveOutlivesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &SocketSource{
+		Client:     pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
+		KeysForDir: func(string) []string { cancel(); return []string{"TKB-22"} },
+	}
+	if _, err := s.Poll(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
 	}
 }
