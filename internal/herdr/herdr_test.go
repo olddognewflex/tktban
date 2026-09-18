@@ -13,7 +13,7 @@ func env(m map[string]string) func(string) string {
 
 func TestFromEnvOutsideHerdr(t *testing.T) {
 	e := FromEnv(env(nil))
-	if e.InHerdr || e.StateDir != "" || e.Context != (Context{}) {
+	if e.InHerdr || e.StateDir != "" || e.SocketPath != "" || e.Context != (Context{}) {
 		t.Fatalf("empty env should give zero Env, got %+v", e)
 	}
 }
@@ -22,9 +22,10 @@ func TestFromEnvParsesContext(t *testing.T) {
 	e := FromEnv(env(map[string]string{
 		"HERDR_ENV":                 "1",
 		"HERDR_PLUGIN_STATE_DIR":    "/state/odnf.tktban",
+		"HERDR_SOCKET_PATH":         "/run/herdr.sock",
 		"HERDR_PLUGIN_CONTEXT_JSON": `{"workspace_id":"w1","workspace_cwd":"/ws","focused_pane_cwd":"/ws/repo","focused_pane_status":"idle","extra":1}`,
 	}))
-	if !e.InHerdr || e.StateDir != "/state/odnf.tktban" {
+	if !e.InHerdr || e.StateDir != "/state/odnf.tktban" || e.SocketPath != "/run/herdr.sock" {
 		t.Fatalf("env flags not read: %+v", e)
 	}
 	want := Context{WorkspaceID: "w1", WorkspaceCwd: "/ws", FocusedPaneCwd: "/ws/repo"}

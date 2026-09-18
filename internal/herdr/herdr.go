@@ -1,9 +1,11 @@
 // Package herdr adapts tktban to running as a herdr plugin pane.
 //
-// It reads only the environment herdr injects (HERDR_ENV, HERDR_PLUGIN_*), so it
-// needs no socket calls. Everything is pure over an injected getenv/stat so it
-// tests without a running herdr. Outside herdr every function degrades to the
-// standalone behaviour: no config override, the normal settings path.
+// Plugin setup reads only the environment herdr injects (HERDR_ENV,
+// HERDR_PLUGIN_*, HERDR_SOCKET_PATH) and is pure over an injected getenv/stat so
+// it tests without a running herdr. Live agent status (client.go, live.go) is
+// the one part that talks to the herdr socket. Outside herdr every function
+// degrades to the standalone behaviour: no config override, the normal
+// settings path, no live status.
 package herdr
 
 import (
@@ -19,6 +21,7 @@ const (
 	envHerdr    = "HERDR_ENV"                 // "1" inside any herdr-managed pane
 	envStateDir = "HERDR_PLUGIN_STATE_DIR"    // per-plugin writable state dir
 	envContext  = "HERDR_PLUGIN_CONTEXT_JSON" // invocation context (actions, panes)
+	envSocket   = "HERDR_SOCKET_PATH"         // unix socket of the herdr server API
 )
 
 // configRel is the tkt config path tkt itself auto-discovers.
@@ -34,17 +37,19 @@ type Context struct {
 
 // Env is what tktban learns from the process environment when started by herdr.
 type Env struct {
-	InHerdr  bool    // HERDR_ENV == "1"
-	StateDir string  // HERDR_PLUGIN_STATE_DIR, "" when unset
-	Context  Context // zero when HERDR_PLUGIN_CONTEXT_JSON is unset or invalid
+	InHerdr    bool    // HERDR_ENV == "1"
+	StateDir   string  // HERDR_PLUGIN_STATE_DIR, "" when unset
+	SocketPath string  // HERDR_SOCKET_PATH, "" when unset
+	Context    Context // zero when HERDR_PLUGIN_CONTEXT_JSON is unset or invalid
 }
 
 // FromEnv reads the herdr environment. A missing or malformed context is not an
 // error: the pane still works, it just falls back to its working directory.
 func FromEnv(getenv func(string) string) Env {
 	e := Env{
-		InHerdr:  getenv(envHerdr) == "1",
-		StateDir: getenv(envStateDir),
+		InHerdr:    getenv(envHerdr) == "1",
+		StateDir:   getenv(envStateDir),
+		SocketPath: getenv(envSocket),
 	}
 	if raw := getenv(envContext); raw != "" {
 		var c Context

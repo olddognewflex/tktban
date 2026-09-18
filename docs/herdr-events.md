@@ -215,3 +215,27 @@ command = ["./bin/tktban", "herdr-hook"]
 - Hook behaviour under herdr server restart or `server reload-config`.
 - Whether a hook can run concurrently with itself for the same pane beyond the
   7-event burst measured here.
+
+## Verified in TKB-22
+
+Rechecked against herdr 0.9.0 / protocol 22 while building the live badge
+(`internal/herdr/client.go`, `live.go`):
+
+- `ping` is the cheap protocol probe: `{"result":{"type":"pong","version":"0.9.0","protocol":22,...}}`.
+  tktban calls it once when the board opens and turns live status off on any
+  other protocol, instead of reading `session.snapshot`.
+- `agent.list` replies `{"result":{"type":"agent_list","agents":[...]}}` and
+  lists **only agent panes**. A closed pane just drops out of the next reply,
+  which is how the board clears a badge without any close event.
+- `agent.get` takes `{"target": "<pane>"}`, not `pane_id`. Sending `pane_id`
+  fails with `invalid_request: missing field target`; a missing pane gives
+  `agent_not_found`.
+- Malformed requests (unknown method, missing field) reply with `"id":""`, so
+  a client cannot match errors to requests by id. One request per connection
+  makes that moot.
+- AgentInfo has no branch. The ticket join reads git `HEAD` from the pane's
+  `foreground_cwd` (falling back to `cwd`), following `.git` files for linked
+  worktrees, and takes the key from `feature/{key-lower}-{slug}` or
+  `hotfix/{key-lower}-{slug}`.
+- `HERDR_SOCKET_PATH` is set in plugin pane environments (seen on a running
+  `overlay` plugin pane), not just in hooks.
