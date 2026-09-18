@@ -60,7 +60,7 @@ unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 ## Run inside herdr
 
 tktban ships a [herdr](https://herdr.dev) plugin manifest (`herdr-plugin.toml`),
-so the board opens as an overlay over any herdr workspace.
+so the board opens as a full-screen popup over any herdr workspace.
 
 ```sh
 herdr plugin install olddognewflex/tktban      # clones and builds bin/tktban (needs Go)
@@ -79,9 +79,10 @@ type = "plugin_action"
 command = "odnf.tktban.open-board"
 ```
 
-The key opens the board, focuses it if it is open but not focused, and closes it
-if it is focused. Toggling needs `python3` on herdr's PATH; without it every
-press opens another board. The board reads the tkt config found from the focused pane's
+The key opens the board and, pressed again, closes it (so does `q`). herdr
+allows one popup at a time, so pressing the key while another plugin's popup is
+open closes that popup instead. Toggling needs `python3` on herdr's PATH;
+without it the key only opens. The board reads the tkt config found from the focused pane's
 directory, falling back to the workspace root, so each project shows its own
 board.
 
