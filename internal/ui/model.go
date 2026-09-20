@@ -58,6 +58,13 @@ type Model struct {
 	// live is herdr agent status for card badges; zero (off) outside herdr.
 	live liveState
 
+	// selectKey is a ticket to select once the board first loads (--select /
+	// --select-from-cwd); it is cleared as soon as it has been applied.
+	// popup means the board is herdr's popup pane, which a successful jump
+	// closes by exiting.
+	selectKey string
+	popup     bool
+
 	width, height int
 
 	modal modal
@@ -251,6 +258,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case liveTickMsg:
 		return m.onLiveTick()
 
+	case jumpMsg:
+		return m.onJump(msg)
+
 	case statusExpireMsg:
 		if int(msg) == m.statusSeq {
 			m.status, m.statusKind = "", ""
@@ -281,6 +291,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingG = true
 		return m, nil
+	}
+
+	// `ga` is the second spelling of the o jump, for hands that reach for a g
+	// prefix. It has to be handled before the reset below, or the pending g
+	// would be dropped and `a` would toggle auto-refresh instead.
+	if s == "a" && m.pendingG {
+		m.pendingG, m.pendingCount = false, 0
+		return m.jumpToAgentPane()
 	}
 
 	// Any other key ends a pending count / half-typed gg. Motions below consume
@@ -340,6 +358,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setStatus("Select a card first", "warn")
 		}
 		return m, prepEditorEditCmd(m.tkt, card.Key)
+	case "o":
+		return m.jumpToAgentPane()
 	case "x":
 		return m.hideFocusedColumn()
 	case "X":
@@ -395,10 +415,46 @@ func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
 	m.applyHidden()
 	m.loaded = true
 	m.restoreSelection(curRole, curKey)
+	// A --select key overrides the restored selection, but only on the load
+	// that consumes it; its own outcome is the status worth showing.
+	if cmd := m.applySelectKey(); cmd != nil {
+		return m, cmd
+	}
 	if msg.warn != "" {
 		return m, m.setStatus(msg.warn, "warn")
 	}
 	return m, nil
+}
+
+// applySelectKey consumes a pending --select key: it focuses that ticket's
+// column and card, or says why it cannot. The key is cleared either way, so a
+// later auto-refresh never yanks the selection back from wherever the user has
+// moved it since. Returns nil when there was nothing to select.
+func (m *Model) applySelectKey() tea.Cmd {
+	key := m.selectKey
+	if key == "" {
+		return nil
+	}
+	m.selectKey = ""
+	for i, col := range m.columns {
+		for j, c := range col.Cards {
+			if strings.EqualFold(c.Key, key) {
+				m.focusCol = i
+				m.sel[col.Role] = j
+				return m.setStatus("Selected "+key, "")
+			}
+		}
+	}
+	// Off-board or out of sight: a hidden column is the recoverable case, so
+	// name the lane and the key that brings it back.
+	for _, col := range m.allColumns {
+		for _, c := range col.Cards {
+			if strings.EqualFold(c.Key, key) {
+				return m.setStatus(key+" is in "+col.Lane+", a hidden column (X shows all columns)", "warn")
+			}
+		}
+	}
+	return m.setStatus(key+" is not on the board", "warn")
 }
 
 func (m Model) onCreate(msg createMsg) (tea.Model, tea.Cmd) {
@@ -612,4 +668,19 @@ func clamp(v, lo, hi int) int {
 
 func secondsToDuration(secs float64) time.Duration {
 	return time.Duration(secs * float64(time.Second))
+}
+
+// WithSelect makes the board open with one ticket selected (tktban --select,
+// and the herdr pane's --select-from-cwd). An empty key changes nothing.
+func (m Model) WithSelect(key string) Model {
+	m.selectKey = strings.ToUpper(strings.TrimSpace(key))
+	return m
+}
+
+// WithPopup marks the board as herdr's popup pane. The popup has no pane id of
+// its own, so a successful jump to an agent pane ends the process, which is
+// what closes the popup.
+func (m Model) WithPopup(popup bool) Model {
+	m.popup = popup
+	return m
 }
