@@ -10,7 +10,8 @@
 #   command = "odnf.tktban.open-board"
 #
 # Live agent badges need no hook: the open board polls herdr's socket
-# (HERDR_SOCKET_PATH) itself; --no-herdr-live turns that off. Event hooks
+# (HERDR_SOCKET_PATH) itself; --no-herdr-live turns that off. The same socket
+# carries the card -> pane jump (pane.focus). Event hooks
 # (notifications, write-back) come later; see docs/herdr-events.md for which
 # events a manifest can hook.
 id = "odnf.tktban"
@@ -25,7 +26,12 @@ platforms = ["macos", "linux"]
 command = ["go", "build", "-o", "bin/tktban", "./cmd/tktban"]
 
 # The board TUI. --herdr picks the config from the herdr context and keeps UI
-# settings in the plugin state dir.
+# settings in the plugin state dir; --select-from-cwd opens the board on the
+# ticket named by the branch checked out in the pane the action was invoked
+# from (plugin.pane.open takes no argv, so the key is derived in tktban from
+# HERDR_PLUGIN_CONTEXT_JSON). `o` (or `ga`) in the board jumps the other way,
+# focusing the herdr pane running the selected card's agent and closing the
+# popup.
 #
 # A popup, not an overlay: herdr 0.9.0 sizes an overlay's (and a tab's)
 # terminal to the pane it covers and never resizes it, so in a split workspace
@@ -37,7 +43,7 @@ title = "tktban"
 placement = "popup"
 width = "100%"
 height = "100%"
-command = ["./bin/tktban", "--herdr"]
+command = ["./bin/tktban", "--herdr", "--select-from-cwd"]
 
 # Toggle the board: open it, or close the open popup on a second press.
 [[actions]]

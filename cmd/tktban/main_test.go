@@ -91,3 +91,73 @@ func TestLiveSourceOnlyInsideHerdr(t *testing.T) {
 		}
 	}
 }
+
+// repoOn makes a directory that reads as a git checkout of branch, without
+// needing git: KeysForDir follows .git/HEAD.
+func repoOn(t *testing.T, base, name, branch string) string {
+	t.Helper()
+	dir := filepath.Join(base, name)
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	head := "ref: refs/heads/" + branch + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte(head), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// An explicit --select beats --select-from-cwd, even when the branch names a
+// different ticket, so a person can always ask for the board they want.
+func TestSelectFlagWins(t *testing.T) {
+	base := t.TempDir()
+	pane := repoOn(t, base, "pane", "feature/tkb-99-other")
+	env := envOf(map[string]string{
+		"HERDR_ENV":                 "1",
+		"HERDR_PLUGIN_CONTEXT_JSON": `{"focused_pane_cwd":"` + pane + `"}`,
+	})
+	if got := selectTarget("TKB-23", true, env, base); got != "TKB-23" {
+		t.Errorf("--select with --select-from-cwd = %q, want TKB-23", got)
+	}
+	if got := selectTarget("TKB-23", false, env, base); got != "TKB-23" {
+		t.Errorf("--select alone = %q, want TKB-23", got)
+	}
+	// Neither flag means no preselection: the branch is not read at all.
+	if got := selectTarget("", false, env, pane); got != "" {
+		t.Errorf("no flags = %q, want no preselection", got)
+	}
+}
+
+// AC2: prefix+t inside an agent pane opens the board on that pane's ticket.
+// The action runs with the invoking pane's context, and the key comes from the
+// branch checked out there — the launcher cannot pass one, since
+// plugin.pane.open takes no argv.
+func TestSelectFromCwdUsesHerdrContext(t *testing.T) {
+	base := t.TempDir()
+	pane := repoOn(t, base, "pane", "feature/tkb-23-agent-pane-jump")
+	ws := repoOn(t, base, "ws", "hotfix/tkb-7-thing")
+	plain := repoOn(t, base, "plain", "main")
+	ctx := func(pane, ws string) string {
+		return `{"workspace_id":"w1","focused_pane_cwd":"` + pane + `","workspace_cwd":"` + ws + `"}`
+	}
+	cases := []struct {
+		name string
+		env  map[string]string
+		cwd  string
+		want string
+	}{
+		{"focused pane's branch", map[string]string{
+			"HERDR_ENV": "1", "HERDR_PLUGIN_CONTEXT_JSON": ctx(pane, ws),
+		}, plain, "TKB-23"},
+		{"workspace root when the pane names nothing", map[string]string{
+			"HERDR_ENV": "1", "HERDR_PLUGIN_CONTEXT_JSON": ctx(plain, ws),
+		}, plain, "TKB-7"},
+		{"outside herdr it is this directory's branch", nil, pane, "TKB-23"},
+		{"a branch with no key preselects nothing", nil, plain, ""},
+	}
+	for _, c := range cases {
+		if got := selectTarget("", true, envOf(c.env), c.cwd); got != c.want {
+			t.Errorf("%s: selectTarget = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

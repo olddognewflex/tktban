@@ -243,3 +243,33 @@ Rechecked against herdr 0.9.0 / protocol 22 while building the live badge
   `git symbolic-ref --short -q HEAD` (checked with git 2.55).
 - `HERDR_SOCKET_PATH` is set in plugin pane environments (seen on a running
   `overlay` plugin pane), not just in hooks.
+
+## Verified in TKB-23
+
+Rechecked against herdr 0.9.0 / protocol 22 while building the card ↔ pane
+jump (`herdr api schema --json`, `internal/herdr/client.go`):
+
+- `pane.focus` takes `{"pane_id": "<pane>"}` (schema `PaneTarget`), while
+  `agent.focus` takes `{"target": "<pane|agent>"}` (`AgentTarget`). The two are
+  easy to swap; sending `target` to `pane.focus` is an `invalid_request`. A
+  success carries the pane info; an id herdr no longer knows gives
+  `pane_not_found`, which the board turns into "Agent pane for KEY is gone".
+- **One `pane.focus` is enough**, including across workspaces and tabs: herdr
+  focuses the pane's workspace and tab on the way. No workspace.focus /
+  tab.focus ladder is needed, though `PaneRef` carries `workspace_id` and
+  `tab_id` if one ever is.
+- A plugin pane with `placement = "popup"` has **no public pane id** — it is
+  not in `pane list` — and `popup.close` takes `{}` (`EmptyParams`),
+  SIGHUPping whichever popup is open. So the board must finish the
+  `pane.focus` round trip **first** and only then exit; its exit is what closes
+  the popup. It must never call `popup.close` to close itself.
+- `plugin.pane.open` (`PluginPaneOpenParams`) accepts no argv: only
+  `plugin_id`, `entrypoint`, `cwd`, `env`, placement and size. Anything the
+  pane needs to know about its invocation must come from the manifest's fixed
+  command, from `--cwd`, or from the environment. Actions do get
+  `HERDR_PLUGIN_CONTEXT_JSON`, so tktban derives the ticket to select from the
+  branch checked out in `focused_pane_cwd` rather than being told it.
+- `pane.report_metadata` (`PaneReportMetadataParams`) takes `pane_id`,
+  `source`, and up to 16 `tokens` with a `ttl_ms` — the mechanism a later
+  ticket (TKB-23 AC3) would use to show `$ticket` in herdr's sidebar. Not used
+  yet.

@@ -5,10 +5,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/fs"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -29,6 +31,8 @@ func run(argv []string) int {
 	noAuto := fs.Bool("no-auto-refresh", false, "start with auto-refresh off (toggle at runtime with 'a')")
 	inHerdr := fs.Bool("herdr", false, "running as a herdr plugin pane: pick config from the herdr context, keep settings in the plugin state dir (no-op outside herdr)")
 	noLive := fs.Bool("no-herdr-live", false, "inside herdr, don't read live agent status from the herdr socket for card badges")
+	selectKey := fs.String("select", "", "select this ticket key when the board opens, e.g. TKB-23")
+	selectFromCwd := fs.Bool("select-from-cwd", false, "select the ticket named by the branch checked out where the board was opened (herdr context, else this directory); --select wins")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: tktban [flags] [board|doctor]")
 		fs.PrintDefaults()
@@ -46,11 +50,12 @@ func run(argv []string) int {
 		command = rest[0]
 	}
 
+	cwd, _ := os.Getwd()
 	cfg, settingsPath, stateDir := *config, "", ""
 	if *inHerdr {
-		cwd, _ := os.Getwd()
 		cfg, settingsPath, stateDir = herdrSetup(cfg, os.Getenv, cwd, os.Stat, os.Lstat)
 	}
+	selected := selectTarget(*selectKey, *selectFromCwd, os.Getenv, cwd)
 
 	tk := tkt.New(cfg, "")
 
@@ -65,7 +70,9 @@ func run(argv []string) int {
 		// from another plugin's before closing it.
 		release := herdr.HoldBoardLock(stateDir)
 		defer release()
-		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive))
+		// --herdr is only ever passed by the manifest's popup pane, so it is
+		// also the board's "you are the popup" signal for a jump.
+		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive), selected, *inHerdr)
 	default:
 		fmt.Fprintf(os.Stderr, "tktban: unknown command %q (want board or doctor)\n", command)
 		return 2
@@ -126,8 +133,32 @@ func liveSource(getenv func(string) string, disabled bool) ui.LiveSource {
 	return herdr.NewSocketSource(e.SocketPath)
 }
 
-func board(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource) int {
-	m := ui.New(tk, interval, auto, settingsPath).WithLive(live)
+// selectKeyTimeout bounds reading the branch of the directories --select-from-cwd
+// looks at. Only a reftable repo runs git at all, but the board must open
+// either way.
+const selectKeyTimeout = 2 * time.Second
+
+// selectTarget is the ticket key the board should open on. An explicit
+// --select always wins; --select-from-cwd otherwise reads the branch checked
+// out where the board was opened — inside herdr that is the invoking pane's
+// directory (the action runs with its context), which is how prefix+t from an
+// agent pane opens the board on that pane's ticket. "" means "no preselection".
+func selectTarget(explicit string, fromCwd bool, getenv func(string) string, cwd string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if !fromCwd {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), selectKeyTimeout)
+	defer cancel()
+	return herdr.SelectKey(herdr.FromEnv(getenv), cwd, func(dir string) []string {
+		return herdr.KeysForDir(ctx, dir)
+	})
+}
+
+func board(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource, selectKey string, popup bool) int {
+	m := ui.New(tk, interval, auto, settingsPath).WithLive(live).WithSelect(selectKey).WithPopup(popup)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tktban:", err)
 		return 1
