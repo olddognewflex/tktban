@@ -9,8 +9,10 @@
 #   type = "plugin_action"
 #   command = "odnf.tktban.open-board"
 #
-# Event hooks (live agent status, notifications, write-back) come later; see
-# docs/herdr-events.md for which events a manifest can hook.
+# Live agent badges need no hook: the open board polls herdr's socket
+# (HERDR_SOCKET_PATH) itself; --no-herdr-live turns that off. Event hooks
+# (notifications, write-back) come later; see docs/herdr-events.md for which
+# events a manifest can hook.
 id = "odnf.tktban"
 name = "tktban"
 version = "0.1.0"

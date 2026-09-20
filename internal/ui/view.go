@@ -44,7 +44,7 @@ func (m Model) subtitle() string {
 	for _, c := range m.columns {
 		total += len(c.Cards)
 	}
-	return fmt.Sprintf("%d tickets%s%s", total, m.filterLabel(), m.autoLabel())
+	return fmt.Sprintf("%d tickets%s%s%s", total, m.filterLabel(), m.autoLabel(), m.liveLabel())
 }
 
 func (m Model) filterLabel() string {
@@ -66,6 +66,13 @@ func (m Model) autoLabel() string {
 		return fmt.Sprintf("  ·  auto %ds", int(m.refreshSecs))
 	}
 	return "  ·  auto off"
+}
+
+func (m Model) liveLabel() string {
+	if m.live.on {
+		return "  ·  herdr live"
+	}
+	return ""
 }
 
 func (m Model) renderStatus() string {
@@ -145,7 +152,7 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		badge = fmt.Sprintf("  ⛔%d", c.BlockerCount)
 	}
 	head := m.styles.cardHead.Render(prio + c.Key + badge)
-	if ab := agentBadge(c.AgentStatus); ab != "" {
+	if ab := m.cardBadge(c); ab != "" {
 		head += " " + m.styles.cardAgent.Render(ab)
 	}
 	// Card text area = card width minus its border (2) and padding (2). The card
@@ -178,9 +185,11 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	return style.Width(width - 4).Render(lines)
 }
 
-// agentBadge maps a ticket's agent_status to a card glyph indicating what the
-// agent is doing. Empty and idle render nothing (a card only carries a badge
-// while an agent is actively engaged); unknown states are likewise silent.
+// agentBadge maps a ticket's frontmatter agent_status to a card glyph
+// indicating what the agent is doing. Empty and idle render nothing (a card only
+// carries a badge while an agent is actively engaged); unknown states are
+// likewise silent. Inside herdr, live status can override it: ⚙ working and
+// 🙋 waiting on a human come from herdr (see badgeFor in live.go).
 func agentBadge(status string) string {
 	switch status {
 	case "processing":

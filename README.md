@@ -97,8 +97,43 @@ Under herdr the pane runs `tktban --herdr`, which:
 
 Outside herdr the flag does nothing. For publishing, tag the GitHub repo with
 the `herdr-plugin` topic so it shows in the herdr plugin marketplace.
-[docs/herdr-events.md](docs/herdr-events.md) records which herdr events a
-future live-status feature can hook.
+[docs/herdr-events.md](docs/herdr-events.md) records which herdr events the
+live status below and future hooks can use.
+
+### Live agent badges
+
+Inside herdr (any pane, with or without `--herdr`) the board polls herdr's
+socket every 500 ms and badges each card whose ticket has an agent running,
+with no refresh key needed. The subtitle shows `herdr live` while this is on.
+
+| Badge | Meaning | Source |
+|-------|---------|--------|
+| ⚙ | agent working | herdr (or frontmatter `processing` when live is off) |
+| 🙋 | agent waiting on you: a permission prompt or question | herdr |
+| ⏳ | waiting | frontmatter `agent_status` |
+| 🚫 | blocked | frontmatter `agent_status` |
+| ✓ | done | frontmatter `agent_status` |
+
+herdr `idle` and `done` show no badge. While live is on, herdr's 🙋 / ⚙ win
+over the ticket's frontmatter; otherwise the frontmatter badge shows, except
+`processing`, which is hidden because herdr says no agent is working (a killed
+pane clears its badge on the next poll even though the file still says
+`processing`). Outside herdr, with `--no-herdr-live`, or while herdr is not
+answering, badges come from frontmatter alone, exactly as without herdr. If
+herdr speaks an unsupported socket protocol, live status stays off for the
+run. Any other failure (herdr not answering at startup, or 3 failed polls
+later) shows one warning, retries every 2 s, and goes live again on its own
+once herdr is back.
+
+Panes are matched to tickets by branch: the board reads the git branch checked
+out in each agent pane's directory (linked worktrees included) and takes the
+ticket key from it, following the `.sdlc` branch convention
+`feature/{key-lower}-{slug}` or `hotfix/{key-lower}-{slug}`, e.g.
+`feature/tkb-22-live-herdr-status` → `TKB-22`. A branch naming several keys
+(`revert-45-feature/tkb-22-x`) badges each of them. Agents on a branch with
+no key are ignored. When several agent panes work one ticket, 🙋 beats ⚙.
+The branch comes from the `.git/HEAD` file; only repos using reftable ref
+storage, where that file is a stub, run `git symbolic-ref` instead.
 
 ## How it talks to tkt
 
