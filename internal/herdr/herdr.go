@@ -96,6 +96,25 @@ func ResolveConfig(e Env, cwd string, stat statFunc) string {
 	return ""
 }
 
+// SelectKey is the ticket a board opened from inside herdr should land on:
+// the key named by the branch checked out where the action ran. The
+// precedence is ResolveConfig's — the focused pane's directory, then the
+// workspace root, then the process working directory — and the first key of
+// the first directory that names one wins. Returns "" when no directory names
+// a ticket, which means "open the board wherever it would normally open".
+// keysForDir is injected (herdr.KeysForDir in production) so this stays pure.
+func SelectKey(e Env, cwd string, keysForDir func(string) []string) string {
+	for _, start := range []string{e.Context.FocusedPaneCwd, e.Context.WorkspaceCwd, cwd} {
+		if start == "" {
+			continue
+		}
+		if keys := keysForDir(start); len(keys) > 0 {
+			return keys[0]
+		}
+	}
+	return ""
+}
+
 // SettingsPath returns where tktban keeps its UI settings in herdr mode: the
 // plugin's own state dir, so the plugin never writes outside what herdr gave it.
 // Returns "" when there is no state dir, meaning "use the standalone default".

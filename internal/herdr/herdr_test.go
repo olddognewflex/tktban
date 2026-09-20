@@ -259,3 +259,48 @@ func TestSeedSettingsNoSourceOrNoTarget(t *testing.T) {
 		t.Fatalf("empty target must be a no-op: %v", err)
 	}
 }
+
+// SelectKey follows ResolveConfig's precedence: the focused pane's directory,
+// then the workspace root, then the process cwd; the first key wins.
+func TestSelectKeyPrecedence(t *testing.T) {
+	keys := map[string][]string{
+		"/pane":   {"TKB-23", "TKB-24"},
+		"/ws":     {"TKB-99"},
+		"/cwd":    {"TKB-7"},
+		"/nokeys": nil,
+	}
+	keysForDir := func(dir string) []string { return keys[dir] }
+	ctx := func(pane, ws string) Env {
+		return Env{InHerdr: true, Context: Context{FocusedPaneCwd: pane, WorkspaceCwd: ws}}
+	}
+	cases := []struct {
+		name string
+		e    Env
+		cwd  string
+		want string
+	}{
+		{"focused pane wins", ctx("/pane", "/ws"), "/cwd", "TKB-23"},
+		{"workspace next", ctx("", "/ws"), "/cwd", "TKB-99"},
+		{"cwd last", ctx("", ""), "/cwd", "TKB-7"},
+		{"a keyless pane falls through to the workspace", ctx("/nokeys", "/ws"), "/cwd", "TKB-99"},
+		{"a keyless pane and workspace fall through to cwd", ctx("/nokeys", "/nokeys"), "/cwd", "TKB-7"},
+		{"nothing named anywhere", ctx("/nokeys", "/nokeys"), "/nokeys", ""},
+		{"outside herdr it is just the cwd", Env{}, "/cwd", "TKB-7"},
+		{"no directories at all", Env{}, "", ""},
+	}
+	for _, c := range cases {
+		if got := SelectKey(c.e, c.cwd, keysForDir); got != c.want {
+			t.Errorf("%s: SelectKey = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// An empty directory is skipped rather than handed to keysForDir (which would
+// walk up from the process cwd and pick a key from the wrong repo).
+func TestSelectKeySkipsEmptyDirs(t *testing.T) {
+	var asked []string
+	SelectKey(Env{}, "", func(dir string) []string { asked = append(asked, dir); return nil })
+	if len(asked) != 0 {
+		t.Fatalf("asked for keys of %v, want nothing", asked)
+	}
+}
