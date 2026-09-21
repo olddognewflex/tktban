@@ -85,7 +85,9 @@ func livePollCmd(src LiveSource) tea.Cmd {
 }
 
 // scheduleLive arms the next tick. Only a probe or poll result calls it, so at
-// most one call to herdr is ever in flight.
+// most one probe or poll is ever in flight. A jump (jumpCmd) is not on that
+// clock and can overlap one; that is safe because a Client dials per call and
+// a SocketSource keeps no mutable state.
 func (m *Model) scheduleLive(d time.Duration) tea.Cmd {
 	m.live.nextPoll = d
 	return tea.Tick(d, func(time.Time) tea.Msg { return liveTickMsg{} })

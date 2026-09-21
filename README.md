@@ -221,10 +221,18 @@ poll.
 **The key only changes while a board is running.** The token is published
 without an expiry on purpose — the board is usually a popup that closes
 seconds later, and an expiring token would blank the sidebar exactly then —
-so it survives the board, but nothing updates it once the board is gone. Check
-out another branch in that pane afterwards and the sidebar keeps showing the
-old key until the next time a board runs. Opening the board refreshes every
-pane within 500 ms.
+so it survives the board, but nothing updates it once the board is gone.
+Check out another branch in that pane afterwards and the sidebar keeps showing
+the old key until a board next runs.
+
+That is the *only* way it goes stale, because each poll compares every pane
+against the token herdr itself reports, not against what this board has
+published. So the first poll of any board — within 500 ms of opening it —
+corrects every pane it finds wrong, including keys an earlier board left
+behind and panes that have since moved to a branch naming no ticket (their
+token is cleared). Nothing is written when herdr already agrees, so a board
+left open makes no calls at all. A pane that has closed needs no cleaning up:
+its metadata goes with it.
 
 ## How it talks to tkt
 

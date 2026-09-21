@@ -15,16 +15,17 @@
 # (notifications, write-back) come later; see docs/herdr-events.md for which
 # events a manifest can hook.
 #
-# Each poll also reports the ticket key of every agent pane back to herdr as a
-# `ticket` pane-metadata token (source "odnf.tktban"), which herdr's own
-# sidebar rows can show as $ticket -- nothing here configures that, it is a
-# herdr setting:
+# Each poll also reconciles the ticket key of every agent pane with herdr's
+# own `ticket` pane-metadata token (source "odnf.tktban"), reporting only the
+# panes whose key herdr does not already hold. herdr's sidebar rows can show
+# it as $ticket -- nothing here configures that, it is a herdr setting:
 #
 #   [ui.sidebar.agents]
 #   rows = [["state_icon", "machine", "workspace", "tab"], ["$ticket"], ["agent"]]
 #
 # Only tokens are reported: pane titles stay with whatever plugin owns them.
-# --no-herdr-tokens turns the reporting off.
+# --no-herdr-tokens turns the reporting off, and so does --no-herdr-live,
+# which takes the poll it rides on away.
 id = "odnf.tktban"
 name = "tktban"
 version = "0.1.0"

@@ -303,11 +303,12 @@ behaviour itself by hand in a live session (see `internal/herdr/client.go`).
   `pane.report_metadata` tokens would not change it either: the board would
   still have to know the ticket before it could report one.
 - `pane.report_metadata` (`PaneReportMetadataParams`) requires **`pane_id` and
-  `source`** and takes, all optional, `title`, `display_agent`, `state_labels`,
-  `tokens`, `applies_to_source`, `seq`, `ttl_ms`, plus the `clear_*` booleans
-  the CLI mirrors as `--clear-title` / `--clear-display-agent` /
-  `--clear-state-labels` / `--clear-token`. tktban sends `pane_id`, `source`
-  (`odnf.tktban`) and `tokens`, nothing else.
+  `source`** and takes, all optional, `agent`, `title`, `display_agent`,
+  `state_labels`, `tokens`, `applies_to_source`, `seq`, `ttl_ms`, and three
+  booleans — `clear_title`, `clear_display_agent`, `clear_state_labels`.
+  There is no `clear_tokens`: the CLI's `--clear-token NAME` is sugar for
+  `tokens: {NAME: null}`. tktban sends `pane_id`, `source` (`odnf.tktban`)
+  and `tokens`, nothing else.
 - **Token constraints**: at most 16 tokens per call, names must match
   `^[A-Za-z0-9_-]{1,32}$`, values are `string | null`, and **null clears** that
   token (a key left out is simply not touched — that distinction is why
@@ -335,8 +336,17 @@ behaviour itself by hand in a live session (see `internal/herdr/client.go`).
   metadata. `herdr.auto-title` renames *tabs* (`tab.rename`), which is a
   different surface; tktban deliberately sets neither `title` nor
   `display_agent` so the two never fight.
-- **Publishing is best-effort and diffed.** `SocketSource.Poll` is now also a
-  writer: after a successful poll it sends only the panes whose key changed,
-  and a `{"ticket": null}` clear for panes that dropped out of the mapping. A
-  failed call is not recorded, so the next poll retries it. Nothing about it
-  can fail a poll or change a badge.
+- **Publishing is best-effort and stateless.** `SocketSource.Poll` is now also
+  a writer: after a successful poll it diffs the ticket it resolved for each
+  pane against the `tokens` that same `agent.list` reply carried, and reports
+  only the panes where the two differ — a value to set, or `{"ticket": null}`
+  to clear one that is on no ticket any more (a branch naming none, or an
+  agent herdr has released). Because the comparison is against **herdr's own
+  state**, not against anything the process remembers, it is idempotent and
+  self-healing: a board start corrects whatever an earlier board left behind,
+  a steady-state poll makes zero calls, and a failed call needs no retry
+  bookkeeping — herdr still does not hold the wanted value, so the next poll
+  tries again. Nothing about it can fail a poll or change a badge.
+- A pane that has **closed** is not reported to: it is gone from `agent.list`,
+  it took its metadata with it, and `pane.report_metadata` for it would only
+  answer `pane_not_found`. Only panes herdr still lists are reconciled.
