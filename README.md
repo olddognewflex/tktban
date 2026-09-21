@@ -156,11 +156,10 @@ answering, and `Agent pane for TKB-23 is gone` when the pane closed between the
 last poll and the keypress — in which case the board stays open.
 
 **Pane → card.** Pressing the `prefix+t` board key *inside* an agent pane opens
-the board with that pane's ticket already selected: the action runs with the
-invoking pane's directory, and the board takes the key from the branch checked
-out there. A ticket that is real but sits in a column you have hidden says so
-and names `X` (show all columns); one that is not on the board says that
-instead.
+the board with that pane's ticket already selected: the launcher starts the
+board in that pane's directory, and the board takes the key from the branch
+checked out there. It says where the ticket is if you have hidden its column,
+and opens quietly if the branch names nothing this board shows.
 
 Standalone, the same thing is a flag:
 
@@ -169,8 +168,13 @@ tktban --select TKB-23           # open the board with TKB-23 selected
 tktban --select-from-cwd         # ...with whatever this branch's ticket is
 ```
 
-`--select` wins over `--select-from-cwd`. The selection is applied once, on the
-first load, so a later auto-refresh never drags you back to it.
+`--select` wins over `--select-from-cwd`, and a `--select` that finds nothing
+says so where a derived one stays quiet. The branch is read in the background,
+so the board paints first either way, and the selection is applied once — a
+later auto-refresh never drags you back to it. One refusal: a board running
+inside herdr that was given no herdr context does not fall back to guessing
+from its working directory, because a plugin pane started without one runs in
+the plugin's own checkout.
 
 ## How it talks to tkt
 

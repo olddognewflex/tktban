@@ -13,16 +13,35 @@
 # popup.close (which closes whichever popup is open) sent.
 #
 # The board is opened with --cwd set to the focused pane's directory (else the
-# workspace root) so `tktban --herdr` finds that project's .sdlc/config.toml.
-# The manifest declares the popup size; the CLI cannot, so no --placement here.
-# python3 reads the herdr context and talks to the socket; without it the key
-# only opens.
+# workspace root) so `tktban --herdr` finds that project's .sdlc/config.toml
+# and --select-from-cwd reads that project's branch. The context is forwarded
+# in the environment too: plugin.pane.open carries cwd and env but no argv,
+# and herdr sets HERDR_PLUGIN_CONTEXT_JSON for an action like this one, not
+# necessarily for the pane it opens. Getting the directory wrong would open
+# the wrong project's board, so when python3 is missing a plain-bash reader
+# takes over rather than letting the pane start in the plugin's own install
+# directory. The manifest declares the popup size; the CLI cannot, so no
+# --placement here. python3 also talks to the socket; without it the key only
+# opens and never toggles.
 set -uo pipefail
 
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 plugin_id="${HERDR_PLUGIN_ID:-odnf.tktban}"
 have_py=0
 command -v python3 >/dev/null 2>&1 && have_py=1
+
+ctx="${HERDR_PLUGIN_CONTEXT_JSON:-}"
+
+# ctx_field KEY prints the string value of a top-level key of the context.
+# The context is flat JSON of plain strings, so a bash match is enough; this
+# is only the fallback for a host without python3, and a path holding a quote
+# or a backslash reads as empty (no --cwd) rather than as the wrong path.
+ctx_field() {
+  [ -n "$ctx" ] || return 0
+  if [[ $ctx =~ \"$1\"[[:space:]]*:[[:space:]]*\"([^\"\\]*)\" ]]; then
+    printf %s "${BASH_REMATCH[1]}"
+  fi
+}
 
 cwd=""
 if [ "$have_py" = 1 ]; then
@@ -40,8 +59,12 @@ PY
 )"
 fi
 
+[ -n "$cwd" ] || cwd="$(ctx_field focused_pane_cwd)"
+[ -n "$cwd" ] || cwd="$(ctx_field workspace_cwd)"
+
 args=(plugin pane open --plugin "$plugin_id" --entrypoint board --focus)
 [ -n "$cwd" ] && args+=(--cwd "$cwd")
+[ -n "$ctx" ] && args+=(--env "HERDR_PLUGIN_CONTEXT_JSON=$ctx")
 
 out="$("$herdr_bin" "${args[@]}" 2>&1)"
 status=$?

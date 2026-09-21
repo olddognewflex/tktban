@@ -96,15 +96,24 @@ func ResolveConfig(e Env, cwd string, stat statFunc) string {
 	return ""
 }
 
-// SelectKey is the ticket a board opened from inside herdr should land on:
-// the key named by the branch checked out where the action ran. The
-// precedence is ResolveConfig's — the focused pane's directory, then the
-// workspace root, then the process working directory — and the first key of
-// the first directory that names one wins. Returns "" when no directory names
-// a ticket, which means "open the board wherever it would normally open".
+// SelectKey is the ticket a board should open on: the key named by the branch
+// checked out where the board was opened. It tries the herdr context first
+// (focused pane, then workspace root) and falls back to the process working
+// directory; the first key found wins, and "" means "nothing to preselect".
 // keysForDir is injected (herdr.KeysForDir in production) so this stays pure.
+//
+// The one refusal: a herdr process that was given no context at all does not
+// fall back to its working directory. herdr starts a plugin pane in the
+// plugin's own install directory unless the launcher passes --cwd, and that
+// directory is a checkout too — guessing from it would silently select the
+// plugin's own ticket from every pane in every repo. Outside herdr the
+// working directory is exactly what the person meant, so it is used.
 func SelectKey(e Env, cwd string, keysForDir func(string) []string) string {
-	for _, start := range []string{e.Context.FocusedPaneCwd, e.Context.WorkspaceCwd, cwd} {
+	dirs := []string{e.Context.FocusedPaneCwd, e.Context.WorkspaceCwd}
+	if !e.InHerdr || dirs[0] != "" || dirs[1] != "" {
+		dirs = append(dirs, cwd)
+	}
+	for _, start := range dirs {
 		if start == "" {
 			continue
 		}

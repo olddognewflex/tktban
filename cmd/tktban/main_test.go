@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/olddognewflex/tktban/internal/tkt"
+	"github.com/olddognewflex/tktban/internal/ui"
 )
 
 func envOf(m map[string]string) func(string) string {
@@ -107,6 +110,16 @@ func repoOn(t *testing.T, base, name, branch string) string {
 	return dir
 }
 
+// resolve runs selectTarget the way the board does: take the key it already
+// has, or run the derivation it handed back.
+func resolve(explicit string, fromCwd bool, getenv func(string) string, cwd string) string {
+	key, derive := selectTarget(explicit, fromCwd, getenv, cwd)
+	if derive == nil {
+		return key
+	}
+	return derive()
+}
+
 // An explicit --select beats --select-from-cwd, even when the branch names a
 // different ticket, so a person can always ask for the board they want.
 func TestSelectFlagWins(t *testing.T) {
@@ -116,22 +129,36 @@ func TestSelectFlagWins(t *testing.T) {
 		"HERDR_ENV":                 "1",
 		"HERDR_PLUGIN_CONTEXT_JSON": `{"focused_pane_cwd":"` + pane + `"}`,
 	})
-	if got := selectTarget("TKB-23", true, env, base); got != "TKB-23" {
-		t.Errorf("--select with --select-from-cwd = %q, want TKB-23", got)
+	cases := []struct {
+		name     string
+		explicit string
+		fromCwd  bool
+		want     string
+	}{
+		{"--select with --select-from-cwd", "TKB-23", true, "TKB-23"},
+		{"--select alone", "TKB-23", false, "TKB-23"},
+		{"neither flag reads no branch", "", false, ""},
+		{"--select empty is no selection", "", false, ""},
+		{"a junk --select is passed on for the board to report", "not a key", true, "not a key"},
 	}
-	if got := selectTarget("TKB-23", false, env, base); got != "TKB-23" {
-		t.Errorf("--select alone = %q, want TKB-23", got)
+	for _, c := range cases {
+		if got := resolve(c.explicit, c.fromCwd, env, base); got != c.want {
+			t.Errorf("%s: selectTarget = %q, want %q", c.name, got, c.want)
+		}
 	}
-	// Neither flag means no preselection: the branch is not read at all.
-	if got := selectTarget("", false, env, pane); got != "" {
-		t.Errorf("no flags = %q, want no preselection", got)
+	// An explicit key needs no derivation at all, so nothing touches the disk.
+	if _, derive := selectTarget("TKB-23", true, env, base); derive != nil {
+		t.Error("--select still handed back a branch derivation to run")
+	}
+	// --select-from-cwd defers its work instead of doing it up front.
+	if key, derive := selectTarget("", true, env, base); key != "" || derive == nil {
+		t.Errorf("--select-from-cwd resolved eagerly: key=%q derive=%v", key, derive != nil)
 	}
 }
 
-// AC2: prefix+t inside an agent pane opens the board on that pane's ticket.
-// The action runs with the invoking pane's context, and the key comes from the
-// branch checked out there — the launcher cannot pass one, since
-// plugin.pane.open takes no argv.
+// AC2: the board key pressed inside an agent pane opens the board on that
+// pane's ticket. The launcher passes the pane's directory and forwards its
+// herdr context, because plugin.pane.open carries cwd and env but no argv.
 func TestSelectFromCwdUsesHerdrContext(t *testing.T) {
 	base := t.TempDir()
 	pane := repoOn(t, base, "pane", "feature/tkb-23-agent-pane-jump")
@@ -152,12 +179,71 @@ func TestSelectFromCwdUsesHerdrContext(t *testing.T) {
 		{"workspace root when the pane names nothing", map[string]string{
 			"HERDR_ENV": "1", "HERDR_PLUGIN_CONTEXT_JSON": ctx(plain, ws),
 		}, plain, "TKB-7"},
+		{"the pane's own directory once the context named one", map[string]string{
+			"HERDR_ENV": "1", "HERDR_PLUGIN_CONTEXT_JSON": `{"workspace_cwd":"` + plain + `"}`,
+		}, pane, "TKB-23"},
+		{"a herdr pane with no context does not guess", map[string]string{
+			"HERDR_ENV": "1",
+		}, pane, ""},
 		{"outside herdr it is this directory's branch", nil, pane, "TKB-23"},
 		{"a branch with no key preselects nothing", nil, plain, ""},
 	}
 	for _, c := range cases {
-		if got := selectTarget("", true, envOf(c.env), c.cwd); got != c.want {
+		if got := resolve("", true, envOf(c.env), c.cwd); got != c.want {
 			t.Errorf("%s: selectTarget = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// The popup behaviour is the manifest's --popup, not --herdr: --herdr is a
+// documented flag someone may pass to a board in an ordinary pane, and that
+// board must not exit when they jump to an agent pane.
+func TestPopupFlagWiring(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"--herdr"}, false},
+		{[]string{"--popup"}, true},
+		{[]string{"--herdr", "--popup"}, true},
+	}
+	orig := board
+	t.Cleanup(func() { board = orig })
+	for _, c := range cases {
+		got := false
+		ran := false
+		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, _ ui.LiveSource, _ string, _ func() string, popup bool) int {
+			ran, got = true, popup
+			return 0
+		}
+		if code := run(c.argv); code != 0 {
+			t.Fatalf("%v: run = %d", c.argv, code)
+		}
+		if !ran {
+			t.Fatalf("%v: the board never ran", c.argv)
+		}
+		if got != c.want {
+			t.Errorf("%v: popup = %v, want %v", c.argv, got, c.want)
+		}
+	}
+}
+
+// doctor goes nowhere near the board — and so nowhere near the select-key
+// derivation, which now lives inside the board branch and never runs here.
+func TestDoctorDoesNotRunTheBoard(t *testing.T) {
+	origBoard, origDoctor := board, doctor
+	t.Cleanup(func() { board, doctor = origBoard, origDoctor })
+	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, string, func() string, bool) int {
+		t.Error("doctor ran the board")
+		return 1
+	}
+	ran := false
+	doctor = func(*tkt.Tkt) int { ran = true; return 0 }
+	if code := run([]string{"--select-from-cwd", "doctor"}); code != 0 {
+		t.Fatalf("doctor exit = %d", code)
+	}
+	if !ran {
+		t.Fatal("doctor did not run")
 	}
 }

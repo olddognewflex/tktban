@@ -263,12 +263,29 @@ jump (`herdr api schema --json`, `internal/herdr/client.go`):
   SIGHUPping whichever popup is open. So the board must finish the
   `pane.focus` round trip **first** and only then exit; its exit is what closes
   the popup. It must never call `popup.close` to close itself.
-- `plugin.pane.open` (`PluginPaneOpenParams`) accepts no argv: only
-  `plugin_id`, `entrypoint`, `cwd`, `env`, placement and size. Anything the
-  pane needs to know about its invocation must come from the manifest's fixed
-  command, from `--cwd`, or from the environment. Actions do get
-  `HERDR_PLUGIN_CONTEXT_JSON`, so tktban derives the ticket to select from the
-  branch checked out in `focused_pane_cwd` rather than being told it.
+- `plugin.pane.open` (`PluginPaneOpenParams`) accepts **no argv**, but it does
+  take both `cwd` and `env` (plus `plugin_id`, `entrypoint`, placement and
+  size). So a pane's command line is fixed by the manifest, and everything
+  else about the invocation has to arrive as the working directory or as
+  environment variables. `herdr plugin pane open` exposes both as `--cwd` and
+  `--env KEY=VALUE`.
+- What that means for the ticket the board opens on: **the working directory
+  is the main path**. `scripts/open-board.sh` runs as an action, and actions
+  are where `HERDR_PLUGIN_CONTEXT_JSON` is confirmed to be set; it reads
+  `focused_pane_cwd` (else `workspace_cwd`) from there and passes it as
+  `--cwd`, so the board's own process directory is already the right repo.
+  The launcher also forwards the context with `--env`, because it was not
+  confirmed that herdr sets `HERDR_PLUGIN_CONTEXT_JSON` for the *pane* it
+  opens — so `herdr.SelectKey`'s context branches are a fallback for when it
+  is there, not the path normally taken. Deriving the key inside tktban is
+  therefore a choice (it keeps the launcher a dumb wrapper and the key
+  resolution testable in Go), not something the API forces.
+- A plugin pane started **without** `--cwd` runs in the plugin's own install
+  directory, which is a checkout with a ticket key of its own. `SelectKey`
+  refuses to read a working directory when it is inside herdr and was handed
+  no context at all, so a launcher that cannot work out where it was invoked
+  opens the board with nothing selected instead of with the plugin's own
+  ticket selected.
 - `pane.report_metadata` (`PaneReportMetadataParams`) takes `pane_id`,
   `source`, and up to 16 `tokens` with a `ttl_ms` — the mechanism a later
   ticket (TKB-23 AC3) would use to show `$ticket` in herdr's sidebar. Not used

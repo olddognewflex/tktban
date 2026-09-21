@@ -281,7 +281,6 @@ func TestSelectKeyPrecedence(t *testing.T) {
 	}{
 		{"focused pane wins", ctx("/pane", "/ws"), "/cwd", "TKB-23"},
 		{"workspace next", ctx("", "/ws"), "/cwd", "TKB-99"},
-		{"cwd last", ctx("", ""), "/cwd", "TKB-7"},
 		{"a keyless pane falls through to the workspace", ctx("/nokeys", "/ws"), "/cwd", "TKB-99"},
 		{"a keyless pane and workspace fall through to cwd", ctx("/nokeys", "/nokeys"), "/cwd", "TKB-7"},
 		{"nothing named anywhere", ctx("/nokeys", "/nokeys"), "/nokeys", ""},
@@ -292,6 +291,34 @@ func TestSelectKeyPrecedence(t *testing.T) {
 		if got := SelectKey(c.e, c.cwd, keysForDir); got != c.want {
 			t.Errorf("%s: SelectKey = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// A herdr process given no context does not guess from its working directory:
+// herdr starts a plugin pane in the plugin's own install dir unless the
+// launcher passes --cwd, and that dir is a checkout with a ticket of its own.
+// Outside herdr the working directory is the person's own, so it is used.
+func TestSelectKeyIgnoresCwdInHerdrWithoutContext(t *testing.T) {
+	keysForDir := func(string) []string { return []string{"TKB-23"} } // the plugin's own checkout
+	blind := Env{InHerdr: true, StateDir: "/state/odnf.tktban"}
+	if got := SelectKey(blind, "/plugins/odnf.tktban", keysForDir); got != "" {
+		t.Errorf("a contextless herdr pane selected %q from its own directory", got)
+	}
+	// Any context at all means the launcher told us where we are, so the
+	// working directory is a usable last resort again.
+	withCtx := blind
+	withCtx.Context.WorkspaceCwd = "/nokeys"
+	only := func(dir string) []string {
+		if dir == "/repo" {
+			return []string{"TKB-7"}
+		}
+		return nil
+	}
+	if got := SelectKey(withCtx, "/repo", only); got != "TKB-7" {
+		t.Errorf("with a context, cwd fallback = %q, want TKB-7", got)
+	}
+	if got := SelectKey(Env{}, "/plugins/odnf.tktban", keysForDir); got != "TKB-23" {
+		t.Errorf("outside herdr the cwd must still count, got %q", got)
 	}
 }
 
