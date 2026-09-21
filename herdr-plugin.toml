@@ -14,6 +14,17 @@
 # carries the card -> pane jump (pane.focus). Event hooks
 # (notifications, write-back) come later; see docs/herdr-events.md for which
 # events a manifest can hook.
+#
+# Each poll also reports the ticket key of every agent pane back to herdr as a
+# `ticket` pane-metadata token (source "odnf.tktban"), which herdr's own
+# sidebar rows can show as $ticket -- nothing here configures that, it is a
+# herdr setting:
+#
+#   [ui.sidebar.agents]
+#   rows = [["state_icon", "machine", "workspace", "tab"], ["$ticket"], ["agent"]]
+#
+# Only tokens are reported: pane titles stay with whatever plugin owns them.
+# --no-herdr-tokens turns the reporting off.
 id = "odnf.tktban"
 name = "tktban"
 version = "0.1.0"
