@@ -49,6 +49,7 @@ tktban --config path/to/.sdlc/config.toml
 | `m` / `enter` | Move the selected card to another lane (`tkt transition`) |
 | `c` | Comment on the selected card (`tkt comment`) |
 | `n` | Create a new ticket (`tkt create`) |
+| `o` / `ga` | Focus the herdr pane running this card's agent (inside herdr) |
 | `q` | Quit |
 | `tab` / arrows | Move focus between columns and cards |
 
@@ -69,6 +70,19 @@ herdr plugin install olddognewflex/tktban      # clones and builds bin/tktban (n
 go build -o bin/tktban ./cmd/tktban
 herdr plugin link .
 ```
+
+**A linked checkout is the live plugin.** `herdr plugin link .` registers the
+working tree itself, and herdr runs `bin/tktban` from it — the binary you
+built, not the code you have since edited. So **rebuild after every change**:
+
+```sh
+go build -o bin/tktban ./cmd/tktban
+```
+
+The giveaway that you forgot is a popup that opens and vanishes at once,
+exiting with status 2: the manifest passes a flag the stale binary does not
+know, so it fails to parse its own command line. `herdr plugin log list` shows
+the usage text.
 
 Bind the action to a key in `~/.config/herdr/config.toml`:
 
@@ -134,6 +148,52 @@ ticket key from it, following the `.sdlc` branch convention
 no key are ignored. When several agent panes work one ticket, 🙋 beats ⚙.
 The branch comes from the `.git/HEAD` file; only repos using reftable ref
 storage, where that file is a stub, run `git symbolic-ref` instead.
+
+### Jump between a card and its agent pane
+
+Two-way navigation, so the board and the agent working a ticket are one key
+apart.
+
+**Card → pane.** With the board open, `o` (or `ga`, for hands that reach for a
+vim `g` prefix) focuses the herdr pane running the selected card's agent — its
+workspace, tab and pane, in one `pane.focus`, across workspaces. When the
+board is herdr's popup it closes on the way and leaves you in the agent pane,
+with the focus intact: the popup's teardown does not send you back where you
+were. A board running in a plain herdr pane stays open and just moves focus.
+When a ticket has several agent panes, the one herdr already has focused wins,
+otherwise the most urgent (🙋 over ⚙ over quiet).
+
+The pane you are jumping to has to be on a branch that names the ticket — the
+same rule as the badges, since both come from the branch (see *Live agent
+badges* above). An agent working on `main`, or on any branch without a key,
+belongs to no card, so it shows no badge and nothing can jump to it.
+
+Nothing is silent. The key says `No agent pane for TKB-23` when no agent is on
+that ticket, `Live agent status is off` outside herdr (or with
+`--no-herdr-live`), `herdr live status unavailable` while herdr is not
+answering, and `Agent pane for TKB-23 is gone` when the pane closed between the
+last poll and the keypress — in which case the board stays open.
+
+**Pane → card.** Pressing the `prefix+t` board key *inside* an agent pane opens
+the board with that pane's ticket already selected: the launcher starts the
+board in that pane's directory, and the board takes the key from the branch
+checked out there. It says where the ticket is if you have hidden its column,
+and opens quietly if the branch names nothing this board shows.
+
+Standalone, the same thing is a flag:
+
+```sh
+tktban --select TKB-23           # open the board with TKB-23 selected
+tktban --select-from-cwd         # ...with whatever this branch's ticket is
+```
+
+`--select` wins over `--select-from-cwd`, and a `--select` that finds nothing
+says so where a derived one stays quiet. The branch is read in the background,
+so the board paints first either way, and the selection is applied once — a
+later auto-refresh never drags you back to it. One refusal: a board running
+inside herdr that was given no herdr context does not fall back to guessing
+from its working directory, because a plugin pane started without one runs in
+the plugin's own checkout.
 
 ## How it talks to tkt
 

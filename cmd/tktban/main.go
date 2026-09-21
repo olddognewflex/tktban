@@ -5,10 +5,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/fs"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -29,6 +31,9 @@ func run(argv []string) int {
 	noAuto := fs.Bool("no-auto-refresh", false, "start with auto-refresh off (toggle at runtime with 'a')")
 	inHerdr := fs.Bool("herdr", false, "running as a herdr plugin pane: pick config from the herdr context, keep settings in the plugin state dir (no-op outside herdr)")
 	noLive := fs.Bool("no-herdr-live", false, "inside herdr, don't read live agent status from the herdr socket for card badges")
+	selectKey := fs.String("select", "", "select this ticket key when the board opens, e.g. TKB-23")
+	selectFromCwd := fs.Bool("select-from-cwd", false, "select the ticket named by the branch checked out where the board was opened (the herdr context inside herdr, else this directory); --select wins")
+	popup := fs.Bool("popup", false, "(internal) the board is herdr's popup pane: a successful jump to an agent pane exits, which is what closes the popup")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: tktban [flags] [board|doctor]")
 		fs.PrintDefaults()
@@ -46,9 +51,9 @@ func run(argv []string) int {
 		command = rest[0]
 	}
 
+	cwd, _ := os.Getwd()
 	cfg, settingsPath, stateDir := *config, "", ""
 	if *inHerdr {
-		cwd, _ := os.Getwd()
 		cfg, settingsPath, stateDir = herdrSetup(cfg, os.Getenv, cwd, os.Stat, os.Lstat)
 	}
 
@@ -65,14 +70,18 @@ func run(argv []string) int {
 		// from another plugin's before closing it.
 		release := herdr.HoldBoardLock(stateDir)
 		defer release()
-		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive))
+		// Only the board selects a ticket, so `doctor` never reads a branch.
+		selected, derive := selectTarget(*selectKey, *selectFromCwd, os.Getenv, cwd)
+		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive), selected, derive, *popup)
 	default:
 		fmt.Fprintf(os.Stderr, "tktban: unknown command %q (want board or doctor)\n", command)
 		return 2
 	}
 }
 
-func doctor(tk *tkt.Tkt) int {
+// doctor is a variable for the same reason board is: a test can check how a
+// command line is routed without shelling out to tkt.
+var doctor = func(tk *tkt.Tkt) int {
 	okAll := true
 	for _, c := range tk.Doctor() {
 		mark := "ok  "
@@ -126,8 +135,41 @@ func liveSource(getenv func(string) string, disabled bool) ui.LiveSource {
 	return herdr.NewSocketSource(e.SocketPath)
 }
 
-func board(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource) int {
-	m := ui.New(tk, interval, auto, settingsPath).WithLive(live)
+// selectKeyTimeout bounds reading the branch of the directories --select-from-cwd
+// looks at. Only a reftable repo runs git at all, but the board must open
+// either way.
+const selectKeyTimeout = 2 * time.Second
+
+// selectTarget says which ticket the board should open on: a key to use
+// straight away, and a function to work one out when it has to be derived.
+// An explicit --select wins and needs no derivation. --select-from-cwd reads
+// the branch checked out where the board was opened, which inside herdr is
+// the invoking pane's directory — that is how the board key pressed in an
+// agent pane opens the board on that pane's ticket. The reading is handed
+// back as a function because it touches the filesystem, and only a git
+// subprocess honours a deadline: the board runs it as a command so a hung
+// mount delays the selection rather than the first paint.
+func selectTarget(explicit string, fromCwd bool, getenv func(string) string, cwd string) (string, func() string) {
+	if explicit != "" || !fromCwd {
+		return explicit, nil
+	}
+	return "", func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), selectKeyTimeout)
+		defer cancel()
+		return herdr.SelectKey(herdr.FromEnv(getenv), cwd, func(dir string) []string {
+			return herdr.KeysForDir(ctx, dir)
+		})
+	}
+}
+
+// board runs the TUI. A variable so a test can check the wiring from argv
+// without a terminal.
+var board = func(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource, selectKey string, derive func() string, popup bool) int {
+	m := ui.New(tk, interval, auto, settingsPath).
+		WithLive(live).
+		WithSelect(selectKey).
+		WithSelectFunc(derive).
+		WithPopup(popup)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tktban:", err)
 		return 1

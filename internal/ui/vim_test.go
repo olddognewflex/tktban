@@ -171,3 +171,85 @@ func TestVimCreateTypePickerJK(t *testing.T) {
 		t.Fatalf("k on type picker: typeIdx = %d, want 0", cm.typeIdx)
 	}
 }
+
+// `ga` is an alias for the o jump, so the g prefix must not swallow gg: the
+// first-card jump still works exactly as before.
+func TestGGStillJumpsToFirstCard(t *testing.T) {
+	m := vimModel()
+	m = step(m, key("j"))
+	m = step(m, key("j"))
+	m = step(m, key("j"))
+	if selIdx(m) != 3 {
+		t.Fatalf("setup: sel = %d, want 3", selIdx(m))
+	}
+	m = step(m, key("g"))
+	if !m.pendingG {
+		t.Fatal("first g did not arm gg")
+	}
+	m = step(m, key("g"))
+	if selIdx(m) != 0 {
+		t.Fatalf("gg: sel = %d, want 0 (first)", selIdx(m))
+	}
+	if m.pendingG {
+		t.Fatal("gg left the g prefix armed")
+	}
+	// G still goes the other way.
+	m = step(m, key("G"))
+	if selIdx(m) != 4 {
+		t.Fatalf("G: sel = %d, want 4 (last)", selIdx(m))
+	}
+}
+
+// ga runs the jump rather than the bare `a` auto-refresh toggle. This board has
+// no live source, so the jump's own "off" warning is the proof it ran.
+func TestGAJumpsToAgentPane(t *testing.T) {
+	m := vimModel()
+	if m.autoOn {
+		t.Fatal("setup: expected auto-refresh off")
+	}
+	m = step(m, key("g"))
+	m = step(m, key("a"))
+	if m.autoOn {
+		t.Fatal("ga toggled auto-refresh instead of jumping")
+	}
+	if m.status != "Live agent status is off" || m.statusKind != "warn" {
+		t.Fatalf("ga status = %q (%s), want the jump's warning", m.status, m.statusKind)
+	}
+	if m.pendingG {
+		t.Fatal("ga left the g prefix armed")
+	}
+	// Bare a is still the auto-refresh toggle.
+	m = vimModel()
+	m = step(m, key("a"))
+	if !m.autoOn || m.status == "Live agent status is off" {
+		t.Fatalf("bare a no longer toggles auto-refresh: autoOn=%v status=%q", m.autoOn, m.status)
+	}
+}
+
+// A g followed by anything that is neither g nor a drops the prefix and runs
+// that key normally, with no count left over.
+func TestGThenOtherKeyResetsPendingG(t *testing.T) {
+	for _, k := range []string{"j", "l", "G", "k", "r"} {
+		m := vimModel()
+		m = step(m, key("g"))
+		m = step(m, key(k))
+		if m.pendingG {
+			t.Errorf("g then %q left the g prefix armed", k)
+		}
+		if m.pendingCount != 0 {
+			t.Errorf("g then %q left count %d", k, m.pendingCount)
+		}
+	}
+	// The motion itself still runs, and a following gg is unaffected.
+	m := vimModel()
+	m = step(m, key("g"))
+	m = step(m, key("j"))
+	if selIdx(m) != 1 {
+		t.Fatalf("g then j: sel = %d, want 1", selIdx(m))
+	}
+	m = step(m, key("g"))
+	m = step(m, key("g"))
+	if selIdx(m) != 0 {
+		t.Fatalf("gg after a cancelled g: sel = %d, want 0", selIdx(m))
+	}
+}

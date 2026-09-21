@@ -259,3 +259,75 @@ func TestSeedSettingsNoSourceOrNoTarget(t *testing.T) {
 		t.Fatalf("empty target must be a no-op: %v", err)
 	}
 }
+
+// SelectKey follows ResolveConfig's precedence: the focused pane's directory,
+// then the workspace root, then the process cwd; the first key wins.
+func TestSelectKeyPrecedence(t *testing.T) {
+	keys := map[string][]string{
+		"/pane":   {"TKB-23", "TKB-24"},
+		"/ws":     {"TKB-99"},
+		"/cwd":    {"TKB-7"},
+		"/nokeys": nil,
+	}
+	keysForDir := func(dir string) []string { return keys[dir] }
+	ctx := func(pane, ws string) Env {
+		return Env{InHerdr: true, Context: Context{FocusedPaneCwd: pane, WorkspaceCwd: ws}}
+	}
+	cases := []struct {
+		name string
+		e    Env
+		cwd  string
+		want string
+	}{
+		{"focused pane wins", ctx("/pane", "/ws"), "/cwd", "TKB-23"},
+		{"workspace next", ctx("", "/ws"), "/cwd", "TKB-99"},
+		{"a keyless pane falls through to the workspace", ctx("/nokeys", "/ws"), "/cwd", "TKB-99"},
+		{"a keyless pane and workspace fall through to cwd", ctx("/nokeys", "/nokeys"), "/cwd", "TKB-7"},
+		{"nothing named anywhere", ctx("/nokeys", "/nokeys"), "/nokeys", ""},
+		{"outside herdr it is just the cwd", Env{}, "/cwd", "TKB-7"},
+		{"no directories at all", Env{}, "", ""},
+	}
+	for _, c := range cases {
+		if got := SelectKey(c.e, c.cwd, keysForDir); got != c.want {
+			t.Errorf("%s: SelectKey = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A herdr process given no context does not guess from its working directory:
+// herdr starts a plugin pane in the plugin's own install dir unless the
+// launcher passes --cwd, and that dir is a checkout with a ticket of its own.
+// Outside herdr the working directory is the person's own, so it is used.
+func TestSelectKeyIgnoresCwdInHerdrWithoutContext(t *testing.T) {
+	keysForDir := func(string) []string { return []string{"TKB-23"} } // the plugin's own checkout
+	blind := Env{InHerdr: true, StateDir: "/state/odnf.tktban"}
+	if got := SelectKey(blind, "/plugins/odnf.tktban", keysForDir); got != "" {
+		t.Errorf("a contextless herdr pane selected %q from its own directory", got)
+	}
+	// Any context at all means the launcher told us where we are, so the
+	// working directory is a usable last resort again.
+	withCtx := blind
+	withCtx.Context.WorkspaceCwd = "/nokeys"
+	only := func(dir string) []string {
+		if dir == "/repo" {
+			return []string{"TKB-7"}
+		}
+		return nil
+	}
+	if got := SelectKey(withCtx, "/repo", only); got != "TKB-7" {
+		t.Errorf("with a context, cwd fallback = %q, want TKB-7", got)
+	}
+	if got := SelectKey(Env{}, "/plugins/odnf.tktban", keysForDir); got != "TKB-23" {
+		t.Errorf("outside herdr the cwd must still count, got %q", got)
+	}
+}
+
+// An empty directory is skipped rather than handed to keysForDir (which would
+// walk up from the process cwd and pick a key from the wrong repo).
+func TestSelectKeySkipsEmptyDirs(t *testing.T) {
+	var asked []string
+	SelectKey(Env{}, "", func(dir string) []string { asked = append(asked, dir); return nil })
+	if len(asked) != 0 {
+		t.Fatalf("asked for keys of %v, want nothing", asked)
+	}
+}

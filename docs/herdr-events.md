@@ -243,3 +243,66 @@ Rechecked against herdr 0.9.0 / protocol 22 while building the live badge
   `git symbolic-ref --short -q HEAD` (checked with git 2.55).
 - `HERDR_SOCKET_PATH` is set in plugin pane environments (seen on a running
   `overlay` plugin pane), not just in hooks.
+
+## Verified in TKB-23
+
+Rechecked against herdr 0.9.0 / protocol 22 while building the card ↔ pane
+jump: the request shapes from `herdr api schema --json`, and the focus
+behaviour itself by hand in a live session (see `internal/herdr/client.go`).
+
+- `pane.focus` takes `{"pane_id": "<pane>"}` (schema `PaneTarget`), while
+  `agent.focus` takes `{"target": "<pane|agent>"}` (`AgentTarget`). The two are
+  easy to swap; sending `target` to `pane.focus` is an `invalid_request`. A
+  success carries the pane info; an id herdr no longer knows gives
+  `pane_not_found`, which the board turns into "Agent pane for KEY is gone".
+- **One `pane.focus` is enough**, including across workspaces and tabs: herdr
+  focuses the pane's workspace and tab on the way. No workspace.focus /
+  tab.focus ladder is needed, though `PaneRef` carries `workspace_id` and
+  `tab_id` if one ever is.
+- A plugin pane with `placement = "popup"` has **no public pane id** — it is
+  not in `pane list` — and `popup.close` takes `{}` (`EmptyParams`),
+  SIGHUPping whichever popup is open. So the board must finish the
+  `pane.focus` round trip **first** and only then exit; its exit is what closes
+  the popup. It must never call `popup.close` to close itself.
+- **The popup's exit does not undo the jump.** Verified by hand: pressing `o`
+  on a card whose agent pane is on a branch naming that ticket lands focus in
+  the agent's pane, and that focus survives the popup being torn down — herdr
+  does not restore whatever was focused before the popup opened. That is the
+  whole reason for the ordering above: focus, then quit. The reverse order
+  would race the teardown, and no fallback (a delayed focus after the program
+  returns, say) is needed.
+- `plugin.pane.open` (`PluginPaneOpenParams`) accepts **no argv**, but it does
+  take both `cwd` and `env` (plus `plugin_id`, `entrypoint`, placement and
+  size). So a pane's command line is fixed by the manifest, and everything
+  else about the invocation has to arrive as the working directory or as
+  environment variables. `herdr plugin pane open` exposes both as `--cwd` and
+  `--env KEY=VALUE`.
+- What that means for the ticket the board opens on: **the working directory
+  is the main path**. `scripts/open-board.sh` runs as an action, and actions
+  are where `HERDR_PLUGIN_CONTEXT_JSON` is confirmed to be set; it reads
+  `focused_pane_cwd` (else `workspace_cwd`) from there and passes it as
+  `--cwd`, so the board's own process directory is already the right repo.
+  The launcher also forwards the context with `--env`, because it was not
+  confirmed that herdr sets `HERDR_PLUGIN_CONTEXT_JSON` for the *pane* it
+  opens — so `herdr.SelectKey`'s context branches are a fallback for when it
+  is there, not the path normally taken. Deriving the key inside tktban is
+  therefore a choice (it keeps the launcher a dumb wrapper and the key
+  resolution testable in Go), not something the API forces.
+- A plugin pane started **without** `--cwd` runs in the plugin's own install
+  directory, which is a checkout with a ticket key of its own. `SelectKey`
+  refuses to read a working directory when it is inside herdr and was handed
+  no context at all, so a launcher that cannot work out where it was invoked
+  opens the board with nothing selected instead of with the plugin's own
+  ticket selected.
+- **An agent on a branch that names no ticket cannot be reached from the
+  board.** Seen while testing the jump: a pane sitting on `main` (or any
+  branch without a key) resolves to no ticket, so it badges nothing and no
+  card can jump to it. This is inherent to deriving keys from branch names
+  (TKB-22) rather than anything about the jump — herdr's `AgentInfo` carries
+  no ticket of its own — and it applies equally to the badges. AC3's
+  `pane.report_metadata` tokens would not change it either: the board would
+  still have to know the ticket before it could report one.
+- `pane.report_metadata` (`PaneReportMetadataParams`) takes `pane_id`,
+  `source`, and up to 16 `tokens` with a `ttl_ms` — the mechanism a later
+  ticket (TKB-23 AC3) would use to show `$ticket` in herdr's sidebar. Not used
+  yet.

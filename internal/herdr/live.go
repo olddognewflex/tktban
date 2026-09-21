@@ -93,6 +93,27 @@ func Resolve(agents []Agent, keysForDir func(string) []string) map[string]Live {
 	return out
 }
 
+// PickPane chooses the pane to jump to for one ticket. A pane herdr already
+// has focused wins outright — it is where the human last was — otherwise the
+// most urgent one does (blocked > working > idle/done > unknown), and equal
+// panes keep agent.list order, which Resolve preserves. False means the ticket
+// has no agent pane at all.
+func PickPane(l Live) (PaneRef, bool) {
+	var best PaneRef
+	found := false
+	for _, p := range l.Panes {
+		switch {
+		case !found:
+			best, found = p, true
+		case best.Focused:
+			// Nothing outranks the pane the human is already in.
+		case p.Focused || rank(p.Status) > rank(best.Status):
+			best = p
+		}
+	}
+	return best, found
+}
+
 // ErrProtocol means herdr speaks a socket protocol tktban was not built for.
 var ErrProtocol = errors.New("unsupported herdr protocol")
 
@@ -144,4 +165,10 @@ func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 		return nil, err
 	}
 	return byKey, nil
+}
+
+// FocusPane focuses a herdr pane, so the board can jump from a card to the
+// agent working it. One call is enough across workspaces and tabs.
+func (s *SocketSource) FocusPane(ctx context.Context, paneID string) error {
+	return s.Client.FocusPane(ctx, paneID)
 }

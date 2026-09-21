@@ -58,6 +58,19 @@ type Model struct {
 	// live is herdr agent status for card badges; zero (off) outside herdr.
 	live liveState
 
+	// selectKey is a ticket to select once the board first loads, cleared as
+	// soon as it has been applied. selectExplicit records that the person
+	// typed it (--select) rather than it being read off a git branch
+	// (--select-from-cwd), which decides how loudly a miss is reported.
+	// selectFunc derives the key off the UI loop, so reading a branch on a
+	// slow filesystem cannot hold up the first paint.
+	// popup means the board is herdr's popup pane, which a successful jump
+	// closes by exiting.
+	selectKey      string
+	selectExplicit bool
+	selectFunc     func() string
+	popup          bool
+
 	width, height int
 
 	modal modal
@@ -128,6 +141,7 @@ func (m Model) Init() tea.Cmd {
 		refreshCmd(m.tkt, m.filter),
 		tickCmd(secondsToDuration(m.refreshSecs)),
 		m.liveInit(),
+		m.selectInit(),
 	)
 }
 
@@ -251,6 +265,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case liveTickMsg:
 		return m.onLiveTick()
 
+	case jumpMsg:
+		return m.onJump(msg)
+
+	case selectKeyMsg:
+		return m.onSelectKey(msg)
+
 	case statusExpireMsg:
 		if int(msg) == m.statusSeq {
 			m.status, m.statusKind = "", ""
@@ -281,6 +301,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingG = true
 		return m, nil
+	}
+
+	// `ga` is the second spelling of the o jump, for hands that reach for a g
+	// prefix. It has to be handled before the reset below, or the pending g
+	// would be dropped and `a` would toggle auto-refresh instead.
+	if s == "a" && m.pendingG {
+		m.pendingG, m.pendingCount = false, 0
+		return m.jumpToAgentPane()
 	}
 
 	// Any other key ends a pending count / half-typed gg. Motions below consume
@@ -340,6 +368,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setStatus("Select a card first", "warn")
 		}
 		return m, prepEditorEditCmd(m.tkt, card.Key)
+	case "o":
+		return m.jumpToAgentPane()
 	case "x":
 		return m.hideFocusedColumn()
 	case "X":
@@ -395,10 +425,82 @@ func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
 	m.applyHidden()
 	m.loaded = true
 	m.restoreSelection(curRole, curKey)
+	// A pending select key overrides the restored selection, but only on the
+	// load that consumes it. A board warning is the rarer, more serious thing,
+	// so it is what stays on screen when both happen; the selection itself
+	// still moved, and both status timers are armed.
+	sel := m.applySelectKey()
 	if msg.warn != "" {
-		return m, m.setStatus(msg.warn, "warn")
+		return m, tea.Batch(sel, m.setStatus(msg.warn, "warn"))
 	}
-	return m, nil
+	return m, sel
+}
+
+// selectKeyMsg carries a ticket key that was derived off the UI loop.
+type selectKeyMsg struct{ key string }
+
+// selectInit derives a --select-from-cwd key in a command, so a git branch on
+// a slow or hung filesystem delays the selection rather than the whole board.
+func (m Model) selectInit() tea.Cmd {
+	derive := m.selectFunc
+	if derive == nil {
+		return nil
+	}
+	return func() tea.Msg { return selectKeyMsg{key: derive()} }
+}
+
+// onSelectKey takes a derived key. It arrives whenever it arrives: before the
+// first board load it waits there for it, and afterwards it applies at once.
+// An explicit --select is never overridden.
+func (m Model) onSelectKey(msg selectKeyMsg) (tea.Model, tea.Cmd) {
+	if msg.key == "" || m.selectExplicit {
+		return m, nil
+	}
+	m.selectKey = normalizeKey(msg.key)
+	if !m.loaded {
+		return m, nil // the next board load consumes it
+	}
+	return m, m.applySelectKey()
+}
+
+// applySelectKey consumes a pending --select key: it focuses that ticket's
+// column and card, or says why it cannot. The key is cleared either way, so a
+// later auto-refresh never yanks the selection back from wherever the user has
+// moved it since. Returns nil when there was nothing to select.
+func (m *Model) applySelectKey() tea.Cmd {
+	key := m.selectKey
+	if key == "" {
+		return nil
+	}
+	m.selectKey = ""
+	for i, col := range m.columns {
+		for j, c := range col.Cards {
+			if strings.EqualFold(c.Key, key) {
+				m.focusCol = i
+				m.sel[col.Role] = j
+				return m.setStatus("Selected "+key, "")
+			}
+		}
+	}
+	// Out of sight rather than absent: name the lane and the key that brings
+	// it back. A key the person typed and did not get is a warning; one read
+	// off the branch is a guess the board makes on every single open, and a
+	// hidden column is a standing choice, so that one is said plainly.
+	kind := "warn"
+	if !m.selectExplicit {
+		kind = ""
+	}
+	for _, col := range m.allColumns {
+		for _, c := range col.Cards {
+			if strings.EqualFold(c.Key, key) {
+				return m.setStatus(key+" is in "+col.Lane+", a hidden column (X shows all columns)", kind)
+			}
+		}
+	}
+	if !m.selectExplicit {
+		return nil // the branch names no ticket on this board; just open it
+	}
+	return m.setStatus(key+" is not on the board", "warn")
 }
 
 func (m Model) onCreate(msg createMsg) (tea.Model, tea.Cmd) {
@@ -612,4 +714,34 @@ func clamp(v, lo, hi int) int {
 
 func secondsToDuration(secs float64) time.Duration {
 	return time.Duration(secs * float64(time.Second))
+}
+
+// WithSelect makes the board open with one ticket selected: the key the person
+// asked for with --select. An empty key changes nothing.
+func (m Model) WithSelect(key string) Model {
+	m.selectKey = normalizeKey(key)
+	m.selectExplicit = m.selectKey != ""
+	return m
+}
+
+// WithSelectFunc selects a ticket the board works out for itself (--select-from-cwd
+// reading a git branch). It runs as a command rather than before the program
+// starts, so the board paints first; a miss is reported more quietly than a
+// key the person typed. A nil func changes nothing.
+func (m Model) WithSelectFunc(derive func() string) Model {
+	m.selectFunc = derive
+	return m
+}
+
+// normalizeKey puts a ticket key in the board's own spelling.
+func normalizeKey(key string) string {
+	return strings.ToUpper(strings.TrimSpace(key))
+}
+
+// WithPopup marks the board as herdr's popup pane. The popup has no pane id of
+// its own, so a successful jump to an agent pane ends the process, which is
+// what closes the popup.
+func (m Model) WithPopup(popup bool) Model {
+	m.popup = popup
+	return m
 }

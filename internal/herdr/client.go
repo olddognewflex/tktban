@@ -176,3 +176,13 @@ func (c *Client) AgentList(ctx context.Context) ([]Agent, error) {
 	}
 	return r.Agents, nil
 }
+
+// FocusPane brings one pane to the front: its workspace, its tab and the pane
+// itself, in one call. herdr's pane.focus takes {"pane_id": ...} — agent.focus
+// is the one that takes a target — and answers an id it no longer knows with
+// code pane_not_found, which callers branch on.
+func (c *Client) FocusPane(ctx context.Context, paneID string) error {
+	return c.Call(ctx, "pane.focus", struct {
+		PaneID string `json:"pane_id"`
+	}{PaneID: paneID}, nil)
+}

@@ -199,3 +199,76 @@ func (m Model) cardBadge(c model.Card) string {
 	}
 	return badgeFor(c.AgentStatus, st, m.live.on)
 }
+
+// PaneFocuser is the optional half of a live source: it can also focus one of
+// herdr's panes, which is how the board jumps from a card to the agent working
+// it (herdr.SocketSource implements it). It is a separate interface from
+// LiveSource on purpose, so a source that only reads status still drives the
+// badges; such a source simply has no jump.
+type PaneFocuser interface {
+	FocusPane(ctx context.Context, paneID string) error
+}
+
+// jumpMsg is the result of one pane.focus for key's agent pane.
+type jumpMsg struct {
+	key    string
+	paneID string
+	err    error
+}
+
+// jumpCmd focuses one pane, bounded by the same 1s budget as every other
+// herdr call so a wedged socket cannot freeze the board.
+func jumpCmd(f PaneFocuser, key, paneID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
+		defer cancel()
+		return jumpMsg{key: key, paneID: paneID, err: f.FocusPane(ctx, paneID)}
+	}
+}
+
+// jumpToAgentPane focuses the herdr pane running the selected card's agent.
+// Every way this cannot work says which one it was, because the key does
+// nothing visible otherwise.
+func (m Model) jumpToAgentPane() (tea.Model, tea.Cmd) {
+	if m.live.src == nil {
+		return m, m.setStatus("Live agent status is off", "warn")
+	}
+	focuser, canFocus := m.live.src.(PaneFocuser)
+	if !canFocus {
+		return m, m.setStatus("This board can't focus herdr panes", "warn")
+	}
+	if !m.live.on {
+		return m, m.setStatus("herdr live status unavailable", "warn")
+	}
+	card, ok := m.selectedCard()
+	if !ok {
+		return m, m.setStatus("Select a card first", "warn")
+	}
+	key := strings.ToUpper(card.Key)
+	pane, ok := herdr.PickPane(m.live.byKey[key])
+	if !ok {
+		return m, m.setStatus("No agent pane for "+key, "warn")
+	}
+	return m, jumpCmd(focuser, key, pane.PaneID)
+}
+
+// onJump reports the jump. As a herdr popup the board has no pane id of its
+// own and popup.close would SIGHUP it, so the focus round trip is already
+// done by the time this runs and quitting is what closes the popup — leaving
+// the newly focused agent pane in front. Outside a popup the board stays open
+// and just says where focus went. A failure never quits: the board is the
+// only thing left to look at.
+func (m Model) onJump(msg jumpMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		text := "Could not focus " + msg.key + " agent pane"
+		var apiErr *herdr.APIError
+		if errors.As(msg.err, &apiErr) && apiErr.Code == "pane_not_found" {
+			text = "Agent pane for " + msg.key + " is gone"
+		}
+		return m, m.setStatus(text, "warn")
+	}
+	if m.popup {
+		return m, tea.Quit
+	}
+	return m, m.setStatus("Focused "+msg.key+" agent pane", "")
+}
