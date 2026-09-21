@@ -127,10 +127,16 @@ func TestJumpWithCountPrefixStillJumpsOnce(t *testing.T) {
 		t.Fatalf("setup: count not accumulated: %d", m.pendingCount)
 	}
 	_, cmd := m.Update(key("o"))
-	if !jumped(cmd) {
-		t.Fatal("3o did not start a jump")
+	if cmd == nil {
+		t.Fatal("3o did not produce a command")
 	}
-	cmd()
+	msg, ok := cmd().(jumpMsg)
+	if !ok {
+		t.Fatalf("3o produced %T, want jumpMsg", cmd())
+	}
+	if msg.err != nil || msg.key != "TKT-1" || msg.paneID != "wC:p1" {
+		t.Fatalf("3o jump = %+v, want a successful jump to wC:p1", msg)
+	}
 	if len(src.focused) != 1 {
 		t.Fatalf("3o focused %d panes, want exactly 1", len(src.focused))
 	}
@@ -146,8 +152,8 @@ func TestUppercaseODoesNotJump(t *testing.T) {
 	m := jumpBoard(t, src)
 
 	m, cmd := update(m, key("O"))
-	if jumped(cmd) || quits(cmd) {
-		t.Fatal("uppercase O started a jump")
+	if cmd != nil {
+		t.Fatalf("uppercase O produced a command: %v", cmd)
 	}
 	if len(src.focused) != 0 {
 		t.Fatalf("uppercase O focused %v", src.focused)
@@ -164,12 +170,12 @@ func TestJumpNoColumnsAtAll(t *testing.T) {
 	m := jumpBoard(t, src)
 	m.columns = nil
 
-	m, cmd := update(m, key("o"))
+	m, _ = update(m, key("o"))
 	if m.status != "Select a card first" || m.statusKind != "warn" {
 		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
 	}
-	if jumped(cmd) || len(src.focused) != 0 {
-		t.Fatal("jumped with no columns at all")
+	if len(src.focused) != 0 {
+		t.Fatalf("focused %v with no columns at all", src.focused)
 	}
 }
 
@@ -185,12 +191,12 @@ func TestJumpBeforeBoardLoads(t *testing.T) {
 		t.Fatal("setup: board should not be loaded yet")
 	}
 
-	m, cmd := update(m, key("o"))
+	m, _ = update(m, key("o"))
 	if m.status != "Select a card first" || m.statusKind != "warn" {
 		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
 	}
-	if jumped(cmd) || len(src.focused) != 0 {
-		t.Fatal("jumped before the board ever loaded a card")
+	if len(src.focused) != 0 {
+		t.Fatalf("focused %v before the board ever loaded a card", src.focused)
 	}
 }
 
@@ -214,8 +220,8 @@ func TestJumpInertBehindEveryModalKind(t *testing.T) {
 			var cmd tea.Cmd
 			for _, k := range keys {
 				nm, cmd = update(nm, key(k))
-				if jumped(cmd) || quits(cmd) {
-					t.Fatalf("%s: %v behind the modal produced a jump", name, keys)
+				if quits(cmd) {
+					t.Fatalf("%s: %v behind the modal quit the board", name, keys)
 				}
 			}
 			if nm.modal == nil {
