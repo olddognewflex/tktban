@@ -90,7 +90,7 @@ func TestLiveSourceOnlyInsideHerdr(t *testing.T) {
 	for _, c := range cases {
 		// Compare the interface itself: a typed nil pointer inside it would read
 		// as "live on" to the board.
-		if got := liveSource(envOf(c.env), c.disabled, true); (got != nil) != c.want {
+		if got := liveSource(envOf(c.env), herdrLive{off: c.disabled}); (got != nil) != c.want {
 			t.Errorf("%s: live source = %v, want present=%v", c.name, got, c.want)
 		}
 	}
@@ -269,7 +269,7 @@ func TestNoHerdrTokensFlag(t *testing.T) {
 func TestNoHerdrLiveAlsoStopsTokens(t *testing.T) {
 	if got := liveSource(envOf(map[string]string{
 		"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock",
-	}), true, true); got != nil {
+	}), herdrLive{off: true}); got != nil {
 		t.Fatalf("live source = %v, want none", got)
 	}
 }

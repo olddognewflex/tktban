@@ -73,7 +73,8 @@ func run(argv []string) int {
 		defer release()
 		// Only the board selects a ticket, so `doctor` never reads a branch.
 		selected, derive := selectTarget(*selectKey, *selectFromCwd, os.Getenv, cwd)
-		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive, !*noTokens), selected, derive, *popup)
+		live := liveSource(os.Getenv, herdrLive{off: *noLive, noTokens: *noTokens})
+		return board(tk, *interval, !*noAuto, settingsPath, live, selected, derive, *popup)
 	default:
 		fmt.Fprintf(os.Stderr, "tktban: unknown command %q (want board or doctor)\n", command)
 		return 2
@@ -121,17 +122,24 @@ func herdrSetup(config string, getenv func(string) string, cwd string, stat, lst
 	return config, herdr.SafeSettingsPath(herdr.SettingsPath(e), lstat), e.StateDir
 }
 
+// herdrLive carries the two herdr opt-outs. They are a struct, not two bools:
+// both are negative, they sit next to each other, and swapping them would
+// compile and silently invert the pair.
+type herdrLive struct {
+	off      bool // --no-herdr-live: no socket source at all
+	noTokens bool // --no-herdr-tokens: poll, but report nothing back
+}
+
 // liveSource returns the herdr socket as the board's live agent status source
 // when running inside herdr, whether or not --herdr was given (a board in a
 // plain herdr pane benefits too). Outside herdr, with no socket, or with
 // --no-herdr-live it returns nil and badges come from ticket frontmatter only.
 //
-// tokens says whether each poll should also report the pane's ticket key back
-// to herdr as pane metadata (--no-herdr-tokens turns that off). It rides on
-// the same source, so --no-herdr-live turns it off too: without polls there is
+// Reporting the pane's ticket key back to herdr as pane metadata rides on the
+// same source, so --no-herdr-live turns that off too: without polls there is
 // nothing to report.
-func liveSource(getenv func(string) string, disabled, tokens bool) ui.LiveSource {
-	if disabled {
+func liveSource(getenv func(string) string, opt herdrLive) ui.LiveSource {
+	if opt.off {
 		return nil
 	}
 	e := herdr.FromEnv(getenv)
@@ -139,7 +147,7 @@ func liveSource(getenv func(string) string, disabled, tokens bool) ui.LiveSource
 		return nil
 	}
 	src := herdr.NewSocketSource(e.SocketPath)
-	src.Tokens = tokens
+	src.Tokens = !opt.noTokens
 	return src
 }
 
