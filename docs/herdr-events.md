@@ -302,7 +302,51 @@ behaviour itself by hand in a live session (see `internal/herdr/client.go`).
   no ticket of its own — and it applies equally to the badges. AC3's
   `pane.report_metadata` tokens would not change it either: the board would
   still have to know the ticket before it could report one.
-- `pane.report_metadata` (`PaneReportMetadataParams`) takes `pane_id`,
-  `source`, and up to 16 `tokens` with a `ttl_ms` — the mechanism a later
-  ticket (TKB-23 AC3) would use to show `$ticket` in herdr's sidebar. Not used
-  yet.
+- `pane.report_metadata` (`PaneReportMetadataParams`) requires **`pane_id` and
+  `source`** and takes, all optional, `agent`, `title`, `display_agent`,
+  `state_labels`, `tokens`, `applies_to_source`, `seq`, `ttl_ms`, and three
+  booleans — `clear_title`, `clear_display_agent`, `clear_state_labels`.
+  There is no `clear_tokens`: the CLI's `--clear-token NAME` is sugar for
+  `tokens: {NAME: null}`. tktban sends `pane_id`, `source` (`odnf.tktban`)
+  and `tokens`, nothing else.
+- **Token constraints**: at most 16 tokens per call, names must match
+  `^[A-Za-z0-9_-]{1,32}$`, values are `string | null`, and **null clears** that
+  token (a key left out is simply not touched — that distinction is why
+  `ReportPaneTokens` takes `map[string]*string`). `ttl_ms` is 1..86_400_000
+  when given; tktban gives none, because the token has to outlive the popup
+  that published it.
+- **Tokens come back on reads**: both `AgentInfo` (`agent.list`) and `PaneInfo`
+  (`pane.list`) carry a `tokens` map — up to 32 on the read side, against 16
+  per call — alongside `title`, `display_agent` and `state_labels`. So what was
+  published is observable without guessing. (`applies_to_source` suggests herdr
+  keeps sources apart; how it merges two sources writing the same token name
+  was not tested, and tktban writes only `ticket`.)
+- **The sidebar is the consumer, and it is the user's to configure.**
+  `herdr --default-config` documents `[ui.sidebar.agents] rows` (built-ins
+  `state_icon`, `state_text`, `machine`, `workspace`, `tab`, `pane`, `agent`,
+  `terminal_title`, `terminal_title_stripped`) and says "Custom values reported
+  through pane metadata use a `$name` token", stylable as
+  `{ token = "...", fg = "#89b4fa", bold = true }`. There is also
+  `[ui.sidebar.agents.rows_by_agent]` per canonical agent id. Nothing tktban
+  publishes shows up until a row asks for `$ticket`, which is what AC3's "when
+  configured" means.
+- **The `ticket` token namespace is ours.** Grepping `~/.config/herdr/plugins`
+  for `report_metadata` hits only schema copies and docs — no installed plugin
+  (auto-title, board, lazygit, nvim, reviewr, plugin-manager) writes pane
+  metadata. `herdr.auto-title` renames *tabs* (`tab.rename`), which is a
+  different surface; tktban deliberately sets neither `title` nor
+  `display_agent` so the two never fight.
+- **Publishing is best-effort and stateless.** `SocketSource.Poll` is now also
+  a writer: after a successful poll it diffs the ticket it resolved for each
+  pane against the `tokens` that same `agent.list` reply carried, and reports
+  only the panes where the two differ — a value to set, or `{"ticket": null}`
+  to clear one that is on no ticket any more (a branch naming none, or an
+  agent herdr has released). Because the comparison is against **herdr's own
+  state**, not against anything the process remembers, it is idempotent and
+  self-healing: a board start corrects whatever an earlier board left behind,
+  a steady-state poll makes zero calls, and a failed call needs no retry
+  bookkeeping — herdr still does not hold the wanted value, so the next poll
+  tries again. Nothing about it can fail a poll or change a badge.
+- A pane that has **closed** is not reported to: it is gone from `agent.list`,
+  it took its metadata with it, and `pane.report_metadata` for it would only
+  answer `pane_not_found`. Only panes herdr still lists are reconciled.

@@ -195,6 +195,45 @@ inside herdr that was given no herdr context does not fall back to guessing
 from its working directory, because a plugin pane started without one runs in
 the plugin's own checkout.
 
+### The ticket key in herdr's sidebar
+
+While the board is open it also tells herdr which ticket each agent pane is
+on, as a pane-metadata token called `ticket` (`pane.report_metadata`, source
+`odnf.tktban`). herdr renders custom tokens in its agent sidebar rows as
+`$ticket`, so the key shows up next to the agent — the other direction from
+the badges, which bring herdr's status onto the board.
+
+herdr shows nothing until you ask for it — the sidebar rows are yours to
+configure. Add the token in `~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "machine", "workspace", "tab"], ["$ticket"], ["agent"]]
+```
+
+A pane on a branch that names no ticket carries no token, and a pane on a
+branch naming several gets them comma-separated (`REVERT-45,TKB-22`). Panes
+are matched exactly as the badges are, by branch (see *Live agent badges*).
+`--no-herdr-tokens` turns the reporting off and leaves herdr's metadata
+untouched; `--no-herdr-live` turns it off too, since it rides on the same
+poll.
+
+**The key only changes while a board is running.** The token is published
+without an expiry on purpose — the board is usually a popup that closes
+seconds later, and an expiring token would blank the sidebar exactly then —
+so it survives the board, but nothing updates it once the board is gone.
+Check out another branch in that pane afterwards and the sidebar keeps showing
+the old key until a board next runs.
+
+That is the *only* way it goes stale, because each poll compares every pane
+against the token herdr itself reports, not against what this board has
+published. So the first poll of any board — within 500 ms of opening it —
+corrects every pane it finds wrong, including keys an earlier board left
+behind and panes that have since moved to a branch naming no ticket (their
+token is cleared). Nothing is written when herdr already agrees, so a board
+left open makes no calls at all. A pane that has closed needs no cleaning up:
+its metadata goes with it.
+
 ## How it talks to tkt
 
 `internal/tkt/tkt.go` is the entire coupling surface — a thin subprocess wrapper:

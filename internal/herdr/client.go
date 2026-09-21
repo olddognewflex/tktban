@@ -164,6 +164,10 @@ type Agent struct {
 	Cwd           string  `json:"cwd"`
 	ForegroundCwd string  `json:"foreground_cwd"` // where the agent actually runs
 	Focused       bool    `json:"focused"`
+	// Tokens is the pane metadata herdr currently holds, merged across every
+	// source that reported any. Reading it back is what lets tktban publish
+	// without keeping state of its own: see SocketSource.publishTokens.
+	Tokens map[string]string `json:"tokens"`
 }
 
 // AgentList returns every agent pane herdr knows about.
@@ -185,4 +189,34 @@ func (c *Client) FocusPane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.focus", struct {
 		PaneID string `json:"pane_id"`
 	}{PaneID: paneID}, nil)
+}
+
+// MetadataSource identifies tktban as the writer of the pane metadata it
+// reports. herdr keeps each source's metadata apart, so this must not collide
+// with another plugin's id; it is tktban's plugin id from herdr-plugin.toml.
+const MetadataSource = "odnf.tktban"
+
+// TicketToken is the pane-metadata token tktban publishes: the ticket key(s)
+// the pane's branch names. herdr renders it as $ticket in a configured
+// [ui.sidebar.agents] row.
+const TicketToken = "ticket"
+
+// ReportPaneTokens publishes display-only pane metadata tokens for one pane
+// under MetadataSource. A nil value clears that token; herdr accepts up to 16
+// tokens whose names match ^[A-Za-z0-9_-]{1,32}$.
+//
+// Only tokens are sent. title and display_agent are deliberately left alone:
+// pane titles belong to whatever plugin owns them (herdr.auto-title renames
+// tabs), and tokens are a separate namespace we do not have to fight over.
+//
+// No ttl_ms either. The token has to outlive this process — the board is
+// usually a popup that closes seconds after publishing — so an expiry would
+// blank the sidebar exactly when the board is gone. The flip side is that a
+// key only changes while a board is running; see README.
+func (c *Client) ReportPaneTokens(ctx context.Context, paneID string, tokens map[string]*string) error {
+	return c.Call(ctx, "pane.report_metadata", struct {
+		PaneID string             `json:"pane_id"`
+		Source string             `json:"source"`
+		Tokens map[string]*string `json:"tokens"`
+	}{PaneID: paneID, Source: MetadataSource, Tokens: tokens}, nil)
 }
