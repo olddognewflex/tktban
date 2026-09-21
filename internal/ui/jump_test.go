@@ -3,9 +3,9 @@ package ui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -27,48 +27,41 @@ func (f *fakeFocus) FocusPane(_ context.Context, paneID string) error {
 	return f.focusErr
 }
 
-// quits reports whether cmd closes the board. tea.Quit answers at once, while
-// the status-expiry tick every other path returns sits on a timer for seconds,
-// so a command that has not spoken up promptly is not the quit.
-func quits(cmd tea.Cmd) bool {
+// cmdID identifies which function produced a tea.Cmd without running it: all
+// the closures one function literal makes share a code pointer. Running a
+// command to find out is what this avoids — most of them are status-expiry
+// timers that would not answer for seconds.
+func cmdID(cmd tea.Cmd) uintptr {
 	if cmd == nil {
-		return false
+		return 0
 	}
-	msgs := make(chan tea.Msg, 1)
-	go func() { msgs <- cmd() }()
-	select {
-	case msg := <-msgs:
-		switch msg := msg.(type) {
-		case tea.QuitMsg:
-			return true
-		case tea.BatchMsg: // a quit batched behind a status still closes the board
-			for _, c := range msg {
-				if quits(c) {
-					return true
-				}
+	return reflect.ValueOf(cmd).Pointer()
+}
+
+var (
+	quitID  = cmdID(tea.Quit)
+	batchID = cmdID(tea.Batch(tea.Quit, tea.Quit)) // two, so Batch really wraps
+	jumpID  = cmdID(jumpCmd(nil, "", ""))
+)
+
+// quits reports whether cmd closes the board, looking inside a tea.Batch —
+// running one of those is free, since it only hands back its children.
+func quits(cmd tea.Cmd) bool {
+	switch cmdID(cmd) {
+	case quitID:
+		return true
+	case batchID:
+		for _, c := range cmd().(tea.BatchMsg) {
+			if quits(c) {
+				return true
 			}
 		}
-		return false
-	case <-time.After(250 * time.Millisecond):
-		return false
 	}
+	return false
 }
 
 // jumped reports whether cmd is a pane.focus rather than a status tick.
-func jumped(cmd tea.Cmd) bool {
-	if cmd == nil {
-		return false
-	}
-	msgs := make(chan tea.Msg, 1)
-	go func() { msgs <- cmd() }()
-	select {
-	case msg := <-msgs:
-		_, ok := msg.(jumpMsg)
-		return ok
-	case <-time.After(250 * time.Millisecond):
-		return false
-	}
-}
+func jumped(cmd tea.Cmd) bool { return cmdID(cmd) == jumpID }
 
 // panes builds a live map with one ticket's panes spelled out.
 func panes(key string, st herdr.Status, refs ...herdr.PaneRef) map[string]herdr.Live {
@@ -336,5 +329,203 @@ func TestJumpKeyIsCaseInsensitive(t *testing.T) {
 	msg, ok := cmd().(jumpMsg)
 	if !ok || msg.paneID != "wC:p1" || msg.key != "TKT-1" {
 		t.Fatalf("lowercase card key did not resolve: %#v", cmd())
+	}
+}
+
+// selectCmd is the command a --select-from-cwd board runs to work its key out;
+// tests fire it when they want it to land.
+func selectCmd(t *testing.T, m Model) tea.Cmd {
+	t.Helper()
+	cmd := m.selectInit()
+	if cmd == nil {
+		t.Fatal("no derive command with a select func")
+	}
+	return cmd
+}
+
+// A derived key that lands after the board has loaded is applied at once,
+// rather than waiting for the next refresh.
+func TestSelectFuncAppliesAfterLoad(t *testing.T) {
+	m, _ := testModel(t)
+	m = m.WithSelectFunc(func() string { return "tkt-2" })
+	cmd := selectCmd(t, m)
+	m = loadBoard(m) // the board paints before the key is known
+	if c, _ := m.selectedCard(); c.Key != "TKT-1" {
+		t.Fatalf("setup: board should open on its usual card, got %v", c.Key)
+	}
+	m, _ = update(m, cmd())
+	card, ok := m.selectedCard()
+	if !ok || card.Key != "TKT-2" {
+		t.Fatalf("selected %v ok=%v, want TKT-2", card.Key, ok)
+	}
+	if m.status != "Selected TKT-2" || m.statusKind != "" {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+	if m.selectKey != "" {
+		t.Fatalf("select key not consumed: %q", m.selectKey)
+	}
+}
+
+// A derived key that lands before the first load waits for it.
+func TestSelectFuncAppliesOnLoad(t *testing.T) {
+	m, _ := testModel(t)
+	m = m.WithSelectFunc(func() string { return "TKT-2" })
+	m, cmd := update(m, selectCmd(t, m)())
+	if cmd != nil {
+		t.Fatal("a key that arrived before the board must wait for it")
+	}
+	if m.selectKey != "TKT-2" {
+		t.Fatalf("key not held for the load: %q", m.selectKey)
+	}
+	m = loadBoard(m)
+	if card, _ := m.selectedCard(); card.Key != "TKT-2" {
+		t.Fatalf("selected %v, want TKT-2", card.Key)
+	}
+}
+
+// An empty derivation (a branch naming no ticket) changes nothing at all.
+func TestSelectFuncEmptyIsQuiet(t *testing.T) {
+	m, _ := testModel(t)
+	m = m.WithSelectFunc(func() string { return "" })
+	m, _ = update(m, selectCmd(t, m)())
+	m = loadBoard(m)
+	if card, _ := m.selectedCard(); card.Key != "TKT-1" {
+		t.Fatalf("selected %v, want the usual TKT-1", card.Key)
+	}
+	if m.status != "" {
+		t.Fatalf("status = %q, want silence", m.status)
+	}
+}
+
+// --select wins over a key derived from the branch, whenever it lands.
+func TestExplicitSelectBeatsDerived(t *testing.T) {
+	m, _ := testModel(t)
+	m = m.WithSelect("TKT-1").WithSelectFunc(func() string { return "TKT-2" })
+	cmd := selectCmd(t, m)
+	m = loadBoard(m)
+	m, _ = update(m, cmd())
+	if card, _ := m.selectedCard(); card.Key != "TKT-1" {
+		t.Fatalf("derived key overrode --select: selected %v", card.Key)
+	}
+}
+
+// A hidden column is a standing choice of the user's. Saying so is useful
+// when they asked for that ticket by name, and nagging when the board worked
+// the key out for itself on an open it will repeat every day.
+func TestSelectKeyInHiddenColumnQuietWhenDerived(t *testing.T) {
+	m, _ := testModel(t)
+	m.hidden = map[string]bool{"done": true}
+	m = m.WithSelectFunc(func() string { return "TKT-2" })
+	m, _ = update(m, selectCmd(t, m)())
+	m = loadBoard(m)
+	if m.statusKind != "" {
+		t.Fatalf("derived key warned about a hidden column: %q (%s)", m.status, m.statusKind)
+	}
+	if !strings.Contains(m.status, "TKT-2") || !strings.Contains(m.status, "Done") {
+		t.Fatalf("status %q should still say where TKT-2 is", m.status)
+	}
+}
+
+// A branch whose ticket is not on this board at all is not worth a word: the
+// board just opens.
+func TestSelectKeyDerivedMissIsSilent(t *testing.T) {
+	m, _ := testModel(t)
+	m = m.WithSelectFunc(func() string { return "TKB-404" })
+	m, _ = update(m, selectCmd(t, m)())
+	m = loadBoard(m)
+	if m.status != "" {
+		t.Fatalf("status = %q, want silence for a derived miss", m.status)
+	}
+	if card, _ := m.selectedCard(); card.Key != "TKT-1" {
+		t.Fatalf("selected %v, want the usual TKT-1", card.Key)
+	}
+}
+
+// An empty or junk --select must not break the board.
+func TestSelectKeyOddValues(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        string
+		wantStatus string
+		wantKind   string
+	}{
+		{"empty", "", "", ""},
+		{"whitespace only", "   ", "", ""},
+		{"junk", "not a key", "NOT A KEY is not on the board", "warn"},
+		{"a key of the wrong project", "OTHER-1", "OTHER-1 is not on the board", "warn"},
+	}
+	for _, c := range cases {
+		m, _ := testModel(t)
+		m = m.WithSelect(c.key)
+		m = loadBoard(m)
+		if m.status != c.wantStatus || m.statusKind != c.wantKind {
+			t.Errorf("%s: status = %q (%s), want %q (%s)", c.name, m.status, m.statusKind, c.wantStatus, c.wantKind)
+		}
+		card, ok := m.selectedCard()
+		if !ok || card.Key != "TKT-1" {
+			t.Errorf("%s: board unusable, selected %v ok=%v", c.name, card.Key, ok)
+		}
+	}
+}
+
+// A board warning and a selection on the same load: the warning is the rarer
+// thing, so it stays on screen, and the selection still moved.
+func TestSelectKeyKeepsBoardWarning(t *testing.T) {
+	m, _ := testModel(t)
+	m = m.WithSelect("TKT-2")
+	m, _ = update(m, boardMsg{
+		roles:   []model.RolePair{{Role: "todo", Lane: "To Do"}, {Role: "done", Lane: "Done"}},
+		columns: []model.Column{{Lane: "To Do", Role: "todo", Cards: []model.Card{{Key: "TKT-1"}}}, {Lane: "Done", Role: "done", Cards: []model.Card{{Key: "TKT-2"}}}},
+		warn:    "lane-time unavailable",
+	})
+	if m.status != "lane-time unavailable" || m.statusKind != "warn" {
+		t.Fatalf("board warning swallowed: status = %q (%s)", m.status, m.statusKind)
+	}
+	if card, _ := m.selectedCard(); card.Key != "TKT-2" {
+		t.Fatalf("selection lost to the warning: %v", card.Key)
+	}
+}
+
+// Keys belong to the modal while one is open: o and ga must type into it, not
+// jump behind it.
+func TestJumpInertWhileModalOpen(t *testing.T) {
+	src := &fakeFocus{fakeLive: fakeLive{byKey: panes("TKT-1", herdr.StatusWorking, ref("wC:p1", herdr.StatusWorking, false))}}
+	for _, keys := range [][]string{{"o"}, {"g", "a"}} {
+		m := jumpBoard(t, src).WithPopup(true)
+		m = step(m, key("f")) // open the filter modal
+		if m.modal == nil {
+			t.Fatal("setup: filter modal did not open")
+		}
+		var cmd tea.Cmd
+		for _, k := range keys {
+			m, cmd = update(m, key(k))
+			if jumped(cmd) || quits(cmd) {
+				t.Fatalf("%v behind a modal produced a jump", keys)
+			}
+		}
+		if m.modal == nil {
+			t.Fatalf("%v closed the modal", keys)
+		}
+		if len(src.focused) != 0 {
+			t.Fatalf("%v focused %v from behind a modal", keys, src.focused)
+		}
+	}
+}
+
+// A live source that only reads status (no FocusPane) drives the badges but
+// cannot jump, and says that rather than claiming live status is off.
+func TestJumpStatusOnlySourceWarns(t *testing.T) {
+	src := &fakeLive{byKey: panes("TKT-1", herdr.StatusWorking, ref("wC:p1", herdr.StatusWorking, false))}
+	m, _ := testModel(t)
+	m = goLive(t, loadBoard(m.WithLive(src)))
+	if !m.live.on {
+		t.Fatal("setup: a status-only source must still go live")
+	}
+	m, cmd := update(m, key("o"))
+	if m.status != "This board can't focus herdr panes" || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+	if jumped(cmd) {
+		t.Fatal("jumped through a source that cannot focus panes")
 	}
 }

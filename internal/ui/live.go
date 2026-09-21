@@ -230,9 +230,12 @@ func jumpCmd(f PaneFocuser, key, paneID string) tea.Cmd {
 // Every way this cannot work says which one it was, because the key does
 // nothing visible otherwise.
 func (m Model) jumpToAgentPane() (tea.Model, tea.Cmd) {
-	focuser, canFocus := m.live.src.(PaneFocuser)
-	if m.live.src == nil || !canFocus {
+	if m.live.src == nil {
 		return m, m.setStatus("Live agent status is off", "warn")
+	}
+	focuser, canFocus := m.live.src.(PaneFocuser)
+	if !canFocus {
+		return m, m.setStatus("This board can't focus herdr panes", "warn")
 	}
 	if !m.live.on {
 		return m, m.setStatus("herdr live status unavailable", "warn")

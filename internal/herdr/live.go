@@ -104,13 +104,12 @@ func PickPane(l Live) (PaneRef, bool) {
 	for _, p := range l.Panes {
 		switch {
 		case !found:
+			best, found = p, true
 		case best.Focused:
-			continue // nothing outranks the pane the human is already in
-		case p.Focused, rank(p.Status) > rank(best.Status):
-		default:
-			continue
+			// Nothing outranks the pane the human is already in.
+		case p.Focused || rank(p.Status) > rank(best.Status):
+			best = p
 		}
-		best, found = p, true
 	}
 	return best, found
 }
