@@ -247,7 +247,8 @@ Rechecked against herdr 0.9.0 / protocol 22 while building the live badge
 ## Verified in TKB-23
 
 Rechecked against herdr 0.9.0 / protocol 22 while building the card ↔ pane
-jump (`herdr api schema --json`, `internal/herdr/client.go`):
+jump: the request shapes from `herdr api schema --json`, and the focus
+behaviour itself by hand in a live session (see `internal/herdr/client.go`).
 
 - `pane.focus` takes `{"pane_id": "<pane>"}` (schema `PaneTarget`), while
   `agent.focus` takes `{"target": "<pane|agent>"}` (`AgentTarget`). The two are
@@ -263,6 +264,13 @@ jump (`herdr api schema --json`, `internal/herdr/client.go`):
   SIGHUPping whichever popup is open. So the board must finish the
   `pane.focus` round trip **first** and only then exit; its exit is what closes
   the popup. It must never call `popup.close` to close itself.
+- **The popup's exit does not undo the jump.** Verified by hand: pressing `o`
+  on a card whose agent pane is on a branch naming that ticket lands focus in
+  the agent's pane, and that focus survives the popup being torn down — herdr
+  does not restore whatever was focused before the popup opened. That is the
+  whole reason for the ordering above: focus, then quit. The reverse order
+  would race the teardown, and no fallback (a delayed focus after the program
+  returns, say) is needed.
 - `plugin.pane.open` (`PluginPaneOpenParams`) accepts **no argv**, but it does
   take both `cwd` and `env` (plus `plugin_id`, `entrypoint`, placement and
   size). So a pane's command line is fixed by the manifest, and everything
@@ -286,6 +294,14 @@ jump (`herdr api schema --json`, `internal/herdr/client.go`):
   no context at all, so a launcher that cannot work out where it was invoked
   opens the board with nothing selected instead of with the plugin's own
   ticket selected.
+- **An agent on a branch that names no ticket cannot be reached from the
+  board.** Seen while testing the jump: a pane sitting on `main` (or any
+  branch without a key) resolves to no ticket, so it badges nothing and no
+  card can jump to it. This is inherent to deriving keys from branch names
+  (TKB-22) rather than anything about the jump — herdr's `AgentInfo` carries
+  no ticket of its own — and it applies equally to the badges. AC3's
+  `pane.report_metadata` tokens would not change it either: the board would
+  still have to know the ticket before it could report one.
 - `pane.report_metadata` (`PaneReportMetadataParams`) takes `pane_id`,
   `source`, and up to 16 `tokens` with a `ttl_ms` — the mechanism a later
   ticket (TKB-23 AC3) would use to show `$ticket` in herdr's sidebar. Not used

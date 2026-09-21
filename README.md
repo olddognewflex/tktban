@@ -71,6 +71,19 @@ go build -o bin/tktban ./cmd/tktban
 herdr plugin link .
 ```
 
+**A linked checkout is the live plugin.** `herdr plugin link .` registers the
+working tree itself, and herdr runs `bin/tktban` from it — the binary you
+built, not the code you have since edited. So **rebuild after every change**:
+
+```sh
+go build -o bin/tktban ./cmd/tktban
+```
+
+The giveaway that you forgot is a popup that opens and vanishes at once,
+exiting with status 2: the manifest passes a flag the stale binary does not
+know, so it fails to parse its own command line. `herdr plugin log list` shows
+the usage text.
+
 Bind the action to a key in `~/.config/herdr/config.toml`:
 
 ```toml
@@ -143,11 +156,17 @@ apart.
 
 **Card → pane.** With the board open, `o` (or `ga`, for hands that reach for a
 vim `g` prefix) focuses the herdr pane running the selected card's agent — its
-workspace, tab and pane, in one `pane.focus`. When the board is herdr's popup
-it closes on the way, leaving you in the agent pane; a board running in a
-plain herdr pane stays open and just moves focus. When a ticket has several
-agent panes, the one herdr already has focused wins, otherwise the most urgent
-(🙋 over ⚙ over quiet).
+workspace, tab and pane, in one `pane.focus`, across workspaces. When the
+board is herdr's popup it closes on the way and leaves you in the agent pane,
+with the focus intact: the popup's teardown does not send you back where you
+were. A board running in a plain herdr pane stays open and just moves focus.
+When a ticket has several agent panes, the one herdr already has focused wins,
+otherwise the most urgent (🙋 over ⚙ over quiet).
+
+The pane you are jumping to has to be on a branch that names the ticket — the
+same rule as the badges, since both come from the branch (see *Live agent
+badges* above). An agent working on `main`, or on any branch without a key,
+belongs to no card, so it shows no badge and nothing can jump to it.
 
 Nothing is silent. The key says `No agent pane for TKB-23` when no agent is on
 that ticket, `Live agent status is off` outside herdr (or with
