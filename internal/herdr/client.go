@@ -164,6 +164,10 @@ type Agent struct {
 	Cwd           string  `json:"cwd"`
 	ForegroundCwd string  `json:"foreground_cwd"` // where the agent actually runs
 	Focused       bool    `json:"focused"`
+	// Tokens is the pane metadata herdr currently holds, merged across every
+	// source that reported any. Reading it back is what lets tktban publish
+	// without keeping state of its own: see SocketSource.publishTokens.
+	Tokens map[string]string `json:"tokens"`
 }
 
 // AgentList returns every agent pane herdr knows about.

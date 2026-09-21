@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 )
@@ -122,9 +121,10 @@ var ErrProtocol = errors.New("unsupported herdr protocol")
 
 // SocketSource polls the herdr socket for live ticket status.
 //
-// Polls are expected to be serialised — the board never has two herdr calls in
-// flight — and published is only ever touched from inside Poll, so the type
-// carries no lock of its own.
+// It holds no mutable state: every field is set once by the caller and only
+// read afterwards, and Client is itself safe for concurrent use (one
+// connection per call). So a jump can run a pane.focus on its own goroutine
+// while a poll is in flight, which is exactly what the board does.
 type SocketSource struct {
 	Client *Client
 	// KeysForDir maps a pane directory to ticket keys; nil means KeysForDir.
@@ -133,11 +133,6 @@ type SocketSource struct {
 	// `ticket` pane-metadata token, so a herdr sidebar row configured with
 	// $ticket can show it. Off leaves herdr's metadata untouched.
 	Tokens bool
-
-	// published is what herdr was last told for each pane: pane id -> the
-	// token value it holds. Only successful calls land here, so a failed one
-	// is retried on the next poll rather than assumed done.
-	published map[string]string
 }
 
 // NewSocketSource returns a source reading the herdr socket at path.
@@ -166,7 +161,8 @@ func (s *SocketSource) Probe(ctx context.Context) error {
 // ticket key back to herdr as pane metadata (see publishTokens). That work is
 // best-effort and bounded by ctx — it can never fail a poll or change the
 // statuses returned — but it does happen before Poll returns, so a poll that
-// changes many panes at once costs those round trips.
+// has panes to correct costs those round trips. A poll where herdr already
+// holds the right token for every pane makes no extra calls at all.
 func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 	agents, err := s.Client.AgentList(ctx)
 	if err != nil {
@@ -186,53 +182,55 @@ func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.publishTokens(ctx, byKey)
+	s.publishTokens(ctx, agents, byKey)
 	return byKey, nil
 }
 
 // publishTokens tells herdr which ticket each agent pane is on, as a `ticket`
-// pane-metadata token, and clears the token for panes that have dropped out of
-// the mapping (closed, released, or moved to a branch naming no ticket). Only
-// changes are sent, so a board sitting idle makes no calls at all.
+// pane-metadata token, and clears the token of panes that are on no ticket any
+// more (a branch that names none, or an agent herdr has released).
+//
+// The diff is against herdr's own state — the `tokens` each pane carries in
+// the agent.list reply this poll just parsed — not against anything this
+// process remembers. That makes publishing idempotent and self-healing: a
+// board start corrects whatever a previous board left behind (including a
+// stale key nobody ever cleared), a steady-state poll makes no calls at all,
+// and a call that fails is simply attempted again next poll, because herdr
+// still does not hold what we want it to.
+//
+// Only panes herdr still lists are touched. A pane that has closed took its
+// metadata with it and cannot be reported to anyway.
 //
 // A pane on a branch naming several tickets gets them sorted and joined with
 // "," so the same set always produces the same token.
 //
 // Errors are swallowed on purpose: the sidebar is a nicety and the badges are
-// the job. A pane whose call failed is simply left out of published, so the
-// next poll tries it again.
-func (s *SocketSource) publishTokens(ctx context.Context, byKey map[string]Live) {
+// the job.
+func (s *SocketSource) publishTokens(ctx context.Context, agents []Agent, byKey map[string]Live) {
 	if !s.Tokens {
 		return
 	}
 	want := paneTokens(byKey)
-	for _, pane := range slices.Sorted(maps.Keys(want)) {
-		if s.published[pane] == want[pane] {
+	seen := map[string]bool{}
+	for _, a := range agents {
+		if a.PaneID == "" || seen[a.PaneID] {
 			continue
+		}
+		seen[a.PaneID] = true
+		value := want[a.PaneID]
+		if value == a.Tokens[TicketToken] {
+			continue // herdr already says what we would say
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		value := want[pane]
-		if err := s.Client.ReportPaneTokens(ctx, pane, map[string]*string{TicketToken: &value}); err != nil {
-			continue
+		token := &value
+		if value == "" {
+			token = nil // a null is how herdr clears one
 		}
-		if s.published == nil {
-			s.published = map[string]string{}
-		}
-		s.published[pane] = value
-	}
-	for _, pane := range slices.Sorted(maps.Keys(s.published)) {
-		if _, ok := want[pane]; ok {
-			continue
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		if err := s.Client.ReportPaneTokens(ctx, pane, map[string]*string{TicketToken: nil}); err != nil {
-			continue
-		}
-		delete(s.published, pane)
+		// Deliberately unchecked: the next poll sees herdr still disagrees
+		// and tries again.
+		_ = s.Client.ReportPaneTokens(ctx, a.PaneID, map[string]*string{TicketToken: token})
 	}
 }
 
