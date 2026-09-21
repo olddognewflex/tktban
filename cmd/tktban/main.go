@@ -31,6 +31,7 @@ func run(argv []string) int {
 	noAuto := fs.Bool("no-auto-refresh", false, "start with auto-refresh off (toggle at runtime with 'a')")
 	inHerdr := fs.Bool("herdr", false, "running as a herdr plugin pane: pick config from the herdr context, keep settings in the plugin state dir (no-op outside herdr)")
 	noLive := fs.Bool("no-herdr-live", false, "inside herdr, don't read live agent status from the herdr socket for card badges")
+	noTokens := fs.Bool("no-herdr-tokens", false, "inside herdr, don't publish the ticket key as herdr pane metadata")
 	selectKey := fs.String("select", "", "select this ticket key when the board opens, e.g. TKB-23")
 	selectFromCwd := fs.Bool("select-from-cwd", false, "select the ticket named by the branch checked out where the board was opened (the herdr context inside herdr, else this directory); --select wins")
 	popup := fs.Bool("popup", false, "(internal) the board is herdr's popup pane: a successful jump to an agent pane exits, which is what closes the popup")
@@ -72,7 +73,7 @@ func run(argv []string) int {
 		defer release()
 		// Only the board selects a ticket, so `doctor` never reads a branch.
 		selected, derive := selectTarget(*selectKey, *selectFromCwd, os.Getenv, cwd)
-		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive), selected, derive, *popup)
+		return board(tk, *interval, !*noAuto, settingsPath, liveSource(os.Getenv, *noLive, !*noTokens), selected, derive, *popup)
 	default:
 		fmt.Fprintf(os.Stderr, "tktban: unknown command %q (want board or doctor)\n", command)
 		return 2
@@ -124,7 +125,12 @@ func herdrSetup(config string, getenv func(string) string, cwd string, stat, lst
 // when running inside herdr, whether or not --herdr was given (a board in a
 // plain herdr pane benefits too). Outside herdr, with no socket, or with
 // --no-herdr-live it returns nil and badges come from ticket frontmatter only.
-func liveSource(getenv func(string) string, disabled bool) ui.LiveSource {
+//
+// tokens says whether each poll should also report the pane's ticket key back
+// to herdr as pane metadata (--no-herdr-tokens turns that off). It rides on
+// the same source, so --no-herdr-live turns it off too: without polls there is
+// nothing to report.
+func liveSource(getenv func(string) string, disabled, tokens bool) ui.LiveSource {
 	if disabled {
 		return nil
 	}
@@ -132,7 +138,9 @@ func liveSource(getenv func(string) string, disabled bool) ui.LiveSource {
 	if !e.InHerdr || e.SocketPath == "" {
 		return nil
 	}
-	return herdr.NewSocketSource(e.SocketPath)
+	src := herdr.NewSocketSource(e.SocketPath)
+	src.Tokens = tokens
+	return src
 }
 
 // selectKeyTimeout bounds reading the branch of the directories --select-from-cwd

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/olddognewflex/tktban/internal/herdr"
 	"github.com/olddognewflex/tktban/internal/tkt"
 	"github.com/olddognewflex/tktban/internal/ui"
 )
@@ -89,7 +90,7 @@ func TestLiveSourceOnlyInsideHerdr(t *testing.T) {
 	for _, c := range cases {
 		// Compare the interface itself: a typed nil pointer inside it would read
 		// as "live on" to the board.
-		if got := liveSource(envOf(c.env), c.disabled); (got != nil) != c.want {
+		if got := liveSource(envOf(c.env), c.disabled, true); (got != nil) != c.want {
 			t.Errorf("%s: live source = %v, want present=%v", c.name, got, c.want)
 		}
 	}
@@ -226,6 +227,50 @@ func TestPopupFlagWiring(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%v: popup = %v, want %v", c.argv, got, c.want)
 		}
+	}
+}
+
+// --no-herdr-tokens has to reach the live source itself, not just parse: the
+// board never sees it, the SocketSource does.
+func TestNoHerdrTokensFlag(t *testing.T) {
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_SOCKET_PATH", "/run/herdr.sock")
+	cases := []struct {
+		argv []string
+		want bool
+	}{
+		{nil, true},
+		{[]string{"--herdr"}, true},
+		{[]string{"--no-herdr-tokens"}, false},
+		{[]string{"--herdr", "--no-herdr-tokens"}, false},
+	}
+	orig := board
+	t.Cleanup(func() { board = orig })
+	for _, c := range cases {
+		var got ui.LiveSource
+		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, live ui.LiveSource, _ string, _ func() string, _ bool) int {
+			got = live
+			return 0
+		}
+		if code := run(c.argv); code != 0 {
+			t.Fatalf("%v: run = %d", c.argv, code)
+		}
+		src, ok := got.(*herdr.SocketSource)
+		if !ok {
+			t.Fatalf("%v: live source = %T, want *herdr.SocketSource", c.argv, got)
+		}
+		if src.Tokens != c.want {
+			t.Errorf("%v: Tokens = %v, want %v", c.argv, src.Tokens, c.want)
+		}
+	}
+}
+
+// --no-herdr-live takes the whole source away, so it takes the tokens with it.
+func TestNoHerdrLiveAlsoStopsTokens(t *testing.T) {
+	if got := liveSource(envOf(map[string]string{
+		"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock",
+	}), true, true); got != nil {
+		t.Fatalf("live source = %v, want none", got)
 	}
 }
 
