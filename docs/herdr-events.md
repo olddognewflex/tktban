@@ -395,12 +395,14 @@ from the TKB-24 research against herdr 0.9.0 and are not re-measured here.
   keeps pane numbering (`public_pane_numbers`, `next_public_pane_number`) but
   no seq, so after a herdr restart a pane can keep its id (`wC:p1`) while its
   counter starts again low. So the seq only orders hooks over a short window:
-  the hook treats a seq at or below the stored one as already handled for
-  60 s, and after that as a reset counter. It claims the seq in
+  the hook treats an equal seq as handled however old (herdr may re-send a
+  status event with no new transition), and a lower one as handled for 60 s,
+  after that as a reset counter. Accepted edge: a herdr restart within 60 s
+  of a toast can drop that pane's first prompt after it. It claims the seq in
   `$HERDR_PLUGIN_STATE_DIR/notify-state.json` under a flock on `notify.lock`
   before sending, so exactly one of several overlapping hooks toasts, and
-  gives the claim back when the send fails for a reason a later hook could
-  get past. Entries expire after 24 h, on load as well as on save. A 0 (an
+  gives the claim back when the send fails for a reason a retry could get
+  past, so the pane's next change to that status is not taken for a flap. Entries expire after 24 h, on load as well as on save. A 0 (an
   older herdr) leaves only the 30 s per-pane, per-status flap guard.
 - `agent.get {"target": ...}` replies `{"type":"agent_info","agent":{...}}`,
   and `focused`, `foreground_cwd` and `cwd` come with it, so one call answers
@@ -414,5 +416,6 @@ from the TKB-24 research against herdr 0.9.0 and are not re-measured here.
   and pane ids when the context has them. PATH may be minimal.
 - **herdr sets no hook timeout**, keeps at most 32 plugin commands in flight
   (runs beyond that are dropped) and caps output at 64 KB. So the hook bounds
-  itself: 5 s end to end, and `working` / `idle` / `unknown` exit before any
+  itself: a 5 s context for the work, plus up to 1 s each for giving a claim
+  back and clearing its settle marker, so about 7 s at worst; and `working` / `idle` / `unknown` exit before any
   I/O.

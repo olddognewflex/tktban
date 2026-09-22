@@ -202,10 +202,12 @@ var board = func(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, 
 	return 0
 }
 
-// hookTimeout bounds one hook run end to end. herdr sets no timeout of its
-// own and drops runs past 32 in flight, so a hung socket or filesystem must
-// not pin a slot. The slowest honest run is the 1 s settle delay plus two
-// 1.1 s rate-limit retries.
+// hookTimeout bounds the hook's own work. herdr sets no timeout of its own
+// and drops runs past 32 in flight, so a hung socket or filesystem must not
+// pin a slot. The slowest honest run is the 1 s settle delay plus two 1.1 s
+// rate-limit retries. Two state-file cleanups run after it on up to 1 s each
+// (giving a claim back, clearing the settle marker), so a run ends within
+// about 7 s.
 const hookTimeout = 5 * time.Second
 
 // hookOut is where the hook's decision line goes: stdout, which herdr keeps

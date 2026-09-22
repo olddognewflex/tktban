@@ -141,7 +141,11 @@ func TestDecideClaim(t *testing.T) {
 		{"lower seq, just handled", notifyEntry{Seq: 730, SeenAt: msAgo(time.Second), At: at(StatusDone, time.Hour)}, true, 722, StatusBlocked, claimSeen},
 		// herdr restarted: its per-pane counter began again below the stored one.
 		{"lower seq an hour later is a reset", notifyEntry{Seq: 730, SeenAt: msAgo(time.Hour), At: at(StatusBlocked, time.Hour)}, true, 5, StatusBlocked, claimed},
-		{"same seq past the window", notifyEntry{Seq: 722, SeenAt: msAgo(61 * time.Second), At: at(StatusBlocked, 61*time.Second)}, true, 722, StatusBlocked, claimed},
+		// herdr can re-send a status event with no new transition; an equal
+		// seq is handled however old.
+		{"same seq an hour later", notifyEntry{Seq: 722, SeenAt: msAgo(time.Hour), At: at(StatusBlocked, time.Hour)}, true, 722, StatusBlocked, claimSeen},
+		{"lower seq just inside the window", notifyEntry{Seq: 730, SeenAt: msAgo(59 * time.Second), At: at(StatusBlocked, 59*time.Second)}, true, 722, StatusBlocked, claimSeen},
+		{"lower seq past the window", notifyEntry{Seq: 730, SeenAt: msAgo(61 * time.Second), At: at(StatusBlocked, 61*time.Second)}, true, 722, StatusBlocked, claimed},
 		{"seen time in the future is a reset", notifyEntry{Seq: 730, SeenAt: msAgo(-time.Hour)}, true, 5, StatusBlocked, claimed},
 		{"same status inside cooldown", notifyEntry{Seq: 722, SeenAt: msAgo(29 * time.Second), At: at(StatusBlocked, 29*time.Second)}, true, 730, StatusBlocked, claimFlap},
 		{"same status after cooldown", notifyEntry{Seq: 722, SeenAt: msAgo(30 * time.Second), At: at(StatusBlocked, 30*time.Second)}, true, 730, StatusBlocked, claimed},
@@ -189,5 +193,50 @@ func TestReleaseClaimKeepsNewerDecision(t *testing.T) {
 	got := loadNotifyState(filepath.Join(dir, NotifyStateName), later)["p"]
 	if got.Seq != 730 {
 		t.Fatalf("release clobbered the newer claim: %+v", got)
+	}
+}
+
+// Releasing a claim reverts only the claim's own fields. Settle markers
+// belong to other runs: one written after the claim survives the release,
+// and one that ended after the claim is not brought back by it.
+func TestReleaseClaimLeavesSettleMarkers(t *testing.T) {
+	ctx := context.Background()
+	path := func(dir string) string { return filepath.Join(dir, NotifyStateName) }
+
+	dir := t.TempDir()
+	_, tk, err := claimNotify(ctx, dir, "p", 722, StatusBlocked, stateNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	free, _, err := startSettle(ctx, dir, "p", StatusDone, stateNow)
+	if err != nil || !free {
+		t.Fatalf("settle = %v, %v", free, err)
+	}
+	if err := releaseClaim(ctx, dir, tk, stateNow); err != nil {
+		t.Fatal(err)
+	}
+	got := loadNotifyState(path(dir), stateNow)["p"]
+	if _, ok := got.Settle[StatusDone]; !ok {
+		t.Fatalf("release wiped a newer settle marker: %+v", got)
+	}
+	if _, ok := got.At[StatusBlocked]; ok || got.Seq != 0 || got.SeenAt != 0 {
+		t.Fatalf("claim fields not reverted: %+v", got)
+	}
+
+	dir = t.TempDir()
+	_, stamp, err := startSettle(ctx, dir, "p", StatusDone, stateNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tk, err = claimNotify(ctx, dir, "p", 722, StatusBlocked, stateNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endSettle(ctx, dir, "p", StatusDone, stamp, stateNow)
+	if err := releaseClaim(ctx, dir, tk, stateNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadNotifyState(path(dir), stateNow)["p"]; len(got.Settle) != 0 {
+		t.Fatalf("release resurrected an ended settle marker: %+v", got)
 	}
 }

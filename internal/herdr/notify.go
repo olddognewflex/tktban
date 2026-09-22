@@ -272,8 +272,8 @@ func RunHook(ctx context.Context, d HookDeps) string {
 	label := strings.Join(keys, ",") + " " + string(ev.Status)
 	decision, keep := send(ctx, d, Notification{Title: toast.Title, Body: toast.Body, Sound: toast.Sound}, label)
 	if !keep {
-		// A later hook for this prompt may get through where this one did
-		// not, so it must not find the transition already claimed.
+		// No toast showed, so the pane's next change to this status must
+		// not be taken for a flap of one that did.
 		if err := releaseClaim(ctx, d.StateDir, ticket, d.Now()); err != nil {
 			return decision + "; release: " + oneLine(err)
 		}

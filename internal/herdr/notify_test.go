@@ -690,3 +690,20 @@ func TestRunHookOneSettlerPerPaneStatus(t *testing.T) {
 		t.Fatalf("marker left behind: %d", held)
 	}
 }
+
+// herdr may re-send pane.agent_status_changed with no new transition (a
+// title or label change) and so no new seq. A pane sitting blocked must not
+// re-toast for it, however long it has been blocked.
+func TestRunHookEqualSeqStaysHandled(t *testing.T) {
+	f := newHook(t, StatusBlocked)
+	if got := f.run(); got != "shown TKB-24 blocked" {
+		t.Fatalf("first: %q", got)
+	}
+	f.now = f.now.Add(2 * time.Hour)
+	if got := f.run(); got != "skip: seq 722 already handled" {
+		t.Fatalf("same seq two hours later: %q", got)
+	}
+	if len(f.fake.shows) != 1 {
+		t.Fatalf("shows = %d, want 1", len(f.fake.shows))
+	}
+}

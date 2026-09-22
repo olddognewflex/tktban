@@ -35,7 +35,7 @@ const seenWindow = 60 * time.Second
 
 // settleHold is how long a "settling" marker is honoured. A run clears its
 // own marker when it finishes; the hold only matters for a run that died,
-// and it covers a whole hook run (5 s in cmd/tktban).
+// and it covers the hook's own 5 s context in cmd/tktban.
 const settleHold = 5 * time.Second
 
 // notifyStateTTL drops panes nothing has been heard from in a day, on load
@@ -195,12 +195,23 @@ const (
 // decideClaim is the pure rule behind claimNotify; it returns the entry to
 // store. seq 0 means herdr sent no state_change_seq (it defaults to 0), so
 // only the flap guard applies.
+//
+// An equal seq is handled however old: herdr can re-send a status event
+// without a new transition (a title or label change), and a pane sitting
+// blocked must not re-toast for it. Only a lower seq ages out, after
+// seenWindow, as a counter reset. The accepted cost: a herdr restart within
+// seenWindow of a toast can drop that pane's first prompt after it.
 func decideClaim(prev notifyEntry, had bool, seq uint64, status Status, now time.Time) (claim, notifyEntry) {
-	if had && seq != 0 && prev.Seq >= seq {
-		if d, ok := since(now, prev.SeenAt); ok && d < seenWindow {
+	if had && seq != 0 {
+		if prev.Seq == seq {
 			return claimSeen, prev
 		}
-		// Older than any straggler could be: herdr's counter was reset.
+		if prev.Seq > seq {
+			if d, ok := since(now, prev.SeenAt); ok && d < seenWindow {
+				return claimSeen, prev
+			}
+			// Older than any straggler could be: herdr's counter was reset.
+		}
 	}
 	next := prev.clone()
 	next.Seq, next.SeenAt = seq, now.UnixMilli()
@@ -257,9 +268,12 @@ func claimNotify(ctx context.Context, stateDir, pane string, seq uint64, status 
 
 // releaseClaim gives a claim back after a send that failed for a reason a
 // later hook could get past (rate limited, busy, a socket error, the run
-// running out of time), so a straggler for the same prompt can still toast.
-// The entry goes back to what it was before the claim — unless another hook
-// has changed it since, in which case that newer decision stands.
+// running out of time), so the pane's next change to the same status is not
+// swallowed by the flap guard as if this toast had shown.
+//
+// Only the claim's own fields go back — Seq, SeenAt and the toast time for
+// its status — and only if no other hook has claimed since; the settle
+// markers are left as they are now, since other runs own them.
 //
 // It runs even when the run's own ctx is done, on a short context of its own.
 func releaseClaim(ctx context.Context, stateDir string, tk claimTicket, now time.Time) error {
@@ -273,12 +287,20 @@ func releaseClaim(ctx context.Context, stateDir string, tk claimTicket, now time
 		if !ok || cur.Seq != tk.mine.Seq || cur.SeenAt != tk.mine.SeenAt {
 			return false
 		}
-		prev := tk.prev.clone()
-		delete(prev.Settle, tk.status)
-		if !tk.had || prev.empty() {
+		e := cur.clone()
+		e.Seq, e.SeenAt = tk.prev.Seq, tk.prev.SeenAt
+		if v, had := tk.prev.At[tk.status]; had {
+			if e.At == nil {
+				e.At = map[Status]int64{}
+			}
+			e.At[tk.status] = v
+		} else {
+			delete(e.At, tk.status)
+		}
+		if e.empty() {
 			delete(state, tk.pane)
 		} else {
-			state[tk.pane] = prev
+			state[tk.pane] = e
 		}
 		return true
 	})

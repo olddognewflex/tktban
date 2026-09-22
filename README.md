@@ -258,8 +258,9 @@ when:
 - another hook run is already waiting out the second for that pane and
   status, or has just handled the same transition (herdr can run several at
   once; they agree through `notify-state.json` in the plugin state dir, keyed
-  on herdr's `state_change_seq`, which only counts for a minute because herdr
-  restarts it);
+  on herdr's `state_change_seq`: the same seq is handled for good, a lower one
+  only for a minute, because herdr restarts the counter. So a herdr restart
+  within a minute of a toast can drop that pane's first prompt after it);
 - the same pane toasted the same status less than 30 s ago, so a prompt that
   flickers does not toast twice. Each status keeps its own 30 s: `done` in
   between does not reopen `blocked`.
@@ -279,8 +280,9 @@ Things to know:
 - **Toasts share one rate limit.** herdr allows one API notification per
   second across every caller. A hook turned away as rate-limited or busy tries
   twice more, 1.1 s apart, then gives up. A run that gives up (or hits a
-  socket error or its 5 s limit) hands its claim back, so a later hook for
-  the same prompt can still toast; one told `disabled` or
+  socket error or runs out of time; a run ends within about 7 s) hands its
+  claim back, so the pane's next change to the same status is not swallowed
+  by the 30 s flap guard as if this toast had shown. One told `disabled` or
   `no_foreground_client` keeps it, since trying again cannot help.
 - **Turn them off** with `notify = false` in the plugin settings file, in
   herdr's plugin state dir (`HERDR_PLUGIN_STATE_DIR`) — on macOS
@@ -288,7 +290,9 @@ Things to know:
   for now; a board key for it comes in a follow-up. It must be the TOML
   boolean `false`: `"false"` or `0` count as on. The board writes only its
   own keys (`theme`, `hidden_roles`), re-reading the file first, so an edit
-  made while a board is open survives the board's next save.
+  made while a board is open survives the board's next save. If the file is
+  not valid TOML, though, a board save rewrites it from defaults, erasing
+  the bad line.
 - **Outside herdr nothing toasts.** The standalone board never notifies, and
   `tktban herdr-hook` does nothing unless herdr started it.
 

@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"io/fs"
 	"os"
@@ -139,8 +140,8 @@ func TestHerdrHookRouted(t *testing.T) {
 
 // Only the herdr-hook path can toast. Checked on the source, test files
 // excluded:
-//   - the "notification.show" method string appears only in
-//     internal/herdr/client.go;
+//   - the "notification.show" method string appears only inside
+//     (*Client).ShowNotification in internal/herdr/client.go;
 //   - ShowNotification is called only from internal/herdr's send, and send
 //     only from RunHook;
 //   - outside internal/herdr the one RunHook reference is inside herdrHook,
@@ -174,8 +175,8 @@ func TestOnlyHerdrHookCanNotify(t *testing.T) {
 				switch n := n.(type) {
 				case *ast.BasicLit:
 					if n.Kind == token.STRING && strings.Contains(n.Value, "notification.show") &&
-						rel != filepath.Join(herdrDir, "client.go") {
-						t.Errorf("%s: notification.show named outside client.go", fset.Position(n.Pos()))
+						(rel != filepath.Join(herdrDir, "client.go") || fn.name != "(*Client).ShowNotification") {
+						t.Errorf("%s: notification.show named in %s", fset.Position(n.Pos()), fn.name)
 					}
 				case *ast.SelectorExpr:
 					switch n.Sel.Name {
@@ -216,13 +217,18 @@ type namedBody struct {
 
 // enclosing splits a file into its top-level declarations, each named by
 // the function or variable it declares ("" for anything else), so a check can
-// ask which one a reference sits in.
+// ask which one a reference sits in. A method is named with its receiver
+// type, "(*Client).ShowNotification", so it never passes for a function.
 func enclosing(f *ast.File) []namedBody {
 	var out []namedBody
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			out = append(out, namedBody{d.Name.Name, d})
+			name := d.Name.Name
+			if d.Recv != nil && len(d.Recv.List) == 1 {
+				name = "(" + types.ExprString(d.Recv.List[0].Type) + ")." + name
+			}
+			out = append(out, namedBody{name, d})
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				name := ""
