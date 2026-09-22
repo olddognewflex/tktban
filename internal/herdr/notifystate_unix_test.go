@@ -26,7 +26,7 @@ func TestNotifyLockDoesNotFollowSymlink(t *testing.T) {
 		t.Fatalf("lock followed the symlink and created %s (err=%v)", outside, err)
 	}
 	// And a claim over that state dir refuses rather than toasting unguarded.
-	if _, err := claimNotify(context.Background(), dir, "p", 1, StatusBlocked, time.Now()); err == nil {
+	if _, _, err := claimNotify(context.Background(), dir, "p", 1, StatusBlocked, time.Now()); err == nil {
 		t.Fatal("claim succeeded without the lock")
 	}
 }

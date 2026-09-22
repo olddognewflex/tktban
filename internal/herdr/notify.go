@@ -22,7 +22,8 @@ import (
 // overlap, so the hook waits a moment, re-reads the pane with agent.get, and
 // acts only if the pane still says what the event said. Overlapping hooks for
 // one transition are collapsed by claiming herdr's state_change_seq in the
-// plugin state dir before sending.
+// plugin state dir before sending, and a send that fails for a reason a
+// later hook could get past gives the claim back.
 
 // StatusEventName is the hook event the notifier handles, as herdr passes it
 // in HERDR_PLUGIN_EVENT.
@@ -211,6 +212,15 @@ func RunHook(ctx context.Context, d HookDeps) string {
 	if !notifyOn(d.StateDir) {
 		return "skip: notify off"
 	}
+	// One sleeper per pane and status: the rest of a burst exits here.
+	free, stamp, err := startSettle(ctx, d.StateDir, ev.PaneID, ev.Status, d.Now())
+	if err != nil {
+		return "skip: state: " + oneLine(err)
+	}
+	if !free {
+		return "skip: already settling " + string(ev.Status)
+	}
+	defer func() { endSettle(ctx, d.StateDir, ev.PaneID, ev.Status, stamp, d.Now()) }()
 	if err := d.Sleep(ctx, settleDelay); err != nil {
 		return "skip: " + oneLine(err)
 	}
@@ -249,7 +259,7 @@ func RunHook(ctx context.Context, d HookDeps) string {
 		return "skip: status " + string(ev.Status)
 	}
 
-	c, err := claimNotify(ctx, d.StateDir, ev.PaneID, a.StateChangeSeq, ev.Status, d.Now())
+	c, ticket, err := claimNotify(ctx, d.StateDir, ev.PaneID, a.StateChangeSeq, ev.Status, d.Now())
 	switch {
 	case err != nil:
 		return "skip: state: " + oneLine(err)
@@ -260,24 +270,41 @@ func RunHook(ctx context.Context, d HookDeps) string {
 	}
 
 	label := strings.Join(keys, ",") + " " + string(ev.Status)
-	n := Notification{Title: toast.Title, Body: toast.Body, Sound: toast.Sound}
+	decision, keep := send(ctx, d, Notification{Title: toast.Title, Body: toast.Body, Sound: toast.Sound}, label)
+	if !keep {
+		// A later hook for this prompt may get through where this one did
+		// not, so it must not find the transition already claimed.
+		if err := releaseClaim(ctx, d.StateDir, ticket, d.Now()); err != nil {
+			return decision + "; release: " + oneLine(err)
+		}
+		return decision + "; claim released"
+	}
+	return decision
+}
+
+// send shows n, retrying rate_limited and busy. keep says whether the claim
+// should stand: yes once shown, and yes for disabled and
+// no_foreground_client, which no retry can fix (toasts are off, or no herdr
+// client is attached). A send that ran out of retries, out of time or into a
+// socket error is handed back instead.
+func send(ctx context.Context, d HookDeps, n Notification, label string) (string, bool) {
 	for attempt := 1; ; attempt++ {
 		shown, reason, err := d.Client.ShowNotification(ctx, n)
 		if err != nil {
-			return "error: notification.show: " + oneLine(err)
+			return "error: show: " + oneLine(err), false
 		}
 		if shown {
-			return "shown " + label
+			return "shown " + label, true
 		}
 		retry := reason == ReasonRateLimited || reason == ReasonBusy
 		if !retry {
-			return fmt.Sprintf("not shown: %s (%s)", reason, label)
+			return fmt.Sprintf("not shown: %s (%s)", reason, label), true
 		}
 		if attempt >= maxShowAttempts {
-			return fmt.Sprintf("gave up: %s after %d tries (%s)", reason, attempt, label)
+			return fmt.Sprintf("gave up: %s after %d tries (%s)", reason, attempt, label), false
 		}
 		if err := d.Sleep(ctx, rateLimitRetry); err != nil {
-			return fmt.Sprintf("gave up: %s, %s (%s)", reason, oneLine(err), label)
+			return fmt.Sprintf("gave up: %s, %s (%s)", reason, oneLine(err), label), false
 		}
 	}
 }

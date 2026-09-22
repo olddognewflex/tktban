@@ -137,12 +137,20 @@ func TestHerdrHookRouted(t *testing.T) {
 	}
 }
 
-// Only the herdr-hook path can toast. Checked on the source: outside
-// internal/herdr, the one reference to herdr.RunHook is inside herdrHook, and
-// nothing outside internal/herdr names ShowNotification or notification.show.
+// Only the herdr-hook path can toast. Checked on the source, test files
+// excluded:
+//   - the "notification.show" method string appears only in
+//     internal/herdr/client.go;
+//   - ShowNotification is called only from internal/herdr's send, and send
+//     only from RunHook;
+//   - outside internal/herdr the one RunHook reference is inside herdrHook,
+//     whether that is declared `var herdrHook = func` or `func herdrHook`.
+//
 // So the board, standalone or in herdr, has no way to notify.
 func TestOnlyHerdrHookCanNotify(t *testing.T) {
 	root := filepath.Join("..", "..")
+	herdrDir := filepath.Join("internal", "herdr")
+	mainGo := filepath.Join("cmd", "tktban", "main.go")
 	fset := token.NewFileSet()
 	runHookRefs := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -156,41 +164,41 @@ func TestOnlyHerdrHookCanNotify(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		inHerdr := filepath.Dir(rel) == filepath.Join("internal", "herdr")
-		src, err := os.ReadFile(path)
+		inHerdr := filepath.Dir(rel) == herdrDir
+		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			return err
 		}
-		if !inHerdr && strings.Contains(string(src), "notification.show") {
-			t.Errorf("%s names notification.show", rel)
-		}
-		f, err := parser.ParseFile(fset, path, src, 0)
-		if err != nil {
-			return err
-		}
-		var hookSpan [2]token.Pos
-		ast.Inspect(f, func(n ast.Node) bool {
-			if vs, ok := n.(*ast.ValueSpec); ok && len(vs.Names) == 1 && vs.Names[0].Name == "herdrHook" {
-				hookSpan = [2]token.Pos{vs.Pos(), vs.End()}
-			}
-			return true
-		})
-		ast.Inspect(f, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || inHerdr {
-				return true
-			}
-			switch sel.Sel.Name {
-			case "ShowNotification":
-				t.Errorf("%s: ShowNotification outside internal/herdr", fset.Position(sel.Pos()))
-			case "RunHook":
-				runHookRefs++
-				if rel != filepath.Join("cmd", "tktban", "main.go") || sel.Pos() < hookSpan[0] || sel.Pos() > hookSpan[1] {
-					t.Errorf("%s: RunHook outside herdrHook", fset.Position(sel.Pos()))
+		for _, fn := range enclosing(f) {
+			ast.Inspect(fn.body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.BasicLit:
+					if n.Kind == token.STRING && strings.Contains(n.Value, "notification.show") &&
+						rel != filepath.Join(herdrDir, "client.go") {
+						t.Errorf("%s: notification.show named outside client.go", fset.Position(n.Pos()))
+					}
+				case *ast.SelectorExpr:
+					switch n.Sel.Name {
+					case "ShowNotification":
+						if !inHerdr || fn.name != "send" {
+							t.Errorf("%s: ShowNotification called from %s", fset.Position(n.Pos()), fn.name)
+						}
+					case "RunHook":
+						if !inHerdr {
+							runHookRefs++
+							if rel != mainGo || fn.name != "herdrHook" {
+								t.Errorf("%s: RunHook referenced from %s", fset.Position(n.Pos()), fn.name)
+							}
+						}
+					}
+				case *ast.CallExpr:
+					if id, ok := n.Fun.(*ast.Ident); ok && inHerdr && id.Name == "send" && fn.name != "RunHook" {
+						t.Errorf("%s: send called from %s", fset.Position(n.Pos()), fn.name)
+					}
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
 		return nil
 	})
 	if err != nil {
@@ -199,4 +207,31 @@ func TestOnlyHerdrHookCanNotify(t *testing.T) {
 	if runHookRefs != 1 {
 		t.Fatalf("found %d RunHook references outside internal/herdr, want exactly 1 (in herdrHook)", runHookRefs)
 	}
+}
+
+type namedBody struct {
+	name string
+	body ast.Node
+}
+
+// enclosing splits a file into its top-level declarations, each named by
+// the function or variable it declares ("" for anything else), so a check can
+// ask which one a reference sits in.
+func enclosing(f *ast.File) []namedBody {
+	var out []namedBody
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			out = append(out, namedBody{d.Name.Name, d})
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				name := ""
+				if vs, ok := spec.(*ast.ValueSpec); ok && len(vs.Names) == 1 {
+					name = vs.Names[0].Name
+				}
+				out = append(out, namedBody{name, spec})
+			}
+		}
+	}
+	return out
 }

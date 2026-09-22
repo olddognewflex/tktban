@@ -296,7 +296,8 @@ func TestRunHookSameSeqToastsOnce(t *testing.T) {
 	if got := f.run(); got != "shown TKB-24 blocked" {
 		t.Fatalf("first: %q", got)
 	}
-	f.now = f.now.Add(time.Hour) // well past the cooldown: only the seq dedupes
+	// Past the cooldown but inside the seen window: only the seq dedupes.
+	f.now = f.now.Add(40 * time.Second)
 	if got := f.run(); got != "skip: seq 722 already handled" {
 		t.Fatalf("second: %q", got)
 	}
@@ -324,12 +325,15 @@ func TestRunHookConcurrentHooksToastOnce(t *testing.T) {
 	if got := f.fake.showCount(); got != 1 {
 		t.Fatalf("shows = %d, want exactly 1; decisions %q", got, out)
 	}
+	// The rest either found a run already settling this pane and status,
+	// or arrived after it and found the seq handled.
 	shown := 0
 	for _, o := range out {
-		switch {
-		case o == "shown TKB-24 blocked":
+		switch o {
+		case "shown TKB-24 blocked":
 			shown++
-		case o != "skip: seq 722 already handled":
+		case "skip: already settling blocked", "skip: seq 722 already handled":
+		default:
 			t.Errorf("unexpected decision %q", o)
 		}
 	}
@@ -528,5 +532,161 @@ func TestRunHookAgentGone(t *testing.T) {
 	}
 	if len(f.fake.shows) != 0 {
 		t.Fatalf("shows = %+v", f.fake.shows)
+	}
+}
+
+// state reads the fixture's state file as the hook left it.
+func (f *hookFixture) state() map[string]notifyEntry {
+	return loadNotifyState(filepath.Join(f.deps.StateDir, NotifyStateName), f.now)
+}
+
+// B1: herdr's per-pane seq starts again after a restart while pane ids
+// survive it. A pane whose stored seq is higher than its new one must toast
+// once the old entry is past the seen window, not stay silent for days.
+func TestRunHookSeqResetAfterRestartToasts(t *testing.T) {
+	f := newHook(t, StatusBlocked)
+	f.fake.agent.StateChangeSeq = 730
+	if got := f.run(); got != "shown TKB-24 blocked" {
+		t.Fatalf("before restart: %q", got)
+	}
+	f.now = f.now.Add(2 * time.Hour) // herdr restarted in between
+	f.fake.agent.StateChangeSeq = 5
+	if got := f.run(); got != "shown TKB-24 blocked" {
+		t.Fatalf("after restart: %q", got)
+	}
+	if got := f.state()[hookPane].Seq; got != 5 {
+		t.Fatalf("stored seq = %d, want the new counter's 5", got)
+	}
+}
+
+// W2: the flap guard is per status. blocked, then done, then blocked again
+// inside the cooldown: the second blocked stays quiet.
+func TestRunHookFlapGuardPerStatus(t *testing.T) {
+	f := newHook(t, StatusBlocked)
+	step := func(after time.Duration, s Status, seq uint64) string {
+		f.now = f.now.Add(after)
+		f.fake.agent.Status, f.fake.agent.StateChangeSeq = s, seq
+		f.deps.EventJSON = statusPayload(hookPane, s)
+		return f.run()
+	}
+	if got := step(0, StatusBlocked, 722); got != "shown TKB-24 blocked" {
+		t.Fatalf("blocked@0: %q", got)
+	}
+	if got := step(5*time.Second, StatusDone, 723); got != "shown TKB-24 done" {
+		t.Fatalf("done@5: %q", got)
+	}
+	if got := step(5*time.Second, StatusBlocked, 724); !strings.HasPrefix(got, "skip: blocked toasted under 30s ago") {
+		t.Fatalf("blocked@10: %q", got)
+	}
+	if len(f.fake.shows) != 2 {
+		t.Fatalf("shows = %d, want 2", len(f.fake.shows))
+	}
+}
+
+// W3: a send that failed for a reason a later hook could get past hands its
+// claim back, so a straggler for the same prompt can still toast.
+func TestRunHookGaveUpReleasesClaim(t *testing.T) {
+	f := newHook(t, StatusBlocked)
+	f.fake.reasons = []string{ReasonRateLimited}
+	if got := f.run(); !strings.HasPrefix(got, "gave up: rate_limited") || !strings.HasSuffix(got, "; claim released") {
+		t.Fatalf("decision = %q", got)
+	}
+	if st := f.state(); len(st) != 0 {
+		t.Fatalf("state after give-up = %+v, want the claim gone", st)
+	}
+	f.fake.reasons = nil // herdr lets the straggler through
+	if got := f.run(); got != "shown TKB-24 blocked" {
+		t.Fatalf("straggler: %q", got)
+	}
+
+	// A socket error releases too, back to the entry before the claim.
+	g := newHook(t, StatusBlocked)
+	if got := g.run(); got != "shown TKB-24 blocked" {
+		t.Fatalf("first: %q", got)
+	}
+	before := g.state()[hookPane]
+	g.now = g.now.Add(time.Hour)
+	g.fake.agent.StateChangeSeq = 800
+	g.deps.Client = errShow{g.fake}
+	if got := g.run(); !strings.HasPrefix(got, "error: show:") || !strings.HasSuffix(got, "; claim released") {
+		t.Fatalf("socket error: %q", got)
+	}
+	if after := g.state()[hookPane]; after.Seq != before.Seq || after.At[StatusBlocked] != before.At[StatusBlocked] {
+		t.Fatalf("entry after release = %+v, want %+v", after, before)
+	}
+}
+
+// errShow answers agent.get from the fake and fails every notification.show.
+type errShow struct{ *hookHerdr }
+
+func (errShow) ShowNotification(context.Context, Notification) (bool, string, error) {
+	return false, "", errors.New("broken pipe")
+}
+
+// W3: disabled and no_foreground_client keep the claim — no retry can help,
+// so a straggler for the same prompt stays quiet.
+func TestRunHookNotShownKeepsClaim(t *testing.T) {
+	for _, reason := range []string{ReasonDisabled, ReasonNoForegroundClient} {
+		f := newHook(t, StatusBlocked)
+		f.fake.reasons = []string{reason}
+		if got := f.run(); strings.Contains(got, "released") {
+			t.Errorf("%s: %q", reason, got)
+		}
+		if st := f.state()[hookPane]; st.Seq != 722 {
+			t.Errorf("%s: state = %+v, want the claim kept", reason, st)
+		}
+		if got := f.run(); got != "skip: seq 722 already handled" {
+			t.Errorf("%s: straggler = %q", reason, got)
+		}
+	}
+}
+
+// N2: at most one run per pane and status sleeps through the settle delay.
+func TestRunHookOneSettlerPerPaneStatus(t *testing.T) {
+	f := newHook(t, StatusBlocked)
+	seed := func(s Status, until time.Time) {
+		t.Helper()
+		if err := saveNotifyState(filepath.Join(f.deps.StateDir, NotifyStateName), map[string]notifyEntry{
+			hookPane: {Settle: map[Status]int64{s: until.UnixMilli()}},
+		}, f.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkdir(t, f.deps.StateDir)
+
+	seed(StatusBlocked, f.now.Add(2*time.Second))
+	if got := f.run(); got != "skip: already settling blocked" {
+		t.Fatalf("held: %q", got)
+	}
+	if len(f.sleeps) != 0 || len(f.fake.gets) != 0 {
+		t.Fatalf("a second settler slept %v and read %v", f.sleeps, f.fake.gets)
+	}
+
+	// Another status, an expired marker and one further ahead than any
+	// marker could be (a clock stepped back) do not hold this run.
+	for _, c := range []struct {
+		name   string
+		status Status
+		until  time.Duration
+	}{
+		{"other status", StatusDone, 2 * time.Second},
+		{"expired", StatusBlocked, -time.Second},
+		{"too far", StatusBlocked, time.Hour},
+	} {
+		seed(c.status, f.now.Add(c.until))
+		f.fake.agent.StateChangeSeq++
+		if got := f.run(); got != "shown TKB-24 blocked" {
+			t.Errorf("%s: %q", c.name, got)
+		}
+		f.now = f.now.Add(time.Minute) // clear the flap guard
+	}
+
+	// A run that ends early clears its own marker.
+	f.fake.agent.Status = StatusWorking
+	if got := f.run(); !strings.HasPrefix(got, "skip: status now working") {
+		t.Fatalf("stale: %q", got)
+	}
+	if held, ok := f.state()[hookPane].Settle[StatusBlocked]; ok {
+		t.Fatalf("marker left behind: %d", held)
 	}
 }

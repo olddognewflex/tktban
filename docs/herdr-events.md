@@ -388,13 +388,20 @@ from the TKB-24 research against herdr 0.9.0 and are not re-measured here.
   overrides) already announce background agents changing state. The hook does
   not replace them; its toast adds the ticket key, and both can appear.
 - **`AgentInfo.state_change_seq`** (`uint64`, default 0) is on every
-  `agent.get` / `agent.list` agent. It was observed global and monotonic across
-  panes (e.g. 722..728), so hooks that re-read the same transition see the same
-  number. That corrects the spike's "no sequence number": the *payload* has
-  none, but the re-read does. The hook claims it in
+  `agent.get` / `agent.list` agent, so hooks that re-read the same transition
+  see the same number. That corrects the spike's "no sequence number": the
+  *payload* has none, but the re-read does. It is **stamped per pane and not
+  persisted**: values seen were small (722..730), and `~/.config/herdr/session.json`
+  keeps pane numbering (`public_pane_numbers`, `next_public_pane_number`) but
+  no seq, so after a herdr restart a pane can keep its id (`wC:p1`) while its
+  counter starts again low. So the seq only orders hooks over a short window:
+  the hook treats a seq at or below the stored one as already handled for
+  60 s, and after that as a reset counter. It claims the seq in
   `$HERDR_PLUGIN_STATE_DIR/notify-state.json` under a flock on `notify.lock`
-  before sending, so exactly one of several overlapping hooks toasts. A 0 (an
-  older herdr) falls back to the 30 s per-pane-per-status flap guard alone.
+  before sending, so exactly one of several overlapping hooks toasts, and
+  gives the claim back when the send fails for a reason a later hook could
+  get past. Entries expire after 24 h, on load as well as on save. A 0 (an
+  older herdr) leaves only the 30 s per-pane, per-status flap guard.
 - `agent.get {"target": ...}` replies `{"type":"agent_info","agent":{...}}`,
   and `focused`, `foreground_cwd` and `cwd` come with it, so one call answers
   "still blocked?", "is the human looking?" and "which repo?".

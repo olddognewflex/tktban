@@ -164,9 +164,12 @@ type Agent struct {
 	Cwd           string  `json:"cwd"`
 	ForegroundCwd string  `json:"foreground_cwd"` // where the agent actually runs
 	Focused       bool    `json:"focused"`
-	// StateChangeSeq is herdr's state-change counter as of this reply. It is
-	// server-wide and only grows, so two hook processes that re-read the same
-	// transition see the same number: that is what the notify hook dedupes on.
+	// StateChangeSeq is herdr's state-change counter for this pane as of
+	// this reply. Two hook processes that re-read the same transition see
+	// the same number, which is what the notify hook dedupes on. It is
+	// stamped per pane and not persisted: after a herdr restart it starts
+	// again low while the pane id may be the same, so it only orders events
+	// over a short window (see seenWindow).
 	StateChangeSeq uint64 `json:"state_change_seq"`
 	// Tokens is the pane metadata herdr currently holds, merged across every
 	// source that reported any. Reading it back is what lets tktban publish
