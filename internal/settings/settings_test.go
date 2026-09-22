@@ -111,3 +111,23 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// notify is set by hand for the herdr hook (TKB-24). A board loading and
+// saving its own settings must keep a hand-set false, not drop the key.
+func TestNotifySurvivesBoardSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.toml")
+	if Load(path)["notify"] != true {
+		t.Fatal("notify should default to true")
+	}
+	if err := os.WriteFile(path, []byte("theme = \"x\"\nnotify = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := Load(path)
+	s["theme"] = "y" // what the board does on a theme change
+	if err := Save(path, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(path)["notify"]; got != false {
+		t.Fatalf("notify after a board save = %v, want false", got)
+	}
+}

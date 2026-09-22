@@ -25,7 +25,11 @@ import (
 // Defaults are the known UI preferences and their default values. Extend this
 // as more state is persisted; unknown keys read from disk are ignored so an
 // old/newer file never breaks startup.
-var Defaults = map[string]any{"theme": "textual-dark", "hidden_roles": ""}
+//
+// notify is read by the herdr notification hook, not by the board: false
+// silences its toasts. It is a known key so a board saving its own settings
+// keeps a hand-set value instead of dropping it.
+var Defaults = map[string]any{"theme": "textual-dark", "hidden_roles": "", "notify": true}
 
 // DefaultPath is $XDG_CONFIG_HOME/tktban/settings.toml, falling back to
 // ~/.config/tktban/settings.toml.
