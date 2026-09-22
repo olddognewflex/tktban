@@ -255,17 +255,22 @@ when:
 - the pane is focused, because you are already looking at it;
 - its branch names no ticket, or no `.sdlc/config.toml` covers its directory
   (panes are matched to tickets by branch, as for the badges);
-- another hook run already toasted the same transition (herdr can run several
-  at once; they agree through `notify-state.json` in the plugin state dir,
-  keyed on herdr's `state_change_seq`);
+- another hook run is already waiting out the second for that pane and
+  status, or has just handled the same transition (herdr can run several at
+  once; they agree through `notify-state.json` in the plugin state dir, keyed
+  on herdr's `state_change_seq`, which only counts for a minute because herdr
+  restarts it);
 - the same pane toasted the same status less than 30 s ago, so a prompt that
-  flickers does not toast twice.
+  flickers does not toast twice. Each status keeps its own 30 s: `done` in
+  between does not reopen `blocked`.
 
 Things to know:
 
-- **Toasts go wherever herdr sends them.** herdr's `ui.toast.delivery` decides
-  (in-app, terminal or system notification). With it set to `"off"` nothing
-  shows.
+- **You have to turn herdr's toasts on.** Set `ui.toast.delivery` in
+  `~/.config/herdr/config.toml` to `"herdr"` (in-app), `"terminal"` or
+  `"system"`. herdr's default config lists `"off"`, and with that herdr
+  answers every toast `disabled` and nothing shows (the log says
+  `not shown: disabled`).
 - **You may get two.** herdr toasts background agents by itself (`ui.toast`,
   `ui.sound`); this hook adds one that names the ticket. Both can appear for
   the same prompt.
@@ -273,11 +278,17 @@ Things to know:
   action, so a toast only tells you; `prefix+t` then `o` gets you there.
 - **Toasts share one rate limit.** herdr allows one API notification per
   second across every caller. A hook turned away as rate-limited or busy tries
-  twice more, 1.1 s apart, then gives up.
-- **Turn them off** with `notify = false` in the plugin settings file,
-  `~/.local/state/herdr/plugins/odnf.tktban/settings.toml`, edited by hand
-  (a board key for it comes in a follow-up). The board keeps the value when
-  it saves its own settings.
+  twice more, 1.1 s apart, then gives up. A run that gives up (or hits a
+  socket error or its 5 s limit) hands its claim back, so a later hook for
+  the same prompt can still toast; one told `disabled` or
+  `no_foreground_client` keeps it, since trying again cannot help.
+- **Turn them off** with `notify = false` in the plugin settings file, in
+  herdr's plugin state dir (`HERDR_PLUGIN_STATE_DIR`) — on macOS
+  `~/.local/state/herdr/plugins/odnf.tktban/settings.toml`. Edit it by hand
+  for now; a board key for it comes in a follow-up. It must be the TOML
+  boolean `false`: `"false"` or `0` count as on. The board writes only its
+  own keys (`theme`, `hidden_roles`), re-reading the file first, so an edit
+  made while a board is open survives the board's next save.
 - **Outside herdr nothing toasts.** The standalone board never notifies, and
   `tktban herdr-hook` does nothing unless herdr started it.
 
