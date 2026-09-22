@@ -234,6 +234,66 @@ token is cleared). Nothing is written when herdr already agrees, so a board
 left open makes no calls at all. A pane that has closed needs no cleaning up:
 its metadata goes with it.
 
+### Notifications
+
+The manifest also hooks herdr's `pane.agent_status_changed` event, so herdr
+runs `tktban herdr-hook` whenever an agent pane changes state, board open or
+not. When an agent on a ticket branch needs you, herdr pops a toast:
+
+| Agent goes | Toast | Sound |
+|------------|-------|-------|
+| blocked (a permission prompt or a question; herdr cannot tell them apart) | `TKB-24 needs you` | `request` |
+| done | `TKB-24 finished` | `done` |
+
+Nothing toasts for `working`, `idle` or `unknown`. Those runs exit before
+touching the socket or the disk, so most hook runs cost only a process start.
+
+The hook waits a second, then re-reads the pane from herdr, and stays quiet
+when:
+
+- the pane has moved on since the event (the prompt was already answered);
+- the pane is focused, because you are already looking at it;
+- its branch names no ticket, or no `.sdlc/config.toml` covers its directory
+  (panes are matched to tickets by branch, as for the badges);
+- another hook run already toasted the same transition (herdr can run several
+  at once; they agree through `notify-state.json` in the plugin state dir,
+  keyed on herdr's `state_change_seq`);
+- the same pane toasted the same status less than 30 s ago, so a prompt that
+  flickers does not toast twice.
+
+Things to know:
+
+- **Toasts go wherever herdr sends them.** herdr's `ui.toast.delivery` decides
+  (in-app, terminal or system notification). With it set to `"off"` nothing
+  shows.
+- **You may get two.** herdr toasts background agents by itself (`ui.toast`,
+  `ui.sound`); this hook adds one that names the ticket. Both can appear for
+  the same prompt.
+- **No click-to-focus.** herdr's `notification.show` takes no pane and no
+  action, so a toast only tells you; `prefix+t` then `o` gets you there.
+- **Toasts share one rate limit.** herdr allows one API notification per
+  second across every caller. A hook turned away as rate-limited or busy tries
+  twice more, 1.1 s apart, then gives up.
+- **Turn them off** with `notify = false` in the plugin settings file,
+  `~/.local/state/herdr/plugins/odnf.tktban/settings.toml`, edited by hand
+  (a board key for it comes in a follow-up). The board keeps the value when
+  it saves its own settings.
+- **Outside herdr nothing toasts.** The standalone board never notifies, and
+  `tktban herdr-hook` does nothing unless herdr started it.
+
+Every run prints one line saying what it decided (`shown TKB-24 blocked`,
+`skip: pane focused`, ...), which `herdr plugin log list --plugin odnf.tktban`
+shows.
+
+**After pulling this, rebuild and re-link**, or herdr keeps running the old
+binary, which does not know `herdr-hook` and fails every hook with exit 2.
+Re-linking is what makes herdr read the manifest's new `[[events]]` entry:
+
+```sh
+go build -o bin/tktban ./cmd/tktban
+herdr plugin link .
+```
+
 ## How it talks to tkt
 
 `internal/tkt/tkt.go` is the entire coupling surface — a thin subprocess wrapper:

@@ -26,7 +26,8 @@ panes created after it subscribed.
 
 **Hook handlers must treat the event as a signal, not as state.** Each hook is
 a separate process, and the payload carries no sequence number, so a handler
-must not trust payload order. Two rules follow:
+must not trust payload order. (`AgentInfo` does carry one, `state_change_seq`,
+which is what re-reading gives you; see *Verified in TKB-24*.) Two rules follow:
 
 1. **Status events:** re-read the pane with `agent.get` and act on that.
    `HERDR_SOCKET_PATH` is set in the hook environment, so this works.
@@ -350,3 +351,61 @@ behaviour itself by hand in a live session (see `internal/herdr/client.go`).
 - A pane that has **closed** is not reported to: it is gone from `agent.list`,
   it took its metadata with it, and `pane.report_metadata` for it would only
   answer `pane_not_found`. Only panes herdr still lists are reconciled.
+
+## Verified in TKB-24
+
+Rechecked against herdr 0.9.0 / protocol 22 while building the notify hook
+(`internal/herdr/notify.go`, `notifystate*.go`, `tktban herdr-hook`). Request
+and reply shapes are from `herdr api schema --json`; the runtime limits are
+from the TKB-24 research against herdr 0.9.0 and are not re-measured here.
+
+- **The hook envelope is confirmed by the schema.** `EventEnvelope` is
+  `{"event": EventKind, "data": EventData}`, both required, and the
+  `pane_agent_status_changed` variant of `data` requires `type`
+  (const `"pane_agent_status_changed"`), `pane_id`, `workspace_id` and
+  `agent_status`, and allows `agent`, `display_agent`, `title` (all
+  `string | null`) and `state_labels` (a string map). That matches the spike's
+  sample above exactly; `ParseStatusEvent` reads `data.pane_id` and
+  `data.agent_status` from it and ignores the rest.
+- **`notification.show`** (`NotificationShowParams`) takes `title` (required),
+  `body` (`string | null`), `sound` (`none | done | request`) and `position`
+  (`top-left | top-right | bottom-left | bottom-right | null`). herdr
+  sanitises and clips title to 80 characters and body to 240. tktban sends
+  `title`, `sound` and a short `body`, and clips the title itself so a long
+  key list loses its tail visibly (`…`) rather than silently.
+- The reply is `{"type":"notification_show","shown":bool,"reason":...}` with
+  `reason` one of `shown | disabled | rate_limited | no_foreground_client |
+  busy`. The hook retries `rate_limited` and `busy` (twice, 1.1 s apart) and
+  gives up quietly on `disabled` (`ui.toast.delivery = "off"`) and
+  `no_foreground_client`.
+- **One global 1 s rate limit** covers every API caller, not per plugin. A
+  burst of prompts across panes can therefore lose toasts to each other and to
+  other plugins; the retries cover a short collision, not a storm.
+- **No target, no click action, no dedupe key.** A toast cannot focus a pane
+  and herdr will not collapse repeats, so dedupe is the caller's job.
+- **herdr has its own toasts.** `[ui.toast]` `delivery = off | herdr | terminal
+  | system` and `[ui.sound]` (with `done_path` / `request_path` and per-agent
+  overrides) already announce background agents changing state. The hook does
+  not replace them; its toast adds the ticket key, and both can appear.
+- **`AgentInfo.state_change_seq`** (`uint64`, default 0) is on every
+  `agent.get` / `agent.list` agent. It was observed global and monotonic across
+  panes (e.g. 722..728), so hooks that re-read the same transition see the same
+  number. That corrects the spike's "no sequence number": the *payload* has
+  none, but the re-read does. The hook claims it in
+  `$HERDR_PLUGIN_STATE_DIR/notify-state.json` under a flock on `notify.lock`
+  before sending, so exactly one of several overlapping hooks toasts. A 0 (an
+  older herdr) falls back to the 30 s per-pane-per-status flap guard alone.
+- `agent.get {"target": ...}` replies `{"type":"agent_info","agent":{...}}`,
+  and `focused`, `foreground_cwd` and `cwd` come with it, so one call answers
+  "still blocked?", "is the human looking?" and "which repo?".
+- **Hook runtime.** A hook runs with the plugin root as its working directory
+  (so `./bin/tktban` resolves), the payload is in `HERDR_PLUGIN_EVENT_JSON`
+  (an env var, not stdin), and the env also carries `HERDR_ENV=1`,
+  `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, `HERDR_BIN_PATH`,
+  `HERDR_PLUGIN_EVENT`, `HERDR_SOCKET_PATH`, `HERDR_PLUGIN_ROOT`,
+  `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`, and the workspace, tab
+  and pane ids when the context has them. PATH may be minimal.
+- **herdr sets no hook timeout**, keeps at most 32 plugin commands in flight
+  (runs beyond that are dropped) and caps output at 64 KB. So the hook bounds
+  itself: 5 s end to end, and `working` / `idle` / `unknown` exit before any
+  I/O.
