@@ -131,3 +131,40 @@ func TestNotifySurvivesBoardSave(t *testing.T) {
 		t.Fatalf("notify after a board save = %v, want false", got)
 	}
 }
+
+func TestUpdateWritesOnlyGivenKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "settings.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# c\ntheme = \"a\"\nnotify = false\nother = 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(path, map[string]any{"theme": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	for _, want := range []string{`theme = "b"`, "notify = false", "other = 3"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("missing %q in:\n%s", want, raw)
+		}
+	}
+
+	// Missing file: just the given keys. Corrupt file: Defaults plus them.
+	fresh := filepath.Join(t.TempDir(), "new", "settings.toml")
+	if err := Update(fresh, map[string]any{"theme": "c"}); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(fresh); string(raw) != "theme = \"c\"\n" {
+		t.Errorf("fresh file = %q", raw)
+	}
+	if err := os.WriteFile(path, []byte("theme = [broken\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(path, map[string]any{"theme": "d"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(path); got["theme"] != "d" || got["notify"] != true {
+		t.Errorf("after corrupt: %v", got)
+	}
+}

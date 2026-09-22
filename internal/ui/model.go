@@ -409,7 +409,7 @@ func (m Model) cycleTheme() (tea.Model, tea.Cmd) {
 	m.themeName = next.name
 	m.styles = newStyles(next)
 	m.settings["theme"] = next.name
-	if err := settings.Save(m.settingsPath, m.settings); err != nil {
+	if err := m.saveSettings(); err != nil {
 		return m, m.setStatus("Theme set but not saved: "+err.Error(), "warn")
 	}
 	return m, m.setStatus("Theme: "+next.name, "")
@@ -595,6 +595,24 @@ func (m Model) showAllColumns() (tea.Model, tea.Cmd) {
 	return m, m.persistHidden("Showing all columns")
 }
 
+// boardSettings are the settings keys the board owns and writes.
+var boardSettings = []string{"theme", "hidden_roles"}
+
+// saveSettings writes the board's own keys and nothing else. Both go every
+// time, so the first save persists a hidden set seeded from the config
+// default. Every other key on disk is re-read and kept, so a value edited by
+// hand while the board was open (notify = false for the herdr hook) is not
+// reverted to what the board loaded at startup.
+func (m Model) saveSettings() error {
+	own := make(map[string]any, len(boardSettings))
+	for _, k := range boardSettings {
+		if v, ok := m.settings[k]; ok {
+			own[k] = v
+		}
+	}
+	return settings.Update(m.settingsPath, own)
+}
+
 // persistHidden stores the hidden set (sorted, comma-joined) in settings.toml,
 // mirroring how the theme is persisted, and reports status.
 func (m *Model) persistHidden(okMsg string) tea.Cmd {
@@ -606,7 +624,7 @@ func (m *Model) persistHidden(okMsg string) tea.Cmd {
 	// Writing "" (show-all) is load-bearing: it makes settings.toml exist, which
 	// suppresses re-seeding from the config default on the next launch.
 	m.settings["hidden_roles"] = strings.Join(roles, ",")
-	if err := settings.Save(m.settingsPath, m.settings); err != nil {
+	if err := m.saveSettings(); err != nil {
 		return m.setStatus(okMsg+" (not saved: "+err.Error()+")", "warn")
 	}
 	return m.setStatus(okMsg, "")

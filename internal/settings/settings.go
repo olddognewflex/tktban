@@ -27,8 +27,7 @@ import (
 // old/newer file never breaks startup.
 //
 // notify is read by the herdr notification hook, not by the board: false
-// silences its toasts. It is a known key so a board saving its own settings
-// keeps a hand-set value instead of dropping it.
+// silences its toasts. The board never writes it (see Update).
 var Defaults = map[string]any{"theme": "textual-dark", "hidden_roles": "", "notify": true}
 
 // DefaultPath is $XDG_CONFIG_HOME/tktban/settings.toml, falling back to
@@ -77,6 +76,30 @@ func Save(path string, data map[string]any) error {
 		}
 	}
 	return os.WriteFile(path, []byte(dumpTOML(persisted)), 0o644)
+}
+
+// Update writes only the given keys, re-reading the file first so every other
+// key on disk survives as it is now — a value edited by hand while a board had
+// the file loaded (notify, say), and keys this version does not know. That is
+// what a running board uses to save its own preferences: saving its whole
+// in-memory map would revert whatever changed on disk since it started.
+//
+// A missing file starts empty; a corrupt one cannot be merged key by key, so
+// it is replaced by Defaults plus set, as Save would.
+func Update(path string, set map[string]any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	onDisk := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil {
+		parsed, err := parseScalars(string(raw))
+		if err != nil {
+			parsed = Load(path) // corrupt: Defaults
+		}
+		onDisk = parsed
+	}
+	maps.Copy(onDisk, set)
+	return os.WriteFile(path, []byte(dumpTOML(onDisk)), 0o644)
 }
 
 // ---- TOML serialization ----
