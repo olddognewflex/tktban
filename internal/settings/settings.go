@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Defaults are the known UI preferences and their default values. Extend this
@@ -75,7 +76,7 @@ func Save(path string, data map[string]any) error {
 			persisted[k] = v
 		}
 	}
-	return os.WriteFile(path, []byte(dumpTOML(persisted)), 0o644)
+	return writeAtomic(path, dumpTOML(persisted))
 }
 
 // Update writes only the given keys, re-reading the file first so every other
@@ -99,7 +100,68 @@ func Update(path string, set map[string]any) error {
 		onDisk = parsed
 	}
 	maps.Copy(onDisk, set)
-	return os.WriteFile(path, []byte(dumpTOML(onDisk)), 0o644)
+	return writeAtomic(path, dumpTOML(onDisk))
+}
+
+// tempSuffix marks this package's temp files; staleTemp is how old one must
+// be before a write sweeps it, long enough that it cannot belong to a write
+// in progress.
+const (
+	tempSuffix = ".tmp"
+	staleTemp  = time.Minute
+)
+
+// rename is os.Rename, replaced in tests that interrupt a write.
+var rename = os.Rename
+
+// writeAtomic writes text to path through a temp file in the same directory,
+// renamed into place, so a reader — the herdr notify hook reads this file —
+// never sees a half-written settings file, and an interrupted write leaves
+// the old one intact. The rename also replaces a symlink at the path instead
+// of writing through it, and the temp file is created fresh, so it can never
+// inherit a link of its own. A failed write or rename takes its temp file
+// with it, and each write sweeps temp files an earlier crash left behind.
+func writeAtomic(path, text string) error {
+	dir := filepath.Dir(path)
+	sweepTemps(dir)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*"+tempSuffix)
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := tmp.WriteString(text); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil { // CreateTemp makes it 0600
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
+
+// sweepTemps removes this package's temp files older than staleTemp.
+func sweepTemps(dir string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, "*"+tempSuffix))
+	for _, m := range matches {
+		info, err := os.Lstat(m)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if time.Since(info.ModTime()) > staleTemp {
+			os.Remove(m)
+		}
+	}
 }
 
 // ---- TOML serialization ----

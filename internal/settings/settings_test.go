@@ -1,10 +1,12 @@
 package settings
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultPathUsesXDG(t *testing.T) {
@@ -167,4 +169,106 @@ func TestUpdateWritesOnlyGivenKeys(t *testing.T) {
 	if got := Load(path); got["theme"] != "d" || got["notify"] != true {
 		t.Errorf("after corrupt: %v", got)
 	}
+}
+
+// TKB-24: the herdr notify hook reads this file, so a write must never leave
+// it half-written. Each writer goes through a temp file and a rename.
+func TestWritesAreAtomic(t *testing.T) {
+	writers := map[string]func(path string) error{
+		"Save":   func(p string) error { return Save(p, map[string]any{"theme": "after"}) },
+		"Update": func(p string) error { return Update(p, map[string]any{"theme": "after"}) },
+	}
+	for name, write := range writers {
+		// An interrupted write (the rename never happens) leaves the old
+		// file whole and takes its temp file with it.
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.toml")
+		before := "theme = \"before\"\n"
+		if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		orig := rename
+		rename = func(string, string) error { return errors.New("interrupted") }
+		err := write(path)
+		rename = orig
+		if err == nil {
+			t.Errorf("%s: an interrupted write reported success", name)
+		}
+		if raw, _ := os.ReadFile(path); string(raw) != before {
+			t.Errorf("%s: file after an interrupted write = %q, want %q", name, raw, before)
+		}
+		if left := tempFiles(t, dir); len(left) != 0 {
+			t.Errorf("%s: temp files left behind: %v", name, left)
+		}
+
+		// A completed write replaces the file and leaves nothing behind.
+		if err := write(path); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := Load(path)["theme"]; got != "after" {
+			t.Errorf("%s: theme = %v, want after", name, got)
+		}
+		if left := tempFiles(t, dir); len(left) != 0 {
+			t.Errorf("%s: temp files left behind: %v", name, left)
+		}
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
+			t.Errorf("%s: mode = %v (err %v), want 0644", name, info.Mode().Perm(), err)
+		}
+
+		// A symlink at the settings path is replaced, not written through.
+		linkDir := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "outside.toml")
+		if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(linkDir, "settings.toml")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := write(link); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if raw, _ := os.ReadFile(outside); string(raw) != "keep" {
+			t.Errorf("%s: write followed the symlink: outside now %q", name, raw)
+		}
+		if info, err := os.Lstat(link); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("%s: settings path is not a regular file: %v (err %v)", name, info, err)
+		}
+	}
+}
+
+// A temp file an earlier crash left behind is swept once it is old; a fresh
+// one (another writer's, in flight) is left alone.
+func TestWriteSweepsStaleTemps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.toml")
+	stale := filepath.Join(dir, "settings.toml.123"+tempSuffix)
+	fresh := filepath.Join(dir, "settings.toml.456"+tempSuffix)
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, map[string]any{"theme": "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp survived (err=%v)", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp removed: %v", err)
+	}
+}
+
+func tempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*"+tempSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches
 }
