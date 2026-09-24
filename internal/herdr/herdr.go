@@ -14,6 +14,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/olddognewflex/tktban/internal/settings"
 )
 
 // Env var names herdr sets for plugin processes.
@@ -149,7 +151,20 @@ func SafeSettingsPath(path string, lstat statFunc) string {
 	return path
 }
 
-// SeedSettings copies the standalone settings file to the plugin path the first
+// seedKeys are the settings that carry over from the standalone file to the
+// plugin one. They are the board's own display state, which a person set by
+// looking at a board and expects to see again in herdr's.
+//
+// notify is deliberately not among them. It is not display state: it is what
+// the notification hook reads, and the hook reads only the plugin file. Seeding
+// it would let a standalone board silence herdr's toasts at some arbitrary
+// later moment — the next --herdr launch that finds no plugin file yet, which
+// can be days after the toggle — and turning it back on standalone would not
+// undo it. Whoever wants herdr quiet says so on a board in herdr (b), or in
+// the plugin file itself.
+var seedKeys = []string{"theme", "hidden_roles"}
+
+// SeedSettings copies the carried-over settings to the plugin path the first
 // time the plugin runs, so a theme or hidden-column choice carries over. It never
 // overwrites an existing plugin file (the create is exclusive, which also
 // refuses to follow a symlink left at that path), and a missing source is not
@@ -161,10 +176,17 @@ func SeedSettings(pluginPath, standalonePath string) error {
 	if _, err := os.Lstat(pluginPath); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(standalonePath)
-	if err != nil {
-		return nil // nothing to seed from; defaults apply
+	if _, err := os.ReadFile(standalonePath); err != nil {
+		return nil // nothing to seed from (missing or unreadable); defaults apply
 	}
+	loaded := settings.Load(standalonePath)
+	seed := make(map[string]any, len(seedKeys))
+	for _, k := range seedKeys {
+		if v, ok := loaded[k]; ok {
+			seed[k] = v
+		}
+	}
+	data := []byte(settings.Dump(seed))
 	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o755); err != nil {
 		return err
 	}

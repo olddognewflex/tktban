@@ -70,13 +70,21 @@ func Save(path string, data map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	return writeAtomic(path, Dump(data))
+}
+
+// Dump renders settings as the TOML Save writes, keeping only known keys. It
+// is exported for a caller that has to create the file itself rather than
+// through Save — herdr.SeedSettings, which creates the plugin settings file
+// exclusively so two panes racing cannot clobber each other.
+func Dump(data map[string]any) string {
 	persisted := make(map[string]any, len(data))
 	for k, v := range data {
 		if _, known := Defaults[k]; known {
 			persisted[k] = v
 		}
 	}
-	return writeAtomic(path, dumpTOML(persisted))
+	return dumpTOML(persisted)
 }
 
 // Update writes only the given keys, re-reading the file first so every other

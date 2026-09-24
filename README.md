@@ -104,9 +104,11 @@ Under herdr the pane runs `tktban --herdr`, which:
 
 - finds `.sdlc/config.toml` from the herdr context when `--config` is not given;
 - keeps UI settings in the plugin state dir
-  (`~/.local/state/herdr/plugins/odnf.tktban/settings.toml`), copied once from
-  your standalone settings so the theme carries over. If that path is a
-  symlink it is ignored and the standalone settings file is used instead;
+  (`~/.local/state/herdr/plugins/odnf.tktban/settings.toml`), seeded once from
+  your standalone settings so the theme and hidden columns carry over —
+  `notify` does not, being what the hook reads rather than display state
+  ([Notifications](#notifications)). If that path is a symlink it is ignored
+  and the standalone settings file is used instead;
 - holds a lock on `board.lock` in the same dir while running, which is how the
   launcher knows the open popup is the board.
 
