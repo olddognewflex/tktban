@@ -289,11 +289,12 @@ func TestSelectKeyConsumedOnce(t *testing.T) {
 }
 
 func TestFooterShowsAgentPaneKey(t *testing.T) {
-	m, _ := testModel(t)
-	m = loadBoard(m)
-	m.status = "" // the footer only shows while no status is up
-	if !strings.Contains(m.View(), "o agent pane") {
-		t.Fatalf("footer missing the jump key:\n%s", m.renderStatus())
+	// Against the key line itself, not a render of it: the terminal wraps that
+	// line wherever the width falls, which would split a hint in two and fail
+	// for no reason. That the line reaches the screen is
+	// TestFooterListsEveryKey's job.
+	if !strings.Contains(footerKeys, "o agent pane") {
+		t.Fatalf("footer missing the jump key: %s", footerKeys)
 	}
 }
 

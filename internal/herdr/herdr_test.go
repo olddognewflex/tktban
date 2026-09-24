@@ -4,7 +4,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/olddognewflex/tktban/internal/settings"
 )
 
 func env(m map[string]string) func(string) string {
@@ -189,9 +192,8 @@ func TestSeedSettingsCopiesOnce(t *testing.T) {
 	if err := SeedSettings(dst, src); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := os.ReadFile(dst)
-	if string(got) != `theme = "catppuccin-mocha"`+"\n" {
-		t.Fatalf("seeded %q", got)
+	if got := settings.Load(dst)["theme"]; got != "catppuccin-mocha" {
+		t.Fatalf("seeded theme = %v; file: %s", got, read(t, dst))
 	}
 
 	// A later standalone change must not overwrite the plugin's own file.
@@ -201,10 +203,45 @@ func TestSeedSettingsCopiesOnce(t *testing.T) {
 	if err := SeedSettings(dst, src); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = os.ReadFile(dst)
-	if string(got) != `theme = "catppuccin-mocha"`+"\n" {
-		t.Fatalf("existing plugin settings overwritten: %q", got)
+	if got := settings.Load(dst)["theme"]; got != "catppuccin-mocha" {
+		t.Fatalf("existing plugin settings overwritten: %v", got)
 	}
+}
+
+// TKB-24: notify is the hook's setting and the hook reads only the plugin
+// file, so a standalone notify = false must not travel to it — days later, on
+// whichever launch happens to find no plugin file yet.
+func TestSeedSettingsDropsNotify(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "standalone.toml")
+	dst := filepath.Join(dir, "state", "settings.toml")
+	body := "hidden_roles = \"done\"\nnotify = false\ntheme = \"catppuccin-mocha\"\n"
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedSettings(dst, src); err != nil {
+		t.Fatal(err)
+	}
+	seeded := read(t, dst)
+	if strings.Contains(seeded, "notify") {
+		t.Errorf("seeded file carries notify:\n%s", seeded)
+	}
+	if got := settings.Load(dst)["notify"]; got != true {
+		t.Errorf("notify in the plugin file = %v, want the default the hook reads as on", got)
+	}
+	// What the seed is for still carries over.
+	if got := settings.Load(dst); got["theme"] != "catppuccin-mocha" || got["hidden_roles"] != "done" {
+		t.Errorf("display settings not seeded: %v", got)
+	}
+}
+
+func read(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func TestSeedSettingsDoesNotFollowSymlink(t *testing.T) {
@@ -229,9 +266,10 @@ func TestSeedSettingsDoesNotFollowSymlink(t *testing.T) {
 	}
 }
 
-func TestSeedSettingsCopiesCorruptSourceVerbatim(t *testing.T) {
-	// A corrupt standalone file is copied as-is; settings.Load then falls back
-	// to defaults and the first Save rewrites it, same as standalone behaviour.
+func TestSeedSettingsCorruptSourceSeedsDefaults(t *testing.T) {
+	// A corrupt standalone file has nothing to read, so the plugin file starts
+	// at the defaults — and is itself valid TOML, unlike the copy this used to
+	// make, which a board save then had to rewrite.
 	dir := t.TempDir()
 	src := filepath.Join(dir, "standalone.toml")
 	dst := filepath.Join(dir, "state", "settings.toml")
@@ -241,8 +279,16 @@ func TestSeedSettingsCopiesCorruptSourceVerbatim(t *testing.T) {
 	if err := SeedSettings(dst, src); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(dst); string(got) != "not = [valid" {
-		t.Fatalf("seeded %q", got)
+	// Compared as bytes, not through Load: Load answers Defaults for a file
+	// that is missing, empty or unparseable alike, so it would pass on a seed
+	// that wrote nothing at all. The bytes also pin that the seed writes those
+	// two keys and no others.
+	want := settings.Dump(map[string]any{
+		"theme":        settings.Defaults["theme"],
+		"hidden_roles": settings.Defaults["hidden_roles"],
+	})
+	if seeded := read(t, dst); seeded != want {
+		t.Fatalf("seeded %q from a corrupt source, want %q", seeded, want)
 	}
 }
 

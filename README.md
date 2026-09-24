@@ -50,6 +50,7 @@ tktban --config path/to/.sdlc/config.toml
 | `c` | Comment on the selected card (`tkt comment`) |
 | `n` | Create a new ticket (`tkt create`) |
 | `o` / `ga` | Focus the herdr pane running this card's agent (inside herdr) |
+| `b` | Silence herdr's ticket toasts, or turn them back on ([Notifications](#notifications)) |
 | `q` | Quit |
 | `tab` / arrows | Move focus between columns and cards |
 
@@ -103,9 +104,11 @@ Under herdr the pane runs `tktban --herdr`, which:
 
 - finds `.sdlc/config.toml` from the herdr context when `--config` is not given;
 - keeps UI settings in the plugin state dir
-  (`~/.local/state/herdr/plugins/odnf.tktban/settings.toml`), copied once from
-  your standalone settings so the theme carries over. If that path is a
-  symlink it is ignored and the standalone settings file is used instead;
+  (`~/.local/state/herdr/plugins/odnf.tktban/settings.toml`), seeded once from
+  your standalone settings so the theme and hidden columns carry over —
+  `notify` does not, being what the hook reads rather than display state
+  ([Notifications](#notifications)). If that path is a symlink it is ignored
+  and the standalone settings file is used instead;
 - holds a lock on `board.lock` in the same dir while running, which is how the
   launcher knows the open popup is the board.
 
@@ -284,15 +287,30 @@ Things to know:
   claim back, so the pane's next change to the same status is not swallowed
   by the 30 s flap guard as if this toast had shown. One told `disabled` or
   `no_foreground_client` keeps it, since trying again cannot help.
-- **Turn them off** with `notify = false` in the plugin settings file, in
-  herdr's plugin state dir (`HERDR_PLUGIN_STATE_DIR`) — on macOS
-  `~/.local/state/herdr/plugins/odnf.tktban/settings.toml`. Edit it by hand
-  for now; a board key for it comes in a follow-up. It must be the TOML
-  boolean `false`: `"false"` or `0` count as on. The board writes only its
-  own keys (`theme`, `hidden_roles`), re-reading the file first, so an edit
-  made while a board is open survives the board's next save. If the file is
-  not valid TOML, though, a board save rewrites it from defaults, erasing
-  the bad line.
+- **Turn them off** with `b` on the board. It flips `notify` in the settings
+  file that board is using, says which way it went in the status line, and —
+  on herdr's own board, while live status is on — the subtitle reads
+  `herdr live (muted)` until you press `b` again. Editing the file by hand
+  still works: `notify = false`, as the TOML boolean (`"false"` or `0` count
+  as on).
+- **Press it on herdr's own board.** The hook reads one file and one only: the
+  plugin settings file in herdr's plugin state dir (`HERDR_PLUGIN_STATE_DIR`)
+  — on macOS `~/.local/state/herdr/plugins/odnf.tktban/settings.toml` — which
+  is what a board started as `tktban --herdr` writes. Every other board writes
+  the standalone `~/.config/tktban/settings.toml`: a board run outside herdr,
+  and also one run in a plain herdr pane, which gets live badges but keeps its
+  settings standalone. `notify` there reaches nothing — the hook never reads
+  that file, and the one-time seed that carries your standalone settings into
+  the plugin file copies only `theme` and `hidden_roles`. Those boards say so
+  when you press `b`, and never claim `(muted)`. A plugin path that is a
+  symlink is refused by both: the board falls back to the standalone file, and
+  the hook, left with no file it will read, keeps toasting — put a regular file
+  back there to get the toggle working again. Either way a board saves only
+  the keys it owns (`theme`, `hidden_roles`, and `notify` when you press `b`),
+  re-reading the file first, so an edit made while a board is open survives the
+  board's next save — and `b` flips what the file says at that moment, not what
+  the board read when it opened. If the file is not valid TOML, though, a board
+  save rewrites it from defaults, erasing the bad line.
 - **Outside herdr nothing toasts.** The standalone board never notifies, and
   `tktban herdr-hook` does nothing unless herdr started it.
 

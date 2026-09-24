@@ -191,6 +191,11 @@ func selectTarget(explicit string, fromCwd bool, getenv func(string) string, cwd
 // without a terminal.
 var board = func(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource, selectKey string, derive func() string, popup bool) int {
 	m := ui.New(tk, interval, auto, settingsPath).
+		// A non-empty settingsPath is herdr's plugin settings file and nothing
+		// else: run() fills it in only under --herdr, and only when
+		// SafeSettingsPath accepted it. That is exactly the file the
+		// notification hook reads, which is what the board needs to know.
+		WithPluginSettings(settingsPath != "").
 		WithLive(live).
 		WithSelect(selectKey).
 		WithSelectFunc(derive).

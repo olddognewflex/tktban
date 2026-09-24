@@ -49,8 +49,14 @@ type Model struct {
 
 	settings     map[string]any
 	settingsPath string
-	themeName    string
-	styles       styles
+	// pluginSettings says settingsPath is herdr's plugin settings file — the
+	// one the notification hook reads — rather than the standalone one. Set by
+	// WithPluginSettings; false for every board that is not herdr's own, which
+	// includes a board in a plain herdr pane. Only it may promise that flipping
+	// notify silences anything.
+	pluginSettings bool
+	themeName      string
+	styles         styles
 
 	refreshSecs float64
 	autoOn      bool
@@ -330,6 +336,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.setStatus(label, "")
 	case "t":
 		return m.cycleTheme()
+	case "b":
+		return m.toggleNotify()
 	case "f":
 		m.modal = newFilterModal(m.filter, m.styles.t.surface)
 		return m, nil
@@ -413,6 +421,42 @@ func (m Model) cycleTheme() (tea.Model, tea.Cmd) {
 		return m, m.setStatus("Theme set but not saved: "+err.Error(), "warn")
 	}
 	return m, m.setStatus("Theme: "+next.name, "")
+}
+
+// toggleNotify flips the notify setting the herdr notification hook reads and
+// persists it. The hook is the only reader — the board itself never toasts —
+// so outside herdr the status line says where the flip did and did not land:
+// the standalone settings file is not the one the hook reads.
+func (m Model) toggleNotify() (tea.Model, tea.Cmd) {
+	// Flip what is on disk, not what this board loaded at startup: the hook
+	// reads the file, and so does whoever edited it by hand since, or the
+	// second board they left open. Flipping a stale value would write back the
+	// value already there and report a change that never happened.
+	cur, ok := settings.Load(m.settingsPath)["notify"].(bool)
+	if !ok {
+		cur = true // missing or not a TOML boolean reads as on, as the hook reads it
+	}
+	on := !cur
+	label := "herdr notifications off"
+	if on {
+		label = "herdr notifications on"
+	}
+	if !m.pluginSettings {
+		label += " (herdr's own board keeps a separate setting)"
+	}
+	prev, had := m.settings["notify"]
+	m.settings["notify"] = on
+	if err := m.saveSettings("notify"); err != nil {
+		// Put the in-memory value back, or the subtitle would show a mute the
+		// hook knows nothing about.
+		if had {
+			m.settings["notify"] = prev
+		} else {
+			delete(m.settings, "notify")
+		}
+		return m, m.setStatus(label+" (not saved: "+err.Error()+")", "warn")
+	}
+	return m, m.setStatus(label, "")
 }
 
 func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
@@ -603,9 +647,26 @@ var boardSettings = []string{"theme", "hidden_roles"}
 // default. Every other key on disk is re-read and kept, so a value edited by
 // hand while the board was open (notify = false for the herdr hook) is not
 // reverted to what the board loaded at startup.
-func (m Model) saveSettings() error {
-	own := make(map[string]any, len(boardSettings))
-	for _, k := range boardSettings {
+//
+// also names further keys this particular save owns: the b toggle passes
+// "notify", which is otherwise left exactly as the file has it.
+//
+// A save therefore always republishes theme and hidden_roles from this board's
+// memory, b included, and that is deliberate: writing notify through a bare
+// Update would create the file without hidden_roles, and a settings file that
+// exists is what stops New from re-seeding the hidden set from the [ui.board]
+// config default — so the next launch would come up with the default silently
+// dropped. The values written are the ones this board is showing, which is
+// what the person pressing the key is looking at.
+func (m Model) saveSettings(also ...string) error {
+	own := make(map[string]any, len(boardSettings)+len(also))
+	keys := make([]string, 0, len(boardSettings)+len(also))
+	keys = append(keys, boardSettings...)
+	keys = append(keys, also...)
+	for _, k := range keys {
+		if _, known := settings.Defaults[k]; !known {
+			continue // never let an ad-hoc key reach the file
+		}
 		if v, ok := m.settings[k]; ok {
 			own[k] = v
 		}
@@ -754,6 +815,17 @@ func (m Model) WithSelectFunc(derive func() string) Model {
 // normalizeKey puts a ticket key in the board's own spelling.
 func normalizeKey(key string) string {
 	return strings.ToUpper(strings.TrimSpace(key))
+}
+
+// WithPluginSettings says this board's settings file is the plugin one in
+// herdr's state dir, which is the file the notification hook reads. Only the
+// caller knows: the board is handed a path either way, and a board in a plain
+// herdr pane — or one whose plugin path was rejected as a symlink — writes the
+// standalone file while the hook goes on reading the plugin one. The notify
+// toggle uses it to say so rather than promise a silence it cannot deliver.
+func (m Model) WithPluginSettings(plugin bool) Model {
+	m.pluginSettings = plugin
+	return m
 }
 
 // WithPopup marks the board as herdr's popup pane. The popup has no pane id of
