@@ -75,14 +75,21 @@ func (m Model) liveLabel() string {
 	if !m.live.on {
 		return ""
 	}
-	if on, ok := m.settings["notify"].(bool); ok && !on {
+	// Only herdr's own board may say muted: live status comes on in any herdr
+	// pane, but a board that is not writing the plugin settings file has not
+	// silenced anything — the hook reads that file and nothing else.
+	if on, ok := m.settings["notify"].(bool); m.pluginSettings && ok && !on {
 		return "  ·  herdr live (muted)"
 	}
 	return "  ·  herdr live"
 }
 
+// footerKeys is the key hint line. It is a value rather than a literal inside
+// renderStatus so a test can assert against it without depending on where the
+// terminal width happens to wrap it.
+const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · n new · N new-in-$EDITOR · x hide · X show all · b notify · q quit"
+
 func (m Model) renderStatus() string {
-	keys := "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · n new · N new-in-$EDITOR · x hide · X show all · b notify · q quit"
 	if m.status != "" {
 		st := m.styles.statusBar
 		switch m.statusKind {
@@ -93,7 +100,7 @@ func (m Model) renderStatus() string {
 		}
 		return st.Width(m.width).Render(m.status)
 	}
-	return m.styles.footer.Width(m.width).Render(keys)
+	return m.styles.footer.Width(m.width).Render(footerKeys)
 }
 
 func (m Model) renderBoard(height int) string {

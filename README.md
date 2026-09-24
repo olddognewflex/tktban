@@ -288,24 +288,26 @@ Things to know:
   by the 30 s flap guard as if this toast had shown. One told `disabled` or
   `no_foreground_client` keeps it, since trying again cannot help.
 - **Turn them off** with `b` on the board. It flips `notify` in the settings
-  file, says which way it went in the status line, and — while live status is
-  on — the subtitle reads `herdr live (muted)` until you press `b` again.
-  Editing the file by hand still works: `notify = false`, as the TOML boolean
-  (`"false"` or `0` count as on).
-- **`b` writes the settings file that board is using.** Under `--herdr` that is
-  the plugin settings file in herdr's plugin state dir
-  (`HERDR_PLUGIN_STATE_DIR`) — on macOS
-  `~/.local/state/herdr/plugins/odnf.tktban/settings.toml` — which is the only
-  file the hook reads. A standalone board writes
-  `~/.config/tktban/settings.toml` instead, and that one does **not** reach the
-  hook once the plugin file exists: the standalone file is copied to the plugin
-  path once, the first time a `--herdr` board runs, and never again. So silence
-  the toasts from the board in herdr's own pane (or edit the plugin file); the
-  standalone board says as much when you press `b`. Either way a board saves
-  only the keys it owns (`theme`, `hidden_roles`, and `notify` when you press
-  `b`), re-reading the file first, so an edit made while a board is open
-  survives the board's next save. If the file is not valid TOML, though, a
-  board save rewrites it from defaults, erasing the bad line.
+  file that board is using, says which way it went in the status line, and —
+  on herdr's own board, while live status is on — the subtitle reads
+  `herdr live (muted)` until you press `b` again. Editing the file by hand
+  still works: `notify = false`, as the TOML boolean (`"false"` or `0` count
+  as on).
+- **Press it on herdr's own board.** The hook reads one file and one only: the
+  plugin settings file in herdr's plugin state dir (`HERDR_PLUGIN_STATE_DIR`)
+  — on macOS `~/.local/state/herdr/plugins/odnf.tktban/settings.toml` — which
+  is what a board started as `tktban --herdr` writes. Every other board writes
+  the standalone `~/.config/tktban/settings.toml`: a board run outside herdr,
+  and also one run in a plain herdr pane, which gets live badges but keeps its
+  settings standalone. `notify` there reaches nothing — the hook never reads
+  that file, and the one-time seed that carries your standalone settings into
+  the plugin file copies only `theme` and `hidden_roles`. Those boards say so
+  when you press `b`, and never claim `(muted)`. Either way a board saves only
+  the keys it owns (`theme`, `hidden_roles`, and `notify` when you press `b`),
+  re-reading the file first, so an edit made while a board is open survives the
+  board's next save — and `b` flips what the file says at that moment, not what
+  the board read when it opened. If the file is not valid TOML, though, a board
+  save rewrites it from defaults, erasing the bad line.
 - **Outside herdr nothing toasts.** The standalone board never notifies, and
   `tktban herdr-hook` does nothing unless herdr started it.
 

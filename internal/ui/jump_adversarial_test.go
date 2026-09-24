@@ -4,7 +4,8 @@
 // jump command's side effect (not Update's), that jumpCmd bounds itself with
 // a context deadline, vim counts and case on the o/ga keys, jumping with no
 // columns at all or before the board has loaded, o/ga inertness under every
-// modal kind that's cheap to open, and selectKey/selectFunc edge cases: a key
+// modal kind that's cheap to open (b included, which must not write the notify
+// setting from behind one), and selectKey/selectFunc edge cases: a key
 // present in several columns, an empty board, explicit arriving after a
 // derived key was already queued, and a derived selection surviving an
 // auto-refresh without re-announcing.
@@ -13,6 +14,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -200,9 +202,11 @@ func TestJumpBeforeBoardLoads(t *testing.T) {
 	}
 }
 
-// o and ga must be inert behind every modal kind that opens synchronously off
-// a single keypress, not just the filter modal jump_test.go already covers.
-func TestJumpInertBehindEveryModalKind(t *testing.T) {
+// The single-key actions must be inert behind every modal kind that opens
+// synchronously off a keypress, not just the filter modal jump_test.go already
+// covers: o and ga must not jump, and b must not touch the notify setting the
+// herdr hook reads (TKB-24).
+func TestSingleKeyActionsInertBehindEveryModalKind(t *testing.T) {
 	openers := map[string]string{
 		"move (m)":    "m",
 		"comment (c)": "c",
@@ -215,7 +219,8 @@ func TestJumpInertBehindEveryModalKind(t *testing.T) {
 		if m.modal == nil {
 			t.Fatalf("%s: modal did not open", name)
 		}
-		for _, keys := range [][]string{{"o"}, {"g", "a"}} {
+		notifyBefore := m.settings["notify"]
+		for _, keys := range [][]string{{"o"}, {"g", "a"}, {"b"}} {
 			nm := m
 			var cmd tea.Cmd
 			for _, k := range keys {
@@ -229,6 +234,12 @@ func TestJumpInertBehindEveryModalKind(t *testing.T) {
 			}
 			if len(src.focused) != 0 {
 				t.Fatalf("%s: %v focused %v from behind the modal", name, keys, src.focused)
+			}
+			if nm.settings["notify"] != notifyBefore {
+				t.Fatalf("%s: %v changed notify to %v from behind the modal", name, keys, nm.settings["notify"])
+			}
+			if _, err := os.Stat(nm.settingsPath); !os.IsNotExist(err) {
+				t.Fatalf("%s: %v wrote the settings file from behind the modal (stat err=%v)", name, keys, err)
 			}
 		}
 	}
