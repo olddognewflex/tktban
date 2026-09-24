@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+
 	"github.com/olddognewflex/tktban/internal/settings"
 	"github.com/olddognewflex/tktban/internal/tkt"
 )
@@ -204,18 +207,24 @@ func TestSaveSettingsIgnoresUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestFooterListsNotifyKey(t *testing.T) {
-	if !strings.Contains(footerKeys, "b notify") {
-		t.Fatalf("footer missing the notify key: %s", footerKeys)
-	}
-}
+// Every key hint, b notify included, reaches an idle board's footer. The
+// rendered line is de-wrapped first: the terminal breaks it wherever the width
+// falls, and a hint split across two rows is still on screen.
+func TestFooterListsEveryKey(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii) // styling would sit inside the hints
+	defer lipgloss.SetColorProfile(prev)
 
-// ... and the footer is what an idle board actually shows.
-func TestFooterRendersWhenNoStatus(t *testing.T) {
 	m := herdrBoard(t)
-	m.status = ""
-	if !strings.Contains(m.renderStatus(), "r refresh") {
-		t.Fatalf("idle board does not render the key hints:\n%s", m.renderStatus())
+	m.status = "" // the footer only shows while no status is up
+	rendered := strings.Join(strings.Fields(m.renderStatus()), " ")
+	for _, hint := range strings.Split(footerKeys, " · ") {
+		if !strings.Contains(rendered, hint) {
+			t.Errorf("footer missing %q:\n%s", hint, m.renderStatus())
+		}
+	}
+	if !strings.Contains(footerKeys, "b notify") {
+		t.Errorf("the key line itself lost the notify key: %s", footerKeys)
 	}
 }
 

@@ -162,6 +162,9 @@ func SafeSettingsPath(path string, lstat statFunc) string {
 // can be days after the toggle — and turning it back on standalone would not
 // undo it. Whoever wants herdr quiet says so on a board in herdr (b), or in
 // the plugin file itself.
+//
+// It is an allowlist rather than a denylist, so a setting added later starts
+// fresh in the plugin file until someone adds it here on purpose.
 var seedKeys = []string{"theme", "hidden_roles"}
 
 // SeedSettings copies the carried-over settings to the plugin path the first
@@ -176,6 +179,10 @@ func SeedSettings(pluginPath, standalonePath string) error {
 	if _, err := os.Lstat(pluginPath); err == nil {
 		return nil
 	}
+	// Read before Load, which never errors: it answers Defaults for a file that
+	// is missing just as for one that is corrupt, and a standalone file that is
+	// not there must leave the plugin file uncreated rather than seed defaults
+	// into it (the board reads "no settings file yet" as its own first run).
 	if _, err := os.ReadFile(standalonePath); err != nil {
 		return nil // nothing to seed from (missing or unreadable); defaults apply
 	}

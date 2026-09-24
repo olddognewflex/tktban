@@ -650,6 +650,14 @@ var boardSettings = []string{"theme", "hidden_roles"}
 //
 // also names further keys this particular save owns: the b toggle passes
 // "notify", which is otherwise left exactly as the file has it.
+//
+// A save therefore always republishes theme and hidden_roles from this board's
+// memory, b included, and that is deliberate: writing notify through a bare
+// Update would create the file without hidden_roles, and a settings file that
+// exists is what stops New from re-seeding the hidden set from the [ui.board]
+// config default — so the next launch would come up with the default silently
+// dropped. The values written are the ones this board is showing, which is
+// what the person pressing the key is looking at.
 func (m Model) saveSettings(also ...string) error {
 	own := make(map[string]any, len(boardSettings)+len(also))
 	keys := make([]string, 0, len(boardSettings)+len(also))

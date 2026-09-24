@@ -302,7 +302,10 @@ Things to know:
   settings standalone. `notify` there reaches nothing — the hook never reads
   that file, and the one-time seed that carries your standalone settings into
   the plugin file copies only `theme` and `hidden_roles`. Those boards say so
-  when you press `b`, and never claim `(muted)`. Either way a board saves only
+  when you press `b`, and never claim `(muted)`. A plugin path that is a
+  symlink is refused by both: the board falls back to the standalone file, and
+  the hook, left with no file it will read, keeps toasting — put a regular file
+  back there to get the toggle working again. Either way a board saves only
   the keys it owns (`theme`, `hidden_roles`, and `notify` when you press `b`),
   re-reading the file first, so an edit made while a board is open survives the
   board's next save — and `b` flips what the file says at that moment, not what

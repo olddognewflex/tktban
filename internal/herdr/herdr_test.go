@@ -279,12 +279,16 @@ func TestSeedSettingsCorruptSourceSeedsDefaults(t *testing.T) {
 	if err := SeedSettings(dst, src); err != nil {
 		t.Fatal(err)
 	}
-	seeded := read(t, dst)
-	if strings.Contains(seeded, "[valid") {
-		t.Fatalf("corrupt source copied through:\n%s", seeded)
-	}
-	if got := settings.Load(dst); got["theme"] != settings.Defaults["theme"] {
-		t.Fatalf("seeded %v from a corrupt source; file:\n%s", got, seeded)
+	// Compared as bytes, not through Load: Load answers Defaults for a file
+	// that is missing, empty or unparseable alike, so it would pass on a seed
+	// that wrote nothing at all. The bytes also pin that the seed writes those
+	// two keys and no others.
+	want := settings.Dump(map[string]any{
+		"theme":        settings.Defaults["theme"],
+		"hidden_roles": settings.Defaults["hidden_roles"],
+	})
+	if seeded := read(t, dst); seeded != want {
+		t.Fatalf("seeded %q from a corrupt source, want %q", seeded, want)
 	}
 }
 
