@@ -17,7 +17,9 @@
 # agent on a ticket branch goes blocked ("TKB-24 needs you", sound request) or
 # done ("TKB-24 finished", sound done), unless its pane is focused. It works
 # with the board closed. herdr's own background-agent toasts still fire too,
-# so expect both. `notify = false` in the plugin settings.toml silences ours.
+# so expect both. Ours are silenced by `notify = false` in the plugin
+# settings.toml, which the board's `b` key writes (inside herdr, where the
+# board keeps its settings in that same state dir).
 # Write-back hooks come later; see docs/herdr-events.md for which events a
 # manifest can hook.
 #
