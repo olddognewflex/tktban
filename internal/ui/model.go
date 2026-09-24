@@ -49,8 +49,12 @@ type Model struct {
 
 	settings     map[string]any
 	settingsPath string
-	themeName    string
-	styles       styles
+	// pluginSettings records that settingsPath came from herdr's plugin state
+	// dir (--herdr). The notify toggle reads it: only that file is read by the
+	// notification hook, so a board writing the standalone file says so.
+	pluginSettings bool
+	themeName      string
+	styles         styles
 
 	refreshSecs float64
 	autoOn      bool
@@ -85,6 +89,7 @@ type Model struct {
 // New builds the root model. A non-positive interval starts auto-refresh off but
 // still toggles on at a 10s default (mirrors the Python).
 func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath string) Model {
+	plugin := settingsPath != "" // herdr's plugin state dir; see pluginSettings
 	if settingsPath == "" {
 		settingsPath = settings.DefaultPath()
 	}
@@ -116,16 +121,17 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 		hidden[r] = true
 	}
 	return Model{
-		tkt:          tk,
-		filter:       filterState{},
-		sel:          map[string]int{},
-		hidden:       hidden,
-		settings:     s,
-		settingsPath: settingsPath,
-		themeName:    th.name,
-		styles:       newStyles(th),
-		refreshSecs:  secs,
-		autoOn:       autoRefresh && refreshInterval > 0,
+		tkt:            tk,
+		filter:         filterState{},
+		sel:            map[string]int{},
+		hidden:         hidden,
+		settings:       s,
+		settingsPath:   settingsPath,
+		pluginSettings: plugin,
+		themeName:      th.name,
+		styles:         newStyles(th),
+		refreshSecs:    secs,
+		autoOn:         autoRefresh && refreshInterval > 0,
 	}
 }
 
@@ -330,6 +336,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.setStatus(label, "")
 	case "t":
 		return m.cycleTheme()
+	case "b":
+		return m.toggleNotify()
 	case "f":
 		m.modal = newFilterModal(m.filter, m.styles.t.surface)
 		return m, nil
@@ -413,6 +421,30 @@ func (m Model) cycleTheme() (tea.Model, tea.Cmd) {
 		return m, m.setStatus("Theme set but not saved: "+err.Error(), "warn")
 	}
 	return m, m.setStatus("Theme: "+next.name, "")
+}
+
+// toggleNotify flips the notify setting the herdr notification hook reads and
+// persists it. The hook is the only reader — the board itself never toasts —
+// so outside herdr the status line says where the flip did and did not land:
+// the standalone settings file is not the one the hook reads.
+func (m Model) toggleNotify() (tea.Model, tea.Cmd) {
+	on, ok := m.settings["notify"].(bool)
+	if !ok {
+		on = true // missing or not a TOML boolean reads as on, as the hook reads it
+	}
+	on = !on
+	m.settings["notify"] = on
+	label := "herdr notifications off"
+	if on {
+		label = "herdr notifications on"
+	}
+	if !m.pluginSettings {
+		label += " (herdr's own board keeps a separate setting)"
+	}
+	if err := m.saveSettings("notify"); err != nil {
+		return m, m.setStatus(label+" (not saved: "+err.Error()+")", "warn")
+	}
+	return m, m.setStatus(label, "")
 }
 
 func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
@@ -603,9 +635,15 @@ var boardSettings = []string{"theme", "hidden_roles"}
 // default. Every other key on disk is re-read and kept, so a value edited by
 // hand while the board was open (notify = false for the herdr hook) is not
 // reverted to what the board loaded at startup.
-func (m Model) saveSettings() error {
-	own := make(map[string]any, len(boardSettings))
-	for _, k := range boardSettings {
+//
+// also names further keys this particular save owns: the b toggle passes
+// "notify", which is otherwise left exactly as the file has it.
+func (m Model) saveSettings(also ...string) error {
+	own := make(map[string]any, len(boardSettings)+len(also))
+	keys := make([]string, 0, len(boardSettings)+len(also))
+	keys = append(keys, boardSettings...)
+	keys = append(keys, also...)
+	for _, k := range keys {
 		if v, ok := m.settings[k]; ok {
 			own[k] = v
 		}

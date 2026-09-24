@@ -68,15 +68,21 @@ func (m Model) autoLabel() string {
 	return "  ·  auto off"
 }
 
+// liveLabel says herdr status is live, and marks it muted while the notify
+// setting the hook reads is off. The marker rides on the live label because
+// that is the one place the board knows herdr is there to toast at all.
 func (m Model) liveLabel() string {
-	if m.live.on {
-		return "  ·  herdr live"
+	if !m.live.on {
+		return ""
 	}
-	return ""
+	if on, ok := m.settings["notify"].(bool); ok && !on {
+		return "  ·  herdr live (muted)"
+	}
+	return "  ·  herdr live"
 }
 
 func (m Model) renderStatus() string {
-	keys := "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · n new · N new-in-$EDITOR · x hide · X show all · q quit"
+	keys := "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · n new · N new-in-$EDITOR · x hide · X show all · b notify · q quit"
 	if m.status != "" {
 		st := m.styles.statusBar
 		switch m.statusKind {
