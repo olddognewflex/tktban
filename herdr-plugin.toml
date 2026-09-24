@@ -11,9 +11,15 @@
 #
 # Live agent badges need no hook: the open board polls herdr's socket
 # (HERDR_SOCKET_PATH) itself; --no-herdr-live turns that off. The same socket
-# carries the card -> pane jump (pane.focus). Event hooks
-# (notifications, write-back) come later; see docs/herdr-events.md for which
-# events a manifest can hook.
+# carries the card -> pane jump (pane.focus).
+#
+# The [[events]] hook below toasts through herdr (notification.show) when an
+# agent on a ticket branch goes blocked ("TKB-24 needs you", sound request) or
+# done ("TKB-24 finished", sound done), unless its pane is focused. It works
+# with the board closed. herdr's own background-agent toasts still fire too,
+# so expect both. `notify = false` in the plugin settings.toml silences ours.
+# Write-back hooks come later; see docs/herdr-events.md for which events a
+# manifest can hook.
 #
 # Each poll also reconciles the ticket key of every agent pane with herdr's
 # own `ticket` pane-metadata token (source "odnf.tktban"), reporting only the
@@ -65,3 +71,11 @@ title = "tktban: open board"
 description = "Toggle the tktban board popup."
 contexts = ["pane", "workspace"]
 command = ["bash", "scripts/open-board.sh"]
+
+# One run per status change in any pane. working/idle exit at once; blocked
+# and done re-read the pane, find its ticket and toast (see README,
+# "Notifications"). Runs from the plugin root, so ./bin/tktban resolves; it
+# always exits 0 and prints its decision to `herdr plugin log list`.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./bin/tktban", "herdr-hook"]

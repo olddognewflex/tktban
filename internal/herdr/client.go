@@ -164,6 +164,13 @@ type Agent struct {
 	Cwd           string  `json:"cwd"`
 	ForegroundCwd string  `json:"foreground_cwd"` // where the agent actually runs
 	Focused       bool    `json:"focused"`
+	// StateChangeSeq is herdr's state-change counter for this pane as of
+	// this reply. Two hook processes that re-read the same transition see
+	// the same number, which is what the notify hook dedupes on. It is
+	// stamped per pane and not persisted: after a herdr restart it starts
+	// again low while the pane id may be the same, so it only orders events
+	// over a short window (see seenWindow).
+	StateChangeSeq uint64 `json:"state_change_seq"`
 	// Tokens is the pane metadata herdr currently holds, merged across every
 	// source that reported any. Reading it back is what lets tktban publish
 	// without keeping state of its own: see SocketSource.publishTokens.
@@ -219,4 +226,67 @@ func (c *Client) ReportPaneTokens(ctx context.Context, paneID string, tokens map
 		Source string             `json:"source"`
 		Tokens map[string]*string `json:"tokens"`
 	}{PaneID: paneID, Source: MetadataSource, Tokens: tokens}, nil)
+}
+
+// ErrNoAgent means agent.get answered without an agent in its reply.
+var ErrNoAgent = errors.New("herdr: agent.get returned no agent")
+
+// AgentGet re-reads one agent pane. herdr's agent.get takes {"target": ...}
+// (a pane id or agent name), not pane_id, and replies
+// {"type":"agent_info","agent":{...}}. A pane herdr no longer knows is an
+// *APIError with code agent_not_found.
+func (c *Client) AgentGet(ctx context.Context, target string) (Agent, error) {
+	var r struct {
+		Agent *Agent `json:"agent"`
+	}
+	if err := c.Call(ctx, "agent.get", struct {
+		Target string `json:"target"`
+	}{Target: target}, &r); err != nil {
+		return Agent{}, err
+	}
+	if r.Agent == nil {
+		return Agent{}, ErrNoAgent
+	}
+	return *r.Agent, nil
+}
+
+// Notification sounds herdr's notification.show accepts.
+const (
+	SoundNone    = "none"
+	SoundDone    = "done"
+	SoundRequest = "request"
+)
+
+// Reasons notification.show gives back with shown. Only ReasonShown means a
+// toast appeared; rate_limited and busy are worth one more try, the others
+// are not.
+const (
+	ReasonShown              = "shown"
+	ReasonDisabled           = "disabled"             // ui.toast.delivery = "off"
+	ReasonRateLimited        = "rate_limited"         // herdr's one global 1 s limit
+	ReasonNoForegroundClient = "no_foreground_client" // no herdr client attached
+	ReasonBusy               = "busy"
+)
+
+// Notification is one notification.show request. herdr sanitises and clips
+// title to 80 characters and body to 240; an empty body is sent as absent.
+// There is no pane target, click action or dedupe key in the API.
+type Notification struct {
+	Title string `json:"title"`
+	Body  string `json:"body,omitempty"`
+	Sound string `json:"sound,omitempty"`
+}
+
+// ShowNotification asks herdr to toast. herdr delivers it however
+// ui.toast.delivery says (in-app, terminal or system), and reports whether it
+// did: {"type":"notification_show","shown":bool,"reason":...}.
+func (c *Client) ShowNotification(ctx context.Context, n Notification) (bool, string, error) {
+	var r struct {
+		Shown  bool   `json:"shown"`
+		Reason string `json:"reason"`
+	}
+	if err := c.Call(ctx, "notification.show", n, &r); err != nil {
+		return false, "", err
+	}
+	return r.Shown, r.Reason, nil
 }
