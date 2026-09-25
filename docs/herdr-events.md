@@ -514,3 +514,18 @@ worktree lands exactly where the ones a person makes by hand do.
 - A `branch_fmt` with no `{key-lower}` in it is refused up front. The card
   badge and the `o` jump both work by reading a pane's branch back through
   `KeysFromBranch`, so such an agent would be dispatched and then invisible.
+- A target role that is not in `[board.roles]` is refused too: a config typo
+  would otherwise transition a ticket into a lane no column can show.
+- Both reads run under the dispatch's own 2 s budget
+  (`tkt.WithContext` → `exec.CommandContext`), so a wedged `tkt` is killed
+  rather than waited on. That matters because the board latches the `D` key
+  while a preparation is in flight.
+
+### Which herdr processes get refused a working directory
+
+`HERDR_ENV=1` is set in **every** herdr pane, so it does not distinguish a
+plugin process from a shell someone is typing in. The `HERDR_PLUGIN_*`
+variables do: herdr sets them only for plugin processes. Only a plugin process
+can be started in the plugin's own install checkout (the TKB-23 finding), so
+only that one is refused a fall-back to its working directory — `tktban` run
+by hand in a herdr terminal is where the person already is.

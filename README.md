@@ -277,6 +277,7 @@ Every way `D` can refuse says which one it was, and opens nothing:
 | Refusal | Why |
 |---------|-----|
 | `Dispatch is off …` | the opt-in setting is not set |
+| `Dispatch is off for this board (--no-herdr-dispatch)` | turned off for this run on the command line |
 | `Live agent status is off` / `herdr live status unavailable` | outside herdr, or herdr is not answering |
 | `Select a card first` / `That card has no ticket key` | nothing to dispatch |
 | `TKB-25 already has an agent pane (o focuses it)` | an agent is already on it; two agents racing one branch is not an improvement |
@@ -285,6 +286,8 @@ Every way `D` can refuse says which one it was, and opens nothing:
 | `No agent-owned transition out of To Do` | `[board] ownership` gives no agent-owned move out of that lane |
 | `Not a git work tree: …` | herdr says the directory is not a checkout |
 | `This board is open in a worktree …` | there is nothing to branch from |
+| `Timed out reading the tkt config …` | the two `tkt cfg` reads did not finish inside the 2 s budget |
+| `TKB-25 picked up an agent while the dialog was open` | an agent appeared between `D` and `enter`; live status keeps polling behind the dialog |
 
 Two details worth knowing:
 
@@ -292,12 +295,19 @@ Two details worth knowing:
   first agent-owned transition out of the card's own role in
   `[board] ownership` (`"todo->in_progress" = "agent"`), ranked by board
   order. No lane name is hard-coded.
-- **The repo is resolved, never guessed.** A board inside herdr that was given
-  no herdr context refuses rather than fall back to its working directory — a
-  plugin pane started without `--cwd` runs in tktban's own install checkout,
-  and two repositories here share one board, so a guess could branch the wrong
-  repository for a real ticket. This is the same refusal as `--select-from-cwd`
-  makes, and it matters far more here.
+- **The repo is resolved, never guessed.** A herdr *plugin* process that was
+  given no herdr context refuses rather than fall back to its working
+  directory — a plugin pane started without `--cwd` runs in tktban's own
+  install checkout, and two repositories here share one board, so a guess
+  could branch the wrong repository for a real ticket. `tktban` typed in an
+  ordinary herdr terminal pane is not a plugin process and does use its
+  working directory, which is exactly the repo you meant; `--select-from-cwd`
+  refuses more broadly, because mis-selecting a card costs a keystroke and
+  mis-resolving a repository costs a worktree in the wrong repo.
+- **The lane has to be one the board has.** A target role that is not in
+  `[board.roles]` — a typo like `"todo->in_progres" = "agent"` — is refused
+  rather than transitioned into, since moving a ticket there would take the
+  card off the board.
 
 Because the branch names the ticket, everything above already works on a
 dispatched agent the moment it exists: the ⚙ badge appears on the card and `o`
