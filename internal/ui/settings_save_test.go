@@ -40,3 +40,30 @@ func TestBoardSaveKeepsHandEditedSettings(t *testing.T) {
 		}
 	}
 }
+
+// TKB-25: the dispatch settings are hand-edited, exactly as notify was before
+// TKB-24. A board that saves its own preferences must not start writing them,
+// because a board that writes `dispatch = false` into a file someone had set
+// to true has silently turned the D key off.
+func TestBoardNeverWritesTheDispatchSettings(t *testing.T) {
+	m, _ := testModel(t)
+	path := m.settingsPath
+	m = loadBoard(m)
+	if err := os.WriteFile(path, []byte("dispatch = true\ndispatch_agent = \"codex\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, press := range []string{"t", "x", "b"} { // theme, hide a column, notify
+		m = step(m, key(press))
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := settings.Load(path)
+		if got["dispatch"] != true {
+			t.Fatalf("%q: dispatch after a board save = %v; file:\n%s", press, got["dispatch"], raw)
+		}
+		if got["dispatch_agent"] != "codex" {
+			t.Fatalf("%q: dispatch_agent after a board save = %v; file:\n%s", press, got["dispatch_agent"], raw)
+		}
+	}
+}

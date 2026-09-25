@@ -14,7 +14,15 @@ import (
 // JSON keyed off the verb, so the UI can be driven without a real tkt or a TTY.
 type captureRunner struct {
 	calls [][]string
+	// vcs and ownership override the canned `tkt cfg` replies the dispatch
+	// guards read. "" is the default reply below; failReply is a tkt that
+	// exits non-zero, which both readers treat as "not configured".
+	vcs       string
+	ownership string
 }
+
+// failReply asks captureRunner for a failed tkt invocation.
+const failReply = "!fail"
 
 func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int, error) {
 	c.calls = append(c.calls, args)
@@ -32,6 +40,12 @@ func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int
 		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"todo","description":"d","labels":[],"blocked_by":[]}`), nil, 0, nil
 	case eq(args, "cfg", "issue_types", "--json"):
 		return []byte(`{"full_sdlc":["Story","Bug"],"deliverable":["Task"]}`), nil, 0, nil
+	case eq(args, "cfg", "vcs", "--json"):
+		return cfgReply(c.vcs, `{"provider":"github","repo":"olddognewflex/tktban",`+
+			`"default_branch":"main","branch_fmt":"feature/{key-lower}-{slug}",`+
+			`"hotfix_fmt":"hotfix/{key-lower}-{slug}"}`)
+	case eq(args, "cfg", "board.ownership", "--json"):
+		return cfgReply(c.ownership, `{"todo->done":"agent"}`)
 	case eq(args, "cfg", "priorities", "--json"):
 		return []byte(`["Highest","High","Medium","Low","Lowest"]`), nil, 0, nil
 	case len(args) >= 2 && args[0] == "apply" && args[1] == "--template":
@@ -40,6 +54,18 @@ func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int
 		return []byte(`{"key":"TKB-99"}`), nil, 0, nil
 	default: // transition, comment, edit, create
 		return []byte(`{"key":"TKT-1"}`), nil, 0, nil
+	}
+}
+
+// cfgReply serves an overridden `tkt cfg` reply, the default, or a failure.
+func cfgReply(override, def string) ([]byte, []byte, int, error) {
+	switch override {
+	case "":
+		return []byte(def), nil, 0, nil
+	case failReply:
+		return nil, []byte("config error"), 2, nil
+	default:
+		return []byte(override), nil, 0, nil
 	}
 }
 

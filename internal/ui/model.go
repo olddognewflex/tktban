@@ -64,6 +64,13 @@ type Model struct {
 	// live is herdr agent status for card badges; zero (off) outside herdr.
 	live liveState
 
+	// dispatchDir is the checkout the D key dispatches in, "" when the key is
+	// off (no opt-in setting, or no directory that was safe to resolve — see
+	// herdr.DispatchDir). dispatching is true while one preparation is in
+	// flight, so a leaned-on key cannot start several.
+	dispatchDir string
+	dispatching bool
+
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person
 	// typed it (--select) rather than it being read off a git branch
@@ -274,6 +281,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jumpMsg:
 		return m.onJump(msg)
 
+	case dispatchPrepMsg:
+		return m.onDispatchPrep(msg)
+
+	case dispatchResultMsg:
+		return m.onDispatchResult(msg)
+
 	case selectKeyMsg:
 		return m.onSelectKey(msg)
 
@@ -378,6 +391,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, prepEditorEditCmd(m.tkt, card.Key)
 	case "o":
 		return m.jumpToAgentPane()
+	case "D":
+		// Capital D on purpose: lowercase d is the date modal, and a dispatch
+		// is not something to reach by a neighbouring keystroke.
+		return m.startDispatch()
 	case "x":
 		return m.hideFocusedColumn()
 	case "X":

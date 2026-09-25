@@ -89,7 +89,7 @@ func TestHerdrHookNoSocketNoops(t *testing.T) {
 func TestHerdrHookRouted(t *testing.T) {
 	origBoard, origDoctor, origHook, origOut := board, doctor, herdrHook, hookOut
 	t.Cleanup(func() { board, doctor, herdrHook, hookOut = origBoard, origDoctor, origHook, origOut })
-	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, string, func() string, bool) int {
+	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, string, string, func() string, bool) int {
 		t.Error("herdr-hook ran the board")
 		return 1
 	}

@@ -20,11 +20,20 @@ type fakeFocus struct {
 	fakeLive
 	focused  []string
 	focusErr error
+	// listed records worktree.list calls. fakeFocus is a Dispatcher as well
+	// as a PaneFocuser so the inert-behind-a-modal table can prove that D
+	// does nothing from behind one either (TKB-25).
+	listed []string
 }
 
 func (f *fakeFocus) FocusPane(_ context.Context, paneID string) error {
 	f.focused = append(f.focused, paneID)
 	return f.focusErr
+}
+
+func (f *fakeFocus) WorktreeList(_ context.Context, cwd string) (herdr.WorktreeListResult, error) {
+	f.listed = append(f.listed, cwd)
+	return herdr.WorktreeListResult{}, nil
 }
 
 // quits reports whether cmd closes the board. tea.Quit is declared as a

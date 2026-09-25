@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/olddognewflex/tktban/internal/herdr"
 	"github.com/olddognewflex/tktban/internal/model"
 	"github.com/olddognewflex/tktban/internal/ticket"
 	"github.com/olddognewflex/tktban/internal/tkt"
@@ -731,4 +732,103 @@ func parseLabels(s string) []string {
 		}
 	}
 	return out
+}
+
+// ---- Dispatch (dry run) ----
+
+// worktreePlacement is what the modal says about where the worktree goes.
+// tktban deliberately sends no path: herdr owns worktree placement
+// ([worktrees] directory, default ~/.herdr/worktrees), so a dispatched
+// worktree lands beside the ones the person makes by hand.
+const worktreePlacement = "herdr chooses the path ([worktrees] directory)"
+
+// dispatchModal confirms a dispatch by showing exactly what it would create,
+// field by field, before anything is created.
+//
+// In this change enter creates nothing: it closes the dialog and the board
+// says so. The dialog is the point — it is the last place a wrong repo, a
+// wrong branch or a wrong lane is still cheap — so it is built and tested now,
+// against the same plan the create sequence will later consume unchanged.
+type dispatchModal struct {
+	plan herdr.Plan
+	pre  herdr.PreflightResult
+}
+
+func newDispatchModal(plan herdr.Plan, pre herdr.PreflightResult) dispatchModal {
+	return dispatchModal{plan: plan, pre: pre}
+}
+
+func (m dispatchModal) Update(msg tea.Msg) (modal, tea.Cmd) {
+	switch {
+	case keyIn(msg, "esc", "escape"):
+		return m, send(dispatchResultMsg{key: m.plan.Key})
+	case keyIn(msg, "enter"):
+		return m, send(dispatchResultMsg{key: m.plan.Key, confirmed: true})
+	}
+	return m, nil
+}
+
+// worktreeLine is what the modal says about the worktree: reusing the one the
+// branch already has, or letting herdr place a new one.
+func (m dispatchModal) worktreeLine() string {
+	if m.pre.ExistingWorktreePath != "" {
+		return "reuse " + m.pre.ExistingWorktreePath
+	}
+	return worktreePlacement
+}
+
+func (m dispatchModal) repoLine() string {
+	parts := make([]string, 0, 2)
+	if m.plan.Repo != "" {
+		parts = append(parts, m.plan.Repo)
+	}
+	if root := m.pre.RepoRoot; root != "" {
+		parts = append(parts, root)
+	}
+	if len(parts) == 0 {
+		return m.plan.Dir
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+func (m dispatchModal) laneLine() string {
+	from := m.plan.SourceLane
+	if from == "" {
+		from = m.plan.SourceRole
+	}
+	to := m.plan.TargetLane
+	if to == "" {
+		to = m.plan.TargetRole
+	}
+	return from + " → " + to
+}
+
+func (m dispatchModal) agentLine() string {
+	line := m.plan.AgentKind + " as " + m.plan.AgentName
+	if len(m.plan.AgentArgs) > 0 {
+		line += "  " + strings.Join(m.plan.AgentArgs, " ")
+	}
+	return line
+}
+
+func (m dispatchModal) View(st styles, width, height int) string {
+	var b strings.Builder
+	b.WriteString(st.dialogTitle.Render("Dispatch "+m.plan.Key) + "\n")
+	if m.plan.Summary != "" {
+		b.WriteString(st.cardSummary.Render(m.plan.Summary) + "\n")
+	}
+	b.WriteString("\n")
+	for _, row := range [][2]string{
+		{"lane", m.laneLine()},
+		{"branch", m.plan.Branch},
+		{"base", m.plan.Base},
+		{"repo", m.repoLine()},
+		{"worktree", m.worktreeLine()},
+		{"agent", m.agentLine()},
+	} {
+		b.WriteString(st.fieldLabel.Render(row[0]) + "  " + row[1] + "\n")
+	}
+	b.WriteString("\n" + st.fieldLabel.Render("prompt") + "\n" + m.plan.Prompt + "\n")
+	b.WriteString("\n" + st.fieldLabel.Render("Dry run: nothing is created yet. enter close · esc cancel"))
+	return dialogBox(st, width, height, b.String())
 }

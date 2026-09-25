@@ -34,6 +34,7 @@ func run(argv []string) int {
 	inHerdr := fs.Bool("herdr", false, "running as a herdr plugin pane: pick config from the herdr context, keep settings in the plugin state dir (no-op outside herdr)")
 	noLive := fs.Bool("no-herdr-live", false, "inside herdr, don't read live agent status from the herdr socket for card badges")
 	noTokens := fs.Bool("no-herdr-tokens", false, "inside herdr, don't publish the ticket key as herdr pane metadata")
+	noDispatch := fs.Bool("no-herdr-dispatch", false, "inside herdr, turn the D dispatch key off whatever the dispatch setting says")
 	selectKey := fs.String("select", "", "select this ticket key when the board opens, e.g. TKB-23")
 	selectFromCwd := fs.Bool("select-from-cwd", false, "select the ticket named by the branch checked out where the board was opened (the herdr context inside herdr, else this directory); --select wins")
 	popup := fs.Bool("popup", false, "(internal) the board is herdr's popup pane: a successful jump to an agent pane exits, which is what closes the popup")
@@ -82,8 +83,10 @@ func run(argv []string) int {
 		defer release()
 		// Only the board selects a ticket, so `doctor` never reads a branch.
 		selected, derive := selectTarget(*selectKey, *selectFromCwd, os.Getenv, cwd)
-		live := liveSource(os.Getenv, herdrLive{off: *noLive, noTokens: *noTokens})
-		return board(tk, *interval, !*noAuto, settingsPath, live, selected, derive, *popup)
+		opts := herdrOpts{off: *noLive, noTokens: *noTokens, noDispatch: *noDispatch}
+		live := liveSource(os.Getenv, opts)
+		return board(tk, *interval, !*noAuto, settingsPath, live,
+			dispatchDir(os.Getenv, cwd, settingsPath, opts), selected, derive, *popup)
 	default:
 		fmt.Fprintf(os.Stderr, "tktban: unknown command %q (want board, doctor or herdr-hook)\n", command)
 		return 2
@@ -131,12 +134,13 @@ func herdrSetup(config string, getenv func(string) string, cwd string, stat, lst
 	return config, herdr.SafeSettingsPath(herdr.SettingsPath(e), lstat), e.StateDir
 }
 
-// herdrLive carries the two herdr opt-outs. They are a struct, not two bools:
-// both are negative, they sit next to each other, and swapping them would
+// herdrOpts carries the herdr opt-outs. They are a struct, not three bools:
+// all are negative, they sit next to each other, and swapping them would
 // compile and silently invert the pair.
-type herdrLive struct {
-	off      bool // --no-herdr-live: no socket source at all
-	noTokens bool // --no-herdr-tokens: poll, but report nothing back
+type herdrOpts struct {
+	off        bool // --no-herdr-live: no socket source at all
+	noTokens   bool // --no-herdr-tokens: poll, but report nothing back
+	noDispatch bool // --no-herdr-dispatch: no D key, whatever the setting says
 }
 
 // liveSource returns the herdr socket as the board's live agent status source
@@ -147,7 +151,7 @@ type herdrLive struct {
 // Reporting the pane's ticket key back to herdr as pane metadata rides on the
 // same source, so --no-herdr-live turns that off too: without polls there is
 // nothing to report.
-func liveSource(getenv func(string) string, opt herdrLive) ui.LiveSource {
+func liveSource(getenv func(string) string, opt herdrOpts) ui.LiveSource {
 	if opt.off {
 		return nil
 	}
@@ -158,6 +162,36 @@ func liveSource(getenv func(string) string, opt herdrLive) ui.LiveSource {
 	src := herdr.NewSocketSource(e.SocketPath)
 	src.Tokens = !opt.noTokens
 	return src
+}
+
+// dispatchDir says which checkout the board's D key dispatches in, or "" to
+// leave the key off.
+//
+// Three things have to agree before a board may cut a branch and start an
+// agent: the opt-out flag is absent, the dispatch setting was turned on by
+// hand (it defaults to false and the board never writes it, exactly like
+// notify), and a directory resolved that is certainly the repo the person
+// means. herdr.DispatchDir refuses rather than guess from the process working
+// directory inside herdr, because a plugin pane started without --cwd runs in
+// tktban's own install checkout — and two repos here share one board, so a
+// guess could branch the wrong repository for a real ticket.
+//
+// settingsPath is "" outside --herdr, meaning the standalone file.
+func dispatchDir(getenv func(string) string, cwd, settingsPath string, opt herdrOpts) string {
+	if opt.noDispatch {
+		return ""
+	}
+	if settingsPath == "" {
+		settingsPath = settings.DefaultPath()
+	}
+	if on, _ := settings.Load(settingsPath)["dispatch"].(bool); !on {
+		return ""
+	}
+	dir, ok := herdr.DispatchDir(herdr.FromEnv(getenv), cwd)
+	if !ok {
+		return ""
+	}
+	return dir
 }
 
 // selectKeyTimeout bounds reading the branch of the directories --select-from-cwd
@@ -189,7 +223,7 @@ func selectTarget(explicit string, fromCwd bool, getenv func(string) string, cwd
 
 // board runs the TUI. A variable so a test can check the wiring from argv
 // without a terminal.
-var board = func(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource, selectKey string, derive func() string, popup bool) int {
+var board = func(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, live ui.LiveSource, dispatchDir string, selectKey string, derive func() string, popup bool) int {
 	m := ui.New(tk, interval, auto, settingsPath).
 		// A non-empty settingsPath is herdr's plugin settings file and nothing
 		// else: run() fills it in only under --herdr, and only when
@@ -197,6 +231,8 @@ var board = func(tk *tkt.Tkt, interval float64, auto bool, settingsPath string, 
 		// notification hook reads, which is what the board needs to know.
 		WithPluginSettings(settingsPath != "").
 		WithLive(live).
+		// "" leaves the D key refusing: see dispatchDir.
+		WithDispatch(dispatchDir).
 		WithSelect(selectKey).
 		WithSelectFunc(derive).
 		WithPopup(popup)
