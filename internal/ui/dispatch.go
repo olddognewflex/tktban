@@ -73,9 +73,19 @@ type dispatchPrepMsg struct {
 	err  error
 }
 
-// dispatchResultMsg is the confirm modal's outcome.
+// dispatchResultMsg is the confirm modal's outcome, and it carries the whole
+// plan back rather than just the ticket key.
+//
+// The plan and its preflight are what the create sequence acts on — the
+// branch, the base, the agent name, and above all ExistingWorktreePath, which
+// is the entire create-a-worktree versus open-the-existing-one decision. They
+// were computed once, shown to the person, and agreed to; recomputing them
+// after the confirm would mean acting on something nobody was shown, and
+// re-reading the selection would re-point the dispatch. So they travel with
+// the answer.
 type dispatchResultMsg struct {
-	key       string
+	plan      herdr.Plan
+	pre       herdr.PreflightResult
 	confirmed bool
 }
 
@@ -125,6 +135,9 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 	// An agent is already on this ticket. Dispatching a second one is a way to
 	// end up with two agents racing the same branch, so the board sends the
 	// person to the one that exists instead.
+	//
+	// Checked again in onDispatchResult: live status keeps polling while the
+	// dialog is open, so this answer can go stale between D and enter.
 	if _, live := herdr.PickPane(m.live.byKey[key]); live {
 		return m, m.setStatus(key+" already has an agent pane (o focuses it)", "warn")
 	}
@@ -210,9 +223,9 @@ func (m Model) onDispatchPrep(msg dispatchPrepMsg) (tea.Model, tea.Cmd) {
 	}
 	// The person opened something else while this was in flight. Their modal
 	// wins: a dialog that replaces the one you are typing in is worse than a
-	// dispatch you have to ask for again.
+	// dispatch you have to ask for again — but say so, or D looks broken.
 	if m.modal != nil {
-		return m, nil
+		return m, m.setStatus("Dispatch for "+msg.plan.Key+" was dropped behind the open dialog — press D again", "warn")
 	}
 	m.modal = newDispatchModal(msg.plan, msg.pre)
 	return m, nil
@@ -235,18 +248,31 @@ func dispatchRefusalText(plan herdr.Plan, err error) string {
 	return "Couldn't prepare a dispatch: " + err.Error()
 }
 
-// onDispatchResult closes the confirm modal.
+// onDispatchResult closes the confirm modal and acts on the answer.
 //
 // This is the whole of the dry run: enter says what would have happened and
 // nothing happens. No worktree, no agent, no transition, no comment — the only
 // herdr call the D key makes at all is the worktree.list in the preflight
 // above. esc says nothing, because cancelling a dialog needs no announcement.
+//
+// The plan arrives on the message rather than being rebuilt here, so whatever
+// acts on it acts on exactly what the person was shown.
 func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
 	m.modal = nil
 	if !msg.confirmed {
 		return m, nil
 	}
-	return m, m.setStatus("Dry run — dispatch lands in the next change; nothing was created for "+msg.key, "")
+	// The keypress guard is not enough on its own. Live status keeps polling
+	// the whole time the dialog is open, so an agent can appear on this
+	// ticket between D and enter — someone else dispatching it, or a pane
+	// checking the branch out by hand. Today that only changes what the board
+	// says; once enter creates things it is what stops two agents racing one
+	// branch, so the check is here, on the plan's own key, and not on
+	// whatever the selection has become since.
+	if _, live := herdr.PickPane(m.live.byKey[msg.plan.Key]); live {
+		return m, m.setStatus(msg.plan.Key+" picked up an agent while the dialog was open (o focuses it)", "warn")
+	}
+	return m, m.setStatus("Dry run — dispatch lands in the next change; nothing was created for "+msg.plan.Key, "")
 }
 
 // roleOrder is the board's role keys in board order.

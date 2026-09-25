@@ -113,15 +113,24 @@ func pressD(t *testing.T, m Model) Model {
 	return m
 }
 
-// wrote reports whether any tkt write verb ran. A dry run must not transition
-// a ticket or comment on one, and the recorded argv is how we know.
-func wrote(cr *captureRunner) []string {
+// dispatchReadVerbs are the only tkt invocations anything on the D path may
+// make: the board's own refresh and the dispatch's two config reads.
+//
+// An allowlist, not a denylist. A denylist of write verbs would quietly stop
+// covering the moment the create sequence reaches for a verb nobody thought
+// to list, which is exactly when it matters.
+var dispatchReadVerbs = map[string]bool{
+	"cfg":       true, // board.roles, priorities, vcs, board.ownership
+	"list":      true,
+	"lane-time": true, // --read-only, so it records no worklog
+	"view":      true,
+}
+
+// nonReadCall returns the first tkt invocation that was not one of those, or
+// nil. A dry run must not transition a ticket, comment on one or edit one.
+func nonReadCall(cr *captureRunner) []string {
 	for _, call := range cr.calls {
-		if len(call) == 0 {
-			continue
-		}
-		switch call[0] {
-		case "transition", "comment", "edit", "create", "apply":
+		if len(call) > 0 && !dispatchReadVerbs[call[0]] {
 			return call
 		}
 	}
@@ -208,8 +217,8 @@ func TestDispatchGuardLadder(t *testing.T) {
 			if len(src.listed) != 0 {
 				t.Errorf("a refused dispatch called worktree.list %v", src.listed)
 			}
-			if call := wrote(cr); call != nil {
-				t.Errorf("a refused dispatch ran %v", call)
+			if call := nonReadCall(cr); call != nil {
+				t.Errorf("a refused dispatch ran tkt %v, which is not a read", call)
 			}
 		})
 	}
@@ -452,7 +461,8 @@ func TestDispatchModalSaysWhenAWorktreeWouldBeReused(t *testing.T) {
 func TestDispatchEnterCreatesNothing(t *testing.T) {
 	m, src, cr := dispatchBoard(t)
 	m = pressD(t, m)
-	if _, ok := m.modal.(dispatchModal); !ok {
+	dm, ok := m.modal.(dispatchModal)
+	if !ok {
 		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
 	}
 	before := len(cr.calls)
@@ -469,8 +479,17 @@ func TestDispatchEnterCreatesNothing(t *testing.T) {
 	if !ok {
 		t.Fatalf("enter produced %T, want dispatchResultMsg", cmd())
 	}
-	if !res.confirmed || res.key != "TKT-1" {
+	if !res.confirmed || res.plan.Key != "TKT-1" {
 		t.Fatalf("enter produced %+v, want a confirmation for TKT-1", res)
+	}
+	// The whole plan comes back, not just the key: this is what the create
+	// sequence will act on, and it must be the one that was rendered.
+	if res.plan.Branch != dm.plan.Branch || res.plan.AgentName != dm.plan.AgentName ||
+		res.plan.Base != dm.plan.Base || res.plan.TargetRole != dm.plan.TargetRole {
+		t.Fatalf("enter returned a different plan:\n got %+v\nwant %+v", res.plan, dm.plan)
+	}
+	if res.pre != dm.pre {
+		t.Fatalf("enter returned preflight %+v, want %+v", res.pre, dm.pre)
 	}
 	m, _ = update(m, res)
 
@@ -488,8 +507,8 @@ func TestDispatchEnterCreatesNothing(t *testing.T) {
 	if len(src.listed) != 1 {
 		t.Errorf("herdr worktree.list calls = %v, want exactly one", src.listed)
 	}
-	if call := wrote(cr); call != nil {
-		t.Errorf("the dry run ran a tkt write verb: %v", call)
+	if call := nonReadCall(cr); call != nil {
+		t.Errorf("the dry run ran tkt %v, which is not a read", call)
 	}
 	for _, call := range cr.calls[before:] {
 		t.Errorf("enter ran tkt %v", call)
@@ -564,7 +583,7 @@ func TestDispatchPlanSurvivesARefreshMidPreflight(t *testing.T) {
 }
 
 // A dialog that replaces the one you are typing in is worse than a dispatch
-// you have to ask for again.
+// you have to ask for again — but it has to say so, or D looks broken.
 func TestDispatchPrepDroppedWhenAnotherModalOpened(t *testing.T) {
 	m, _, _ := dispatchBoard(t)
 	m, cmd := update(m, key("D"))
@@ -578,6 +597,58 @@ func TestDispatchPrepDroppedWhenAnotherModalOpened(t *testing.T) {
 	}
 	if m.dispatching {
 		t.Fatal("the board still thinks a dispatch is in flight")
+	}
+	want := "Dispatch for TKT-1 was dropped behind the open dialog — press D again"
+	if m.status != want || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+	}
+}
+
+// The keypress guard goes stale: live status keeps polling while the dialog
+// sits open, so an agent can appear on the ticket between D and enter. Today
+// that only changes the wording; in the change that makes enter create things
+// it is what stops two agents racing one branch.
+func TestDispatchRefusesAnAgentThatAppearedDuringTheDialog(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	m = pressD(t, m)
+	if _, ok := m.modal.(dispatchModal); !ok {
+		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+
+	// herdr reports an agent on TKT-1 while the dialog is open. Live polling
+	// runs behind modals, so this is the ordinary course of events.
+	src.byKey = map[string]herdr.Live{"TKT-1": {
+		Status: herdr.StatusWorking,
+		Panes:  []herdr.PaneRef{{PaneID: "wC:p1", Status: herdr.StatusWorking}},
+	}}
+	m = poll(t, m)
+	if _, still := m.modal.(dispatchModal); !still {
+		t.Fatalf("a poll closed the confirm dialog (modal = %T)", m.modal)
+	}
+
+	before := len(cr.calls)
+	m, cmd := update(m, key("enter"))
+	res, ok := cmd().(dispatchResultMsg)
+	if !ok || !res.confirmed {
+		t.Fatalf("enter produced %+v", cmd())
+	}
+	m, _ = update(m, res)
+
+	want := "TKT-1 picked up an agent while the dialog was open (o focuses it)"
+	if m.status != want || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+	}
+	if m.modal != nil {
+		t.Errorf("the dialog stayed open as a %T", m.modal)
+	}
+	if len(src.listed) != 1 {
+		t.Errorf("worktree.list calls = %v, want exactly one", src.listed)
+	}
+	if call := nonReadCall(cr); call != nil {
+		t.Errorf("a refused confirm ran tkt %v, which is not a read", call)
+	}
+	if len(cr.calls) != before {
+		t.Errorf("the confirm ran tkt %v", cr.calls[before:])
 	}
 }
 

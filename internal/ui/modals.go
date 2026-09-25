@@ -749,6 +749,10 @@ const worktreePlacement = "herdr chooses the path ([worktrees] directory)"
 // says so. The dialog is the point — it is the last place a wrong repo, a
 // wrong branch or a wrong lane is still cheap — so it is built and tested now,
 // against the same plan the create sequence will later consume unchanged.
+//
+// "Unchanged" is literal: the answer carries the plan and its preflight back
+// out on dispatchResultMsg, so whatever acts on them acts on exactly what was
+// rendered here and agreed to.
 type dispatchModal struct {
 	plan herdr.Plan
 	pre  herdr.PreflightResult
@@ -761,9 +765,9 @@ func newDispatchModal(plan herdr.Plan, pre herdr.PreflightResult) dispatchModal 
 func (m dispatchModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 	switch {
 	case keyIn(msg, "esc", "escape"):
-		return m, send(dispatchResultMsg{key: m.plan.Key})
+		return m, send(dispatchResultMsg{plan: m.plan, pre: m.pre})
 	case keyIn(msg, "enter"):
-		return m, send(dispatchResultMsg{key: m.plan.Key, confirmed: true})
+		return m, send(dispatchResultMsg{plan: m.plan, pre: m.pre, confirmed: true})
 	}
 	return m, nil
 }
