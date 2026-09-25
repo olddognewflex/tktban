@@ -84,7 +84,7 @@ func dispatchBoard(t *testing.T) (Model, *fakeDispatch, *captureRunner) {
 	t.Helper()
 	src := &fakeDispatch{t: t, list: okList()}
 	m, cr := testModel(t)
-	m = m.WithLive(src).WithDispatch(testDispatchDir)
+	m = m.WithLive(src).WithDispatch(DispatchOpts{Dir: testDispatchDir})
 	m.settings["dispatch"] = true
 	m = loadBoard(m)
 	return goLive(t, m), src, cr
@@ -152,14 +152,14 @@ func TestDispatchGuardLadder(t *testing.T) {
 
 		{"no live source at all", func(t *testing.T, _ Model, _ *fakeDispatch) Model {
 			m, _ := testModel(t)
-			m = m.WithDispatch(testDispatchDir)
+			m = m.WithDispatch(DispatchOpts{Dir: testDispatchDir})
 			m.settings["dispatch"] = true
 			return loadBoard(m)
 		}, "Live agent status is off"},
 
 		{"a source that only reads status", func(t *testing.T, _ Model, _ *fakeDispatch) Model {
 			m, _ := testModel(t)
-			m = m.WithLive(&fakeLive{}).WithDispatch(testDispatchDir)
+			m = m.WithLive(&fakeLive{}).WithDispatch(DispatchOpts{Dir: testDispatchDir})
 			m.settings["dispatch"] = true
 			return goLive(t, loadBoard(m))
 		}, "This board can't dispatch herdr agents"},
@@ -196,8 +196,15 @@ func TestDispatchGuardLadder(t *testing.T) {
 		}, "TKT-1 already has an agent pane (o focuses it)"},
 
 		{"no directory resolved", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
-			return m.WithDispatch("")
+			return m.WithDispatch(DispatchOpts{})
 		}, "Don't know which repo to dispatch TKT-1 in"},
+
+		// A different refusal from the one above, and from the setting being
+		// off: the person turned it off on the command line, and sending them
+		// to look at their config instead would waste their time.
+		{"turned off on the command line", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
+			return m.WithDispatch(DispatchOpts{Dir: testDispatchDir, OptedOut: true})
+		}, "Dispatch is off for this board (--no-herdr-dispatch)"},
 	}
 
 	for _, c := range cases {

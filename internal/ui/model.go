@@ -69,7 +69,10 @@ type Model struct {
 	// herdr.DispatchDir). dispatching is true while one preparation is in
 	// flight, so a leaned-on key cannot start several.
 	dispatchDir string
-	dispatching bool
+	// dispatchOptedOut is --no-herdr-dispatch: the key is off because the
+	// person said so, which is a different refusal from having no directory.
+	dispatchOptedOut bool
+	dispatching      bool
 
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person

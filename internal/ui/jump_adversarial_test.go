@@ -218,7 +218,7 @@ func TestSingleKeyActionsInertBehindEveryModalKind(t *testing.T) {
 		m := jumpBoard(t, src)
 		// Dispatch on, so D behind a modal is inert because the modal has the
 		// keys — not because the dispatch guards happened to refuse it.
-		m = m.WithDispatch("/src/tktban")
+		m = m.WithDispatch(DispatchOpts{Dir: "/src/tktban"})
 		m.settings["dispatch"] = true
 		m = step(m, key(opener))
 		if m.modal == nil {

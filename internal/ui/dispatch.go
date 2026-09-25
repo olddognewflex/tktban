@@ -105,12 +105,25 @@ type dispatchResultMsg struct {
 	confirmed bool
 }
 
+// DispatchOpts is how a board is told about the D key. The caller resolves
+// the directory (herdr.DispatchDir) and reads the opt-in setting, because
+// only it knows the herdr environment and the command line.
+//
+// OptedOut is separate from an empty Dir because they are different refusals:
+// "--no-herdr-dispatch was given" is a thing the person did, and telling them
+// "don't know which repo to dispatch in" instead would send them looking for
+// a configuration problem they do not have.
+type DispatchOpts struct {
+	Dir      string
+	OptedOut bool
+}
+
 // WithDispatch turns the D key on and says which checkout it dispatches in.
-// The caller resolves that directory (herdr.DispatchDir) and checks the
-// opt-in setting, because only it knows the herdr environment; an empty dir
-// leaves the key refusing, which is what a board outside herdr does.
-func (m Model) WithDispatch(dir string) Model {
-	m.dispatchDir = dir
+// A zero DispatchOpts leaves the key refusing, which is what a board outside
+// herdr does.
+func (m Model) WithDispatch(o DispatchOpts) Model {
+	m.dispatchDir = o.Dir
+	m.dispatchOptedOut = o.OptedOut
 	return m
 }
 
@@ -124,6 +137,9 @@ func (m Model) WithDispatch(dir string) Model {
 // than on the UI loop; they still refuse before anything touches herdr, and
 // they still produce a status and no modal.
 func (m Model) startDispatch() (tea.Model, tea.Cmd) {
+	if m.dispatchOptedOut {
+		return m, m.setStatus("Dispatch is off for this board (--no-herdr-dispatch)", "warn")
+	}
 	if on, _ := m.settings["dispatch"].(bool); !on {
 		return m, m.setStatus("Dispatch is off (set dispatch = true in tktban's settings.toml)", "warn")
 	}
