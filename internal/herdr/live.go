@@ -256,3 +256,36 @@ func paneTokens(byKey map[string]Live) map[string]string {
 func (s *SocketSource) FocusPane(ctx context.Context, paneID string) error {
 	return s.Client.FocusPane(ctx, paneID)
 }
+
+// ---- dispatch ----
+//
+// SocketSource carries the dispatch calls the same way it carries FocusPane:
+// straight through to Client, holding nothing. A dispatch therefore runs on
+// its own goroutine alongside a poll without any locking, exactly as a jump
+// does.
+
+// WorktreeList lists the worktrees of the repository containing cwd. This is
+// the only one of these a dry-run dispatch calls.
+func (s *SocketSource) WorktreeList(ctx context.Context, cwd string) (WorktreeListResult, error) {
+	return s.Client.WorktreeList(ctx, WorktreeListParams{Cwd: cwd})
+}
+
+// WorktreeCreate cuts the dispatch branch and opens a worktree for it.
+func (s *SocketSource) WorktreeCreate(ctx context.Context, p WorktreeCreateParams) (WorktreeResult, error) {
+	return s.Client.WorktreeCreate(ctx, p)
+}
+
+// WorktreeOpen opens the worktree a branch already has.
+func (s *SocketSource) WorktreeOpen(ctx context.Context, p WorktreeOpenParams) (WorktreeResult, error) {
+	return s.Client.WorktreeOpen(ctx, p)
+}
+
+// AgentStart starts the dispatched agent in the worktree's root pane.
+func (s *SocketSource) AgentStart(ctx context.Context, p AgentStartParams) (AgentStartResult, error) {
+	return s.Client.AgentStart(ctx, p)
+}
+
+// AgentPrompt hands the dispatched agent its first prompt.
+func (s *SocketSource) AgentPrompt(ctx context.Context, p AgentPromptParams) error {
+	return s.Client.AgentPrompt(ctx, p)
+}

@@ -264,7 +264,7 @@ func (m Model) onJump(msg jumpMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		text := "Could not focus " + msg.key + " agent pane"
 		var apiErr *herdr.APIError
-		if errors.As(msg.err, &apiErr) && apiErr.Code == "pane_not_found" {
+		if errors.As(msg.err, &apiErr) && apiErr.Code == herdr.CodePaneNotFound {
 			text = "Agent pane for " + msg.key + " is gone"
 		}
 		return m, m.setStatus(text, "warn")
