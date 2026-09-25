@@ -388,6 +388,14 @@ func TestAgentTarget(t *testing.T) {
 		{"a malformed transition is ignored", map[string]string{
 			"todo": "agent", "->x": "agent", "todo->": "agent",
 		}, "todo", "", false},
+		// A lane the board does not have is not somewhere a ticket may be
+		// moved to: it would take the card off the board entirely.
+		{"a target the board does not list is refused", map[string]string{
+			"todo->in_progres": "agent", // a typo in the config
+		}, "todo", "", false},
+		{"a known target still wins alongside an unknown one", map[string]string{
+			"todo->nowhere": "agent", "todo->review": "agent",
+		}, "todo", "review", true},
 		{"whitespace around the arrow is tolerated", map[string]string{
 			" todo -> in_progress ": "agent",
 		}, "todo", "in_progress", true},
@@ -416,13 +424,20 @@ func TestAgentTargetIsDeterministicAcrossMapOrder(t *testing.T) {
 			t.Fatalf("run %d: AgentTarget = (%q, %v), want the earliest lane on the board", i, got, ok)
 		}
 	}
-	// A target the board does not list sorts after every one it does, and ties
-	// among unknown roles break by name so the answer still never wobbles.
+	// Targets the board does not list are dropped, however many there are.
 	unknown := map[string]string{"todo->zeta": "agent", "todo->alpha": "agent"}
 	for i := range 50 {
-		got, _ := AgentTarget(unknown, "todo", order)
-		if got != "alpha" {
-			t.Fatalf("run %d: unknown targets gave %q, want alpha", i, got)
+		got, ok := AgentTarget(unknown, "todo", order)
+		if ok || got != "" {
+			t.Fatalf("run %d: unknown targets gave (%q, %v), want a refusal", i, got, ok)
+		}
+	}
+	// With no board order to check against there is nothing to reject, so
+	// ties break by name and the answer still never wobbles.
+	for i := range 50 {
+		got, ok := AgentTarget(unknown, "todo", nil)
+		if !ok || got != "alpha" {
+			t.Fatalf("run %d: AgentTarget with no order = (%q, %v), want alpha", i, got, ok)
 		}
 	}
 }

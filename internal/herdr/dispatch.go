@@ -240,19 +240,27 @@ func BuildPlan(in PlanInput) Plan {
 // DispatchDir is the checkout a dispatch works in: the herdr context's focused
 // pane, then its workspace root, then the process working directory.
 //
-// The refusal mirrors SelectKey's, and matters far more here. A herdr plugin
-// pane started without --cwd runs in the plugin's own install checkout, so a
-// process inside herdr that was given no context at all must not fall back to
-// its working directory: it would dispatch against tktban's install checkout.
-// Two ODNF repos share one board directory, so the wrong repo is a live
-// possibility, and the result would be a real branch and a real worktree of
-// the wrong repository for a real ticket. Outside herdr the working directory
-// is exactly what the person meant, so it is used.
+// The refusal: a herdr *plugin* process that was given no context at all does
+// not fall back to its working directory. herdr starts a plugin pane in the
+// plugin's own install checkout unless the launcher passes --cwd (the TKB-23
+// finding), so falling back would dispatch against tktban's own checkout —
+// and two repositories here share one board directory, so the result could be
+// a real branch and a real worktree of the wrong repository for a real
+// ticket. A status message is a cheap price for never doing that.
+//
+// It is deliberately narrower than SelectKey's otherwise identical refusal,
+// which turns on InHerdr alone. HERDR_ENV is set in every herdr pane, so that
+// rule also refuses `tktban` typed in an ordinary herdr terminal — where the
+// working directory is exactly what the person meant, and refusing is simply
+// wrong. Only a process carrying herdr's plugin markers (Env.IsPlugin) can
+// have the install-directory problem, so only that one is refused. The
+// asymmetry is on purpose: mis-selecting a card costs a keystroke, and
+// mis-resolving a repository costs a worktree in the wrong repo.
 //
 // ok is false when there is nothing safe to dispatch from.
 func DispatchDir(e Env, cwd string) (string, bool) {
 	dirs := []string{e.Context.FocusedPaneCwd, e.Context.WorkspaceCwd}
-	if !e.InHerdr || dirs[0] != "" || dirs[1] != "" {
+	if !e.IsPlugin() || dirs[0] != "" || dirs[1] != "" {
 		dirs = append(dirs, cwd)
 	}
 	for _, dir := range dirs {
@@ -336,7 +344,10 @@ func Preflight(ctx context.Context, c WorktreeLister, p Plan) (PreflightResult, 
 		}
 	}
 	if out.SourceIsLinked {
-		return out, ErrLinkedWorktreeSource
+		// The zero value, like every other refusal here: a caller that has an
+		// error has nothing it may act on, and handing it a half-filled
+		// result only invites someone to read RepoRoot off a refusal.
+		return PreflightResult{}, ErrLinkedWorktreeSource
 	}
 	return out, nil
 }

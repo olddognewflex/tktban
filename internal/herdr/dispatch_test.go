@@ -270,10 +270,14 @@ func TestBuildPlanCustomPromptAndEmptySlug(t *testing.T) {
 	}
 }
 
-// The important guard. A herdr process given no context at all must refuse
-// rather than dispatch against its own working directory: inside herdr that
-// is tktban's install checkout, and branching the wrong repository for a real
+// The important guard. A herdr *plugin* process given no context at all must
+// refuse rather than dispatch against its own working directory: that is
+// tktban's install checkout, and branching the wrong repository for a real
 // ticket is not something a status message can undo.
+//
+// Deliberately narrower than SelectKey's refusal: HERDR_ENV is set in every
+// herdr pane, so an ordinary terminal pane would be caught by the broader
+// rule even though its working directory is exactly what the person meant.
 func TestDispatchDir(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -296,7 +300,22 @@ func TestDispatchDir(t *testing.T) {
 			InHerdr: true,
 			Context: Context{FocusedPaneCwd: "", WorkspaceCwd: "/ws"},
 		}, "/work", "/ws", true},
-		{"in herdr with no context refuses", Env{InHerdr: true}, "/plugin/install/dir", "", false},
+		// A plugin process: herdr sets HERDR_PLUGIN_STATE_DIR (or the plugin
+		// id) for these, and starts them in the plugin's own checkout.
+		{"a plugin process with no context refuses", Env{
+			InHerdr: true, StateDir: "/state/odnf.tktban",
+		}, "/plugin/install/dir", "", false},
+		{"the plugin id alone is enough to refuse", Env{
+			InHerdr: true, PluginID: "odnf.tktban",
+		}, "/plugin/install/dir", "", false},
+		// A person's shell inside a herdr pane: no plugin markers, and the
+		// working directory is exactly the repo they meant.
+		{"a plain herdr terminal pane uses its working directory", Env{
+			InHerdr: true, SocketPath: "/run/herdr.sock",
+		}, "/src/tktban", "/src/tktban", true},
+		{"a plugin process with context still uses it", Env{
+			InHerdr: true, StateDir: "/state", Context: Context{WorkspaceCwd: "/ws"},
+		}, "/plugin/install/dir", "/ws", true},
 	}
 	for _, c := range cases {
 		got, ok := DispatchDir(c.env, c.cwd)
@@ -433,8 +452,44 @@ func TestPreflightRefusesALinkedSourceFromTheListing(t *testing.T) {
 	if !errors.Is(e, ErrLinkedWorktreeSource) {
 		t.Fatalf("err = %v, want ErrLinkedWorktreeSource", e)
 	}
-	if !got.SourceIsLinked {
-		t.Fatalf("preflight = %+v, want SourceIsLinked", got)
+	// Every refusal returns the zero value, so nothing can read a repo root
+	// off a preflight that refused.
+	if got != (PreflightResult{}) {
+		t.Fatalf("a refused preflight returned %+v", got)
+	}
+}
+
+// IsPlugin is what separates "herdr started this" from "someone typed this in
+// a herdr pane", and DispatchDir's refusal turns on it.
+func TestEnvIsPlugin(t *testing.T) {
+	cases := []struct {
+		name string
+		env  Env
+		want bool
+	}{
+		{"outside herdr", Env{StateDir: "/state"}, false},
+		{"plain herdr pane", Env{InHerdr: true, SocketPath: "/run/herdr.sock"}, false},
+		{"plugin with a state dir", Env{InHerdr: true, StateDir: "/state"}, true},
+		{"plugin with only an id", Env{InHerdr: true, PluginID: "odnf.tktban"}, true},
+	}
+	for _, c := range cases {
+		if got := c.env.IsPlugin(); got != c.want {
+			t.Errorf("%s: IsPlugin = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// FromEnv has to read the plugin id, or IsPlugin can never see it.
+func TestFromEnvReadsThePluginID(t *testing.T) {
+	e := FromEnv(env(map[string]string{
+		"HERDR_ENV":       "1",
+		"HERDR_PLUGIN_ID": "odnf.tktban",
+	}))
+	if e.PluginID != "odnf.tktban" {
+		t.Fatalf("PluginID = %q", e.PluginID)
+	}
+	if !e.IsPlugin() {
+		t.Fatal("a process with a plugin id is a plugin process")
 	}
 }
 

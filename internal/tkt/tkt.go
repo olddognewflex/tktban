@@ -231,12 +231,21 @@ const ownerAgent = "agent"
 // agent-owned transition leaves fromRole, which is the board saying this
 // column is not something to hand to an agent.
 //
-// order is the board's own role order (from board.roles). Ownership is a map,
-// so "the first agent-owned transition" needs one: candidates are ranked by
-// their target's position on the board, then by name, so the answer is the
-// same on every run and reads as "the next lane" rather than "whichever the
-// runtime happened to hash first". No role name is hard-coded; a board that
-// renames its lanes keeps working.
+// order is the board's own role order (from board.roles). It does two jobs.
+//
+// It decides "first": ownership is a map, so candidates are ranked by their
+// target's position on the board, and the answer is the same on every run and
+// reads as "the next lane" rather than "whichever the runtime happened to
+// hash first".
+//
+// And it decides acceptability. A target the board does not list is dropped,
+// not merely ranked last: it is a role this board cannot show, so moving a
+// ticket into it would take the card off the board — a config typo
+// ("todo->in_progres") must refuse rather than transition somewhere nobody
+// can see. An empty order (a board that has not loaded its roles yet) has
+// nothing to check against, so it falls back to ranking by name alone.
+//
+// No role name is hard-coded; a board that renames its lanes keeps working.
 func AgentTarget(ownership map[string]string, fromRole string, order []string) (string, bool) {
 	var targets []string
 	for transition, owner := range ownership {
@@ -247,9 +256,14 @@ func AgentTarget(ownership map[string]string, fromRole string, order []string) (
 		if !ok || strings.TrimSpace(from) != fromRole {
 			continue
 		}
-		if to = strings.TrimSpace(to); to != "" {
-			targets = append(targets, to)
+		to = strings.TrimSpace(to)
+		if to == "" {
+			continue
 		}
+		if len(order) > 0 && !slices.Contains(order, to) {
+			continue // a lane this board does not have
+		}
+		targets = append(targets, to)
 	}
 	if len(targets) == 0 {
 		return "", false
@@ -258,7 +272,7 @@ func AgentTarget(ownership map[string]string, fromRole string, order []string) (
 		if i := slices.Index(order, role); i >= 0 {
 			return i
 		}
-		return len(order) // unknown to the board: after everything it knows
+		return len(order)
 	}
 	slices.SortFunc(targets, func(a, b string) int {
 		if d := rank(a) - rank(b); d != 0 {

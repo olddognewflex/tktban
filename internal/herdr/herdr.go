@@ -22,6 +22,7 @@ import (
 const (
 	envHerdr    = "HERDR_ENV"                 // "1" inside any herdr-managed pane
 	envStateDir = "HERDR_PLUGIN_STATE_DIR"    // per-plugin writable state dir
+	envPluginID = "HERDR_PLUGIN_ID"           // the plugin herdr is running
 	envContext  = "HERDR_PLUGIN_CONTEXT_JSON" // invocation context (actions, panes)
 	envSocket   = "HERDR_SOCKET_PATH"         // unix socket of the herdr server API
 )
@@ -41,6 +42,7 @@ type Context struct {
 type Env struct {
 	InHerdr    bool    // HERDR_ENV == "1"
 	StateDir   string  // HERDR_PLUGIN_STATE_DIR, "" when unset
+	PluginID   string  // HERDR_PLUGIN_ID, "" when unset
 	SocketPath string  // HERDR_SOCKET_PATH, "" when unset
 	Context    Context // zero when HERDR_PLUGIN_CONTEXT_JSON is unset or invalid
 }
@@ -51,6 +53,7 @@ func FromEnv(getenv func(string) string) Env {
 	e := Env{
 		InHerdr:    getenv(envHerdr) == "1",
 		StateDir:   getenv(envStateDir),
+		PluginID:   getenv(envPluginID),
 		SocketPath: getenv(envSocket),
 	}
 	if raw := getenv(envContext); raw != "" {
@@ -60,6 +63,19 @@ func FromEnv(getenv func(string) string) Env {
 		}
 	}
 	return e
+}
+
+// IsPlugin reports whether herdr started this process as a plugin, rather
+// than it being a command someone typed in a herdr terminal pane. herdr sets
+// the HERDR_PLUGIN_* variables only for plugin processes, so either of them
+// is the signal; a plain pane has HERDR_ENV and a socket and nothing else.
+//
+// The distinction matters because a plugin process and a person's shell have
+// very different working directories: herdr starts a plugin pane in the
+// plugin's own install checkout unless the launcher passes --cwd, while a
+// shell is wherever the person cd'd to (see DispatchDir).
+func (e Env) IsPlugin() bool {
+	return e.InHerdr && (e.StateDir != "" || e.PluginID != "")
 }
 
 // statFunc matches os.Stat so tests can fake the filesystem.

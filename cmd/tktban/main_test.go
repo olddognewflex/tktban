@@ -326,8 +326,14 @@ func TestDispatchDirGating(t *testing.T) {
 		{"on, inside herdr, uses the focused pane", on, inHerdrWithContext, herdrOpts{}, "/work", "/pane"},
 		// The guard that matters: a plugin pane with no context runs in
 		// tktban's own install checkout, so there is no safe directory.
-		{"on, inside herdr, no context at all", on, map[string]string{"HERDR_ENV": "1"},
-			herdrOpts{}, "/plugin/install", ""},
+		{"on, a plugin pane with no context at all", on, map[string]string{
+			"HERDR_ENV": "1", "HERDR_PLUGIN_STATE_DIR": "/state/odnf.tktban",
+		}, herdrOpts{}, "/plugin/install", ""},
+		// An ordinary herdr terminal pane is not a plugin process: its
+		// working directory is exactly the repo the person meant.
+		{"on, a plain herdr terminal pane", on, map[string]string{
+			"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock",
+		}, herdrOpts{}, "/src/tktban", "/src/tktban"},
 		{"--no-herdr-dispatch wins over the setting", on, nil, herdrOpts{noDispatch: true}, "/work", ""},
 	}
 	for _, c := range cases {
