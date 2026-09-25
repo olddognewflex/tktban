@@ -13,6 +13,13 @@ import (
 
 // captureRunner is a fake tkt Runner: it records argv and replies with canned
 // JSON keyed off the verb, so the UI can be driven without a real tkt or a TTY.
+//
+// It has no mutex, and that is deliberate: please do not add one. Every test
+// here drives the model synchronously, so there is nothing to race — and the
+// unsynchronised append is itself a guard. A tkt call issued from a bare
+// goroutine rather than a tea.Cmd would land concurrently with the test's own
+// recorded calls, and `go test -race` would report it. A mutex would make
+// that write safe, and silently take the detector away.
 type captureRunner struct {
 	calls [][]string
 	// vcs and ownership override the canned `tkt cfg` replies the dispatch
@@ -27,10 +34,12 @@ type captureRunner struct {
 	ctxCalls   []ctxCall
 }
 
-// ctxCall is one observed invocation and whether it was bounded.
+// ctxCall is one observed invocation: whether it was bounded, and whether its
+// context was still live when the call was made.
 type ctxCall struct {
 	args     []string
 	deadline bool
+	live     bool
 }
 
 // failReply asks captureRunner for a failed tkt invocation.
@@ -40,7 +49,7 @@ func (c *captureRunner) run(ctx context.Context, bin string, args, env []string)
 	c.calls = append(c.calls, args)
 	if c.observeCtx {
 		_, ok := ctx.Deadline()
-		c.ctxCalls = append(c.ctxCalls, ctxCall{args: args, deadline: ok})
+		c.ctxCalls = append(c.ctxCalls, ctxCall{args: args, deadline: ok, live: ctx.Err() == nil})
 	}
 	switch {
 	case eq(args, "cfg", "board.roles", "--json"):

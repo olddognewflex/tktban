@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/olddognewflex/tktban/internal/model"
 )
@@ -101,6 +102,12 @@ func defaultRunner(ctx context.Context, bin string, args, env []string) ([]byte,
 	// CommandContext, not Command: a wedged tkt must die with its deadline,
 	// not outlive the board that asked it a question.
 	cmd := exec.CommandContext(ctx, bin, args...)
+	// Killing tkt is not enough on its own: Run still waits on the goroutines
+	// copying stdout and stderr, and a grandchild that inherited the pipe
+	// holds them open after its parent dies. WaitDelay gives that a second
+	// and then closes the pipes, so a deadline really does end the call —
+	// which is what the dispatch's latch is relying on.
+	cmd.WaitDelay = time.Second
 	if env != nil {
 		cmd.Env = env
 	}

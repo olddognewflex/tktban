@@ -523,6 +523,21 @@ func TestEndedContextReportsATimeout(t *testing.T) {
 	}
 }
 
+// Killing the process is not the whole job. Run also waits on the goroutines
+// copying stdout and stderr, and a grandchild that inherited the pipe holds
+// them open after its parent is gone — so without a WaitDelay the call hangs
+// on a dead process's leftovers, and the dispatch latch hangs with it.
+//
+// `sleep 5 &` is the witness: the shell exits at once, the background child
+// keeps stdout open for five seconds. WaitDelay closes the pipes after one.
+func TestDefaultRunnerDoesNotWaitOnAnOrphanedPipe(t *testing.T) {
+	start := time.Now()
+	defaultRunner(context.Background(), "sh", []string{"-c", "sleep 5 &"}, nil)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("the call took %v: a grandchild holding the pipe can wedge it", elapsed)
+	}
+}
+
 // defaultRunner must use CommandContext: with an already-cancelled context a
 // real subprocess has to come back at once rather than run to completion.
 // `sleep 30` is the witness — exec.Command would wait for all of it, and this

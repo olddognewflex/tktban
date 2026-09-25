@@ -211,7 +211,13 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 		// subprocesses included, runs under this deadline.
 		ctx, cancel := dispatchPrepContext()
 		defer cancel()
-		tk = tk.WithContext(ctx)
+		// A new local, never an assignment back to the captured tk. Binding
+		// the bounded copy to the parameter would outlive this invocation:
+		// a second call of the same command would start out holding the first
+		// call's already-cancelled context and time out every read before
+		// making it. Bubble Tea runs a command once, so nothing does that
+		// today — but a retry is exactly the shape that would.
+		btk := tk.WithContext(ctx)
 
 		// Both config readers are best-effort and answer a zero value for any
 		// failure, a timeout included, so a timed-out read would otherwise
@@ -223,7 +229,7 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 			return &dispatchPrepMsg{err: refuse("Timed out reading the tkt config for %s", t.key)}
 		}
 
-		vcs := tk.VCS()
+		vcs := btk.VCS()
 		if out := timedOut(); out != nil {
 			return *out
 		}
@@ -239,7 +245,7 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 				"branch_fmt %q doesn't name %s: the board could never badge or jump to its agent",
 				vcs.BranchFmt, t.key)}
 		}
-		ownership := tk.BoardOwnership()
+		ownership := btk.BoardOwnership()
 		if out := timedOut(); out != nil {
 			return *out
 		}

@@ -832,15 +832,16 @@ func dispatchBodyWidth(width int) int {
 }
 
 func (m dispatchModal) View(st styles, width, height int) string {
-	// Every line goes through wrap. The plan holds real repository paths, a
-	// branch built from a ticket summary and a multi-line prompt, none of
-	// which have a length this dialog controls, so nothing may be written
+	// Every line goes through wrap, the title included. The plan holds real
+	// repository paths, a branch built from a ticket summary, a multi-line
+	// prompt and a ticket key — and nothing bounds a key's length, so even
+	// the title is not a line this dialog controls. Nothing may be written
 	// out unwrapped.
 	inner := dispatchBodyWidth(width)
 	wrap := lipgloss.NewStyle().Width(inner).Render
 
 	var b strings.Builder
-	b.WriteString(st.dialogTitle.Render("Dispatch "+m.plan.Key) + "\n")
+	b.WriteString(wrap(st.dialogTitle.Render("Dispatch "+m.plan.Key)) + "\n")
 	if m.plan.Summary != "" {
 		b.WriteString(wrap(st.cardSummary.Render(m.plan.Summary)) + "\n")
 	}

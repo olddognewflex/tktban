@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -119,22 +120,68 @@ func pressD(t *testing.T, m Model) Model {
 // An allowlist, not a denylist. A denylist of write verbs would quietly stop
 // covering the moment the create sequence reaches for a verb nobody thought
 // to list, which is exactly when it matters.
+//
+// lane-time is not on it. It is a read only when it is passed --read-only;
+// without the flag it records a worklog, so it is checked by isRead below
+// rather than blessed by name.
 var dispatchReadVerbs = map[string]bool{
-	"cfg":       true, // board.roles, priorities, vcs, board.ownership
-	"list":      true,
-	"lane-time": true, // --read-only, so it records no worklog
-	"view":      true,
+	"cfg":  true, // board.roles, priorities, vcs, board.ownership
+	"list": true,
+	"view": true,
 }
 
-// nonReadCall returns the first tkt invocation that was not one of those, or
+// isRead reports whether one recorded tkt invocation changed nothing.
+func isRead(call []string) bool {
+	if len(call) == 0 {
+		return true
+	}
+	if call[0] == "lane-time" {
+		// The flag is the whole difference between reading a lane's time and
+		// writing a worklog entry for it, so require it rather than trust the
+		// verb.
+		return slices.Contains(call, "--read-only")
+	}
+	return dispatchReadVerbs[call[0]]
+}
+
+// nonReadCall returns the first tkt invocation that changed something, or
 // nil. A dry run must not transition a ticket, comment on one or edit one.
 func nonReadCall(cr *captureRunner) []string {
 	for _, call := range cr.calls {
-		if len(call) > 0 && !dispatchReadVerbs[call[0]] {
+		if !isRead(call) {
 			return call
 		}
 	}
 	return nil
+}
+
+// The allowlist has to be wrong about the two cases that matter, or it is not
+// checking anything: a write verb, and a lane-time that is not read-only.
+func TestNonReadCallCatchesWritesAndAWritingLaneTime(t *testing.T) {
+	reads := [][]string{
+		{"cfg", "board.roles", "--json"},
+		{"list", "--query", "all", "--json"},
+		{"lane-time", "--keys", "TKT-1:todo", "--read-only", "--json"},
+		{"view", "TKT-1", "--json"},
+	}
+	writes := [][]string{
+		{"transition", "TKT-1", "done"},
+		{"comment", "TKT-1", "hi"},
+		{"edit", "TKT-1", "--summary", "x"},
+		{"create", "--type", "Story"},
+		{"apply", "TKT-1", "--file", "/tmp/x"},
+		// The one the verb name alone would have blessed.
+		{"lane-time", "--keys", "TKT-1:todo", "--json"},
+	}
+	if call := nonReadCall(&captureRunner{calls: reads}); call != nil {
+		t.Errorf("a read was reported as a write: %v", call)
+	}
+	for _, w := range writes {
+		cr := &captureRunner{calls: append(append([][]string(nil), reads...), w)}
+		if call := nonReadCall(cr); call == nil {
+			t.Errorf("tkt %v was not caught", w)
+		}
+	}
 }
 
 // Every rung of the ladder says which one it was and opens nothing. A key
@@ -373,6 +420,50 @@ func TestDispatchTimesOutReadingTheConfig(t *testing.T) {
 	}
 }
 
+// The preparation must not carry its context out of the invocation that made
+// it. Bubble Tea runs a command once, so nothing calls one twice today — but
+// a command that bound its bounded Tkt back onto the captured parameter would
+// hand the next call an already-cancelled context and time out every read
+// before making it, which is exactly the shape a retry budget has.
+func TestDispatchPrepCommandIsReusable(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	cr.observeCtx = true
+	m, cmd := update(m, key("D"))
+	if cmd == nil {
+		t.Fatal("D did not start a preparation")
+	}
+
+	for i := range 3 {
+		msg, ok := cmd().(dispatchPrepMsg)
+		if !ok {
+			t.Fatalf("call %d produced %T", i, msg)
+		}
+		if msg.err != nil {
+			t.Fatalf("call %d failed: %v — the command kept the previous call's context", i, msg.err)
+		}
+		if msg.plan.Key != "TKT-1" {
+			t.Fatalf("call %d planned %s", i, msg.plan.Key)
+		}
+	}
+	if len(src.listed) != 3 {
+		t.Fatalf("worktree.list calls = %v, want one per invocation", src.listed)
+	}
+	// The invariant underneath: every read runs under a context that is both
+	// bounded and still live. A context that outlived the invocation that
+	// made it would show up here as a read against an already-ended one.
+	if len(cr.ctxCalls) != 6 {
+		t.Fatalf("observed %d tkt reads, want two per invocation: %+v", len(cr.ctxCalls), cr.ctxCalls)
+	}
+	for i, call := range cr.ctxCalls {
+		if !call.deadline {
+			t.Errorf("read %d (tkt %v) ran with no deadline", i, call.args)
+		}
+		if !call.live {
+			t.Errorf("read %d (tkt %v) ran under an already-ended context", i, call.args)
+		}
+	}
+}
+
 // The two herdr refusals a dispatch has to understand, plus one it does not,
 // which must be reported rather than mistaken for either.
 func TestDispatchPreflightRefusals(t *testing.T) {
@@ -498,6 +589,20 @@ func TestDispatchModalFitsTheTerminal(t *testing.T) {
 	// still holds the prompt exactly as it was built.
 	if strings.Contains(dm.plan.Prompt, "\n\n") != strings.Contains(herdr.DefaultPrompt, "\n\n") {
 		t.Error("rendering the dialog altered the plan's prompt")
+	}
+
+	// The title is a line too. Nothing bounds a ticket key's length —
+	// normalizeKey only trims and uppercases — so a long but perfectly valid
+	// key must not walk out of the dialog either.
+	long := dm
+	long.plan.Key = "VERYLONGPROJECTPREFIX_FOR_A_REAL_TEAM-123456"
+	for _, width := range []int{40, 80, 120} {
+		view := long.View(m.styles, width, 40)
+		for i, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Errorf("long key at width %d: line %d is %d columns:\n%s", width, i, got, line)
+			}
+		}
 	}
 }
 
@@ -658,6 +763,65 @@ func TestDispatchPlanSurvivesARefreshMidPreflight(t *testing.T) {
 	}
 	if !strings.Contains(dm.plan.Branch, "tkt-1") {
 		t.Fatalf("branch = %q, want the original ticket's", dm.plan.Branch)
+	}
+}
+
+// The distinguishing case for the re-check, which no other test covers: the
+// selection moves AND an agent appears — on the card the selection moved to,
+// not on the one being dispatched.
+//
+// A re-check that read the selection would refuse here, naming the wrong
+// ticket; one that reads the plan's own key ignores TKT-7's agent entirely
+// and confirms TKT-1. It is the guard for that exact line.
+func TestDispatchRecheckUsesThePlanNotTheSelection(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	m = pressD(t, m)
+	if _, ok := m.modal.(dispatchModal); !ok {
+		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+
+	// An auto-refresh re-points the selection at a different ticket.
+	m, _ = update(m, boardMsg{
+		roles: []model.RolePair{{Role: "todo", Lane: "To Do"}, {Role: "done", Lane: "Done"}},
+		columns: []model.Column{
+			{Lane: "To Do", Role: "todo", Cards: []model.Card{{Key: "TKT-7", Summary: "something else"}}},
+			{Lane: "Done", Role: "done"},
+		},
+	})
+	if card, _ := m.selectedCard(); card.Key != "TKT-7" {
+		t.Fatalf("setup: selection is %q, want the refreshed card", card.Key)
+	}
+
+	// And an agent appears on THAT ticket — not on the one being dispatched.
+	src.byKey = map[string]herdr.Live{"TKT-7": {
+		Status: herdr.StatusWorking,
+		Panes:  []herdr.PaneRef{{PaneID: "wC:p9", Status: herdr.StatusWorking}},
+	}}
+	m = poll(t, m)
+
+	m, cmd := update(m, key("enter"))
+	res, ok := cmd().(dispatchResultMsg)
+	if !ok || !res.confirmed {
+		t.Fatalf("enter produced %+v", cmd())
+	}
+	if res.plan.Key != "TKT-1" {
+		t.Fatalf("the confirm answered for %s, want TKT-1", res.plan.Key)
+	}
+	m, _ = update(m, res)
+
+	want := "Dry run — dispatch lands in the next change; nothing was created for TKT-1"
+	if m.status != want {
+		t.Fatalf("status = %q (%s), want %q — TKT-7's agent is not TKT-1's",
+			m.status, m.statusKind, want)
+	}
+	if m.statusKind != "" {
+		t.Errorf("status kind = %q, want a plain status", m.statusKind)
+	}
+	if len(src.listed) != 1 {
+		t.Errorf("worktree.list calls = %v, want exactly one", src.listed)
+	}
+	if call := nonReadCall(cr); call != nil {
+		t.Errorf("the dry run ran tkt %v, which is not a read", call)
 	}
 }
 
