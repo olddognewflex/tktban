@@ -29,7 +29,23 @@ import (
 //
 // notify is read by the herdr notification hook, not by the board: false
 // silences its toasts. The board never writes it (see Update).
-var Defaults = map[string]any{"theme": "textual-dark", "hidden_roles": "", "notify": true}
+//
+// The dispatch keys are the same kind of thing: hand-edited, never written by
+// the board. dispatch gates the board's D key and is false by default, because
+// a dispatch cuts a branch and starts an agent — that is not something a board
+// should be able to do the first time someone leans on a key. dispatch_agent
+// is the herdr agent kind to start, dispatch_args extra argv for it (split on
+// spaces), and dispatch_prompt the first prompt; empty dispatch_prompt takes
+// the built-in default (herdr.DefaultPrompt).
+var Defaults = map[string]any{
+	"theme":           "textual-dark",
+	"hidden_roles":    "",
+	"notify":          true,
+	"dispatch":        false,
+	"dispatch_agent":  "claude",
+	"dispatch_args":   "",
+	"dispatch_prompt": "",
+}
 
 // DefaultPath is $XDG_CONFIG_HOME/tktban/settings.toml, falling back to
 // ~/.config/tktban/settings.toml.

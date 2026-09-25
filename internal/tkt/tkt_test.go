@@ -302,3 +302,127 @@ func errAsTkt(err error) (*Error, bool) {
 	te, ok := err.(*Error)
 	return te, ok
 }
+
+// ---- TKB-25: the config a dispatch reads ----
+
+func TestBoardOwnershipArgvAndParse(t *testing.T) {
+	tk, f := newFake(resp{stdout: `{"todo->in_progress": "agent", "in_progress->review": "agent", "review->done": "human"}`})
+	got := tk.BoardOwnership()
+	if got["todo->in_progress"] != "agent" || got["review->done"] != "human" {
+		t.Fatalf("ownership = %v", got)
+	}
+	if argv := f.lastArgv(); !reflect.DeepEqual(argv, []string{"tkt", "cfg", "board.ownership", "--json"}) {
+		t.Fatalf("argv = %v", argv)
+	}
+}
+
+// Best-effort, like BoardHiddenRoles: a board with no ownership config must
+// still open, it just has nothing to dispatch into.
+func TestBoardOwnershipBestEffort(t *testing.T) {
+	for _, r := range []resp{
+		{stderr: "no such key", code: 4},
+		{stdout: "not json"},
+		{stdout: `"a string, not a map"`},
+	} {
+		tk, _ := newFake(r)
+		if got := tk.BoardOwnership(); got != nil {
+			t.Errorf("%+v: ownership = %v, want nil", r, got)
+		}
+	}
+}
+
+func TestVCSArgvAndParse(t *testing.T) {
+	tk, f := newFake(resp{stdout: `{"provider":"github","repo":"olddognewflex/tktban",` +
+		`"default_branch":"main","branch_fmt":"feature/{key-lower}-{slug}",` +
+		`"hotfix_fmt":"hotfix/{key-lower}-{slug}","reviewers":[],"merge":"squash"}`})
+	got := tk.VCS()
+	want := VCSConfig{
+		Provider:      "github",
+		Repo:          "olddognewflex/tktban",
+		DefaultBranch: "main",
+		BranchFmt:     "feature/{key-lower}-{slug}",
+		HotfixFmt:     "hotfix/{key-lower}-{slug}",
+	}
+	if got != want {
+		t.Fatalf("vcs = %+v, want %+v", got, want)
+	}
+	if argv := f.lastArgv(); !reflect.DeepEqual(argv, []string{"tkt", "cfg", "vcs", "--json"}) {
+		t.Fatalf("argv = %v", argv)
+	}
+}
+
+// A failure reads as "no branch convention", which is what the dispatch guard
+// refuses on — never as a half-filled config it might act upon.
+func TestVCSBestEffort(t *testing.T) {
+	for _, r := range []resp{{stderr: "config error", code: 2}, {stdout: "{"}, {runErr: errNotFound}} {
+		tk, _ := newFake(r)
+		if got := tk.VCS(); got != (VCSConfig{}) {
+			t.Errorf("%+v: vcs = %+v, want the zero config", r, got)
+		}
+	}
+}
+
+var errNotFound = &Error{Message: "no binary"}
+
+func TestAgentTarget(t *testing.T) {
+	order := []string{"todo", "in_progress", "review", "done"}
+	full := map[string]string{
+		"todo->in_progress":   "agent",
+		"in_progress->review": "agent",
+		"review->done":        "agent",
+	}
+	cases := []struct {
+		name      string
+		ownership map[string]string
+		from      string
+		want      string
+		wantOK    bool
+	}{
+		{"todo hands off to in_progress", full, "todo", "in_progress", true},
+		{"in_progress hands off to review", full, "in_progress", "review", true},
+		{"the last lane hands off to nothing", full, "done", "", false},
+		{"a human-owned transition is not a dispatch", map[string]string{
+			"todo->in_progress": "human",
+		}, "todo", "", false},
+		{"no ownership at all", nil, "todo", "", false},
+		{"a malformed transition is ignored", map[string]string{
+			"todo": "agent", "->x": "agent", "todo->": "agent",
+		}, "todo", "", false},
+		{"whitespace around the arrow is tolerated", map[string]string{
+			" todo -> in_progress ": "agent",
+		}, "todo", "in_progress", true},
+	}
+	for _, c := range cases {
+		got, ok := AgentTarget(c.ownership, c.from, order)
+		if got != c.want || ok != c.wantOK {
+			t.Errorf("%s: AgentTarget = (%q, %v), want (%q, %v)", c.name, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+// Ownership is a map, so "the first agent-owned transition" needs an order of
+// its own or the answer changes between runs. Board order decides, and the
+// answer has to be the same every time.
+func TestAgentTargetIsDeterministicAcrossMapOrder(t *testing.T) {
+	ownership := map[string]string{
+		"todo->done":        "agent",
+		"todo->review":      "agent",
+		"todo->in_progress": "agent",
+	}
+	order := []string{"todo", "in_progress", "review", "done"}
+	for i := range 50 {
+		got, ok := AgentTarget(ownership, "todo", order)
+		if !ok || got != "in_progress" {
+			t.Fatalf("run %d: AgentTarget = (%q, %v), want the earliest lane on the board", i, got, ok)
+		}
+	}
+	// A target the board does not list sorts after every one it does, and ties
+	// among unknown roles break by name so the answer still never wobbles.
+	unknown := map[string]string{"todo->zeta": "agent", "todo->alpha": "agent"}
+	for i := range 50 {
+		got, _ := AgentTarget(unknown, "todo", order)
+		if got != "alpha" {
+			t.Fatalf("run %d: unknown targets gave %q, want alpha", i, got)
+		}
+	}
+}

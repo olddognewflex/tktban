@@ -272,3 +272,40 @@ func tempFiles(t *testing.T, dir string) []string {
 	}
 	return matches
 }
+
+// TKB-25: the dispatch keys exist with safe defaults. dispatch must default
+// to false — the D key cuts a branch and starts an agent, which is not
+// something a board should do the first time someone leans on a key — and an
+// empty dispatch_prompt means "use the built-in default", not "no prompt".
+func TestDispatchDefaults(t *testing.T) {
+	want := map[string]any{
+		"dispatch":        false,
+		"dispatch_agent":  "claude",
+		"dispatch_args":   "",
+		"dispatch_prompt": "",
+	}
+	for k, v := range want {
+		got, known := Defaults[k]
+		if !known {
+			t.Errorf("%s is missing from Defaults", k)
+			continue
+		}
+		if got != v {
+			t.Errorf("Defaults[%q] = %v, want %v", k, got, v)
+		}
+	}
+	// And they round-trip through the file, so a hand edit survives a reload.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.toml")
+	if err := Save(path, map[string]any{
+		"dispatch": true, "dispatch_agent": "codex", "dispatch_args": "--yolo",
+		"dispatch_prompt": "do {key}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := Load(path)
+	if got["dispatch"] != true || got["dispatch_agent"] != "codex" ||
+		got["dispatch_args"] != "--yolo" || got["dispatch_prompt"] != "do {key}" {
+		t.Fatalf("dispatch settings did not round-trip: %v", got)
+	}
+}

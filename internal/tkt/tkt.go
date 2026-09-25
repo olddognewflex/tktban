@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/olddognewflex/tktban/internal/model"
@@ -203,6 +204,92 @@ func (t *Tkt) BoardHiddenRoles() []string {
 	var out []string
 	if err := t.runJSON([]string{"cfg", "ui.board.hidden_roles", "--json"}, &out); err != nil {
 		return nil
+	}
+	return out
+}
+
+// BoardOwnership returns the `[board] ownership` map from
+// `tkt cfg board.ownership --json`: a transition ("todo->in_progress") to who
+// owns it ("agent" or "human").
+//
+// Best-effort, like BoardHiddenRoles: a missing key or any read error yields
+// nil. A board with no ownership config simply has no agent-owned transition
+// to dispatch into, and the caller says so.
+func (t *Tkt) BoardOwnership() map[string]string {
+	var out map[string]string
+	if err := t.runJSON([]string{"cfg", "board.ownership", "--json"}, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// ownerAgent is the ownership value that means an agent drives the transition.
+const ownerAgent = "agent"
+
+// AgentTarget is the role an agent-owned transition moves fromRole to: the
+// lane a ticket lands in when an agent picks it up. ok is false when no
+// agent-owned transition leaves fromRole, which is the board saying this
+// column is not something to hand to an agent.
+//
+// order is the board's own role order (from board.roles). Ownership is a map,
+// so "the first agent-owned transition" needs one: candidates are ranked by
+// their target's position on the board, then by name, so the answer is the
+// same on every run and reads as "the next lane" rather than "whichever the
+// runtime happened to hash first". No role name is hard-coded; a board that
+// renames its lanes keeps working.
+func AgentTarget(ownership map[string]string, fromRole string, order []string) (string, bool) {
+	var targets []string
+	for transition, owner := range ownership {
+		if owner != ownerAgent {
+			continue
+		}
+		from, to, ok := strings.Cut(transition, "->")
+		if !ok || strings.TrimSpace(from) != fromRole {
+			continue
+		}
+		if to = strings.TrimSpace(to); to != "" {
+			targets = append(targets, to)
+		}
+	}
+	if len(targets) == 0 {
+		return "", false
+	}
+	rank := func(role string) int {
+		if i := slices.Index(order, role); i >= 0 {
+			return i
+		}
+		return len(order) // unknown to the board: after everything it knows
+	}
+	slices.SortFunc(targets, func(a, b string) int {
+		if d := rank(a) - rank(b); d != 0 {
+			return d
+		}
+		return strings.Compare(a, b)
+	})
+	return targets[0], true
+}
+
+// VCSConfig is the `[vcs]` block from `tkt cfg vcs --json` — the branch
+// convention a dispatch has to follow so the board can find the agent again.
+type VCSConfig struct {
+	Provider      string `json:"provider"`
+	Repo          string `json:"repo"`
+	DefaultBranch string `json:"default_branch"`
+	BranchFmt     string `json:"branch_fmt"`
+	HotfixFmt     string `json:"hotfix_fmt"`
+}
+
+// VCS reads the [vcs] config. Best-effort: a zero VCSConfig on any failure,
+// which the caller reads as "no branch convention", and refuses to dispatch.
+//
+// The format is returned unrendered on purpose. `tkt cfg vcs.branch_fmt
+// --ticket X` renders it with an empty slug, which yields a branch ending in a
+// bare separator, so the caller has to own slugification anyway — and then it
+// may as well own the whole substitution (herdr.RenderBranch).
+func (t *Tkt) VCS() VCSConfig {
+	var out VCSConfig
+	if err := t.runJSON([]string{"cfg", "vcs", "--json"}, &out); err != nil {
+		return VCSConfig{}
 	}
 	return out
 }
