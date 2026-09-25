@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,11 +93,11 @@ func TestEditorClosedTrailingNewlineIsNoChange(t *testing.T) {
 // A web-URL backend (no local file) is rejected with a clear message.
 func TestPrepEditorEditRejectsNonLocalURL(t *testing.T) {
 	cr := &captureRunner{}
-	runner := func(bin string, args, env []string) ([]byte, []byte, int, error) {
+	runner := func(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 		if len(args) >= 1 && args[0] == "view" {
 			return []byte(`{"key":"TKB-1","url":"https://example.com/TKB-1"}`), nil, 0, nil
 		}
-		return cr.run(bin, args, env)
+		return cr.run(ctx, bin, args, env)
 	}
 	tk := tkt.New("", "tkt").WithRunner(runner)
 	msg := prepEditorEditCmd(tk, "TKB-1")().(editorPrepMsg)
@@ -174,11 +175,11 @@ func TestPrepEditorCreate(t *testing.T) {
 func TestPrepEditorEditReadsTicketFile(t *testing.T) {
 	src := tempMD(t, "---\ntype: Story\n---\n# existing\n")
 	cr := &captureRunner{}
-	runner := func(bin string, args, env []string) ([]byte, []byte, int, error) {
+	runner := func(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 		if len(args) >= 1 && args[0] == "view" {
 			return []byte(`{"key":"TKB-1","url":"` + src + `"}`), nil, 0, nil
 		}
-		return cr.run(bin, args, env)
+		return cr.run(ctx, bin, args, env)
 	}
 	tk := tkt.New("", "tkt").WithRunner(runner)
 	msg := prepEditorEditCmd(tk, "TKB-1")().(editorPrepMsg)

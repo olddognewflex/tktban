@@ -14,6 +14,7 @@ package tkt
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,13 +47,18 @@ func (e *Error) Error() string { return e.Message }
 // process exit code (0 on success); runErr is non-nil only when the process
 // could not be started at all (e.g. binary not found). It is injectable so
 // tests can stand in for a real subprocess.
-type Runner func(bin string, args, env []string) (stdout, stderr []byte, code int, runErr error)
+//
+// ctx bounds the subprocess itself: cancelling it kills the process rather
+// than only abandoning the wait, which is what lets a caller put a real
+// deadline on a tkt read (see WithContext).
+type Runner func(ctx context.Context, bin string, args, env []string) (stdout, stderr []byte, code int, runErr error)
 
 // Tkt wraps the tkt CLI.
 type Tkt struct {
 	Config string // explicit config path, or "" to let tkt auto-discover
 	Binary string
 	run    Runner
+	ctx    context.Context // nil means context.Background()
 }
 
 // New builds a Tkt. binary defaults to $TKT_BIN, else "tkt".
@@ -72,8 +78,29 @@ func (t *Tkt) WithRunner(r Runner) *Tkt {
 	return t
 }
 
-func defaultRunner(bin string, args, env []string) ([]byte, []byte, int, error) {
-	cmd := exec.Command(bin, args...)
+// WithContext returns a copy of t whose subprocesses are bounded by ctx.
+//
+// A copy, not a mutation: the board holds one long-lived *Tkt for every read
+// it makes, and one caller putting a two-second budget on a config read must
+// not put it on the board's refresh as well. The receiver is untouched.
+func (t *Tkt) WithContext(ctx context.Context) *Tkt {
+	c := *t
+	c.ctx = ctx
+	return &c
+}
+
+// context is the deadline this Tkt's subprocesses run under.
+func (t *Tkt) context() context.Context {
+	if t.ctx == nil {
+		return context.Background()
+	}
+	return t.ctx
+}
+
+func defaultRunner(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
+	// CommandContext, not Command: a wedged tkt must die with its deadline,
+	// not outlive the board that asked it a question.
+	cmd := exec.CommandContext(ctx, bin, args...)
 	if env != nil {
 		cmd.Env = env
 	}
@@ -103,7 +130,14 @@ func (t *Tkt) env() []string {
 // run shells out to a verb. With asJSON, the stdout is returned raw for the
 // caller to unmarshal; otherwise the trimmed stdout string is returned.
 func (t *Tkt) runArgs(args []string) ([]byte, error) {
-	stdout, stderr, code, runErr := t.run(t.Binary, args, t.env())
+	ctx := t.context()
+	stdout, stderr, code, runErr := t.run(ctx, t.Binary, args, t.env())
+	// A killed process reports an exit code of its own; say what actually
+	// happened rather than "exit -1".
+	if err := ctx.Err(); err != nil {
+		return nil, &Error{Message: fmt.Sprintf(
+			"tkt %s did not finish in time (%v)", strings.Join(args, " "), err)}
+	}
 	if runErr != nil {
 		return nil, &Error{Message: fmt.Sprintf(
 			"tkt binary not found: %q. Put tkt on PATH or set TKT_BIN.", t.Binary)}

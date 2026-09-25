@@ -1,10 +1,12 @@
 package tkt
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/olddognewflex/tktban/internal/model"
 )
@@ -26,7 +28,7 @@ type resp struct {
 	runErr error
 }
 
-func (f *fake) run(bin string, args, env []string) ([]byte, []byte, int, error) {
+func (f *fake) run(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 	f.calls = append(f.calls, append([]string{bin}, args...))
 	f.envs = append(f.envs, env)
 	r := f.responses[f.i]
@@ -439,5 +441,101 @@ func TestAgentTargetIsDeterministicAcrossMapOrder(t *testing.T) {
 		if !ok || got != "alpha" {
 			t.Fatalf("run %d: AgentTarget with no order = (%q, %v), want alpha", i, got, ok)
 		}
+	}
+}
+
+// ---- TKB-25: subprocesses run under the caller's deadline ----
+
+// The budget has to reach the subprocess, not merely the wait around it.
+func TestRunnerReceivesTheCallersContext(t *testing.T) {
+	var gotDeadline bool
+	var hadDeadline bool
+	tk := New("", "tkt").WithRunner(func(ctx context.Context, _ string, _, _ []string) ([]byte, []byte, int, error) {
+		_, hadDeadline = ctx.Deadline()
+		gotDeadline = true
+		return []byte(`{}`), nil, 0, nil
+	})
+
+	// Without a context, an ordinary read is unbounded, as every other board
+	// read has always been.
+	tk.BoardOwnership()
+	if !gotDeadline {
+		t.Fatal("the runner never ran")
+	}
+	if hadDeadline {
+		t.Error("a plain Tkt put a deadline on its subprocess")
+	}
+
+	// With one, the deadline is handed down.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	tk.WithContext(ctx).BoardOwnership()
+	if !hadDeadline {
+		t.Error("WithContext did not hand its deadline to the runner")
+	}
+}
+
+// WithContext is a copy: a caller putting a two-second budget on one read
+// must not put it on the board's refresh as well.
+func TestWithContextDoesNotMutateTheReceiver(t *testing.T) {
+	var deadlines []bool
+	tk := New("", "tkt").WithRunner(func(ctx context.Context, _ string, _, _ []string) ([]byte, []byte, int, error) {
+		_, ok := ctx.Deadline()
+		deadlines = append(deadlines, ok)
+		return []byte(`{}`), nil, 0, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	bounded := tk.WithContext(ctx)
+	bounded.BoardOwnership()
+	tk.BoardOwnership() // the original, afterwards
+	if len(deadlines) != 2 || !deadlines[0] || deadlines[1] {
+		t.Fatalf("deadlines seen = %v, want [true false]", deadlines)
+	}
+	if bounded == tk {
+		t.Error("WithContext returned the receiver itself")
+	}
+}
+
+// A killed process reports an exit code of its own, so without this the
+// caller is told "exit -1" for what is really a timeout.
+func TestEndedContextReportsATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f := &fake{responses: []resp{{stdout: `{"a":"b"}`}}}
+	tk := New("", "tkt").WithRunner(f.run).WithContext(ctx)
+
+	_, err := tk.Roles()
+	if err == nil {
+		t.Fatal("a read under an ended context must fail")
+	}
+	if !strings.Contains(err.Error(), "did not finish in time") {
+		t.Fatalf("err = %q, want it to name the timeout", err)
+	}
+	// And the best-effort readers answer their zero value, which is what the
+	// dispatch guards refuse on.
+	if got := tk.BoardOwnership(); got != nil {
+		t.Errorf("BoardOwnership under an ended context = %v, want nil", got)
+	}
+	if got := tk.VCS(); got != (VCSConfig{}) {
+		t.Errorf("VCS under an ended context = %+v, want the zero config", got)
+	}
+}
+
+// defaultRunner must use CommandContext: with an already-cancelled context a
+// real subprocess has to come back at once rather than run to completion.
+// `sleep 30` is the witness — exec.Command would wait for all of it, and this
+// test spends no wall-clock time at all.
+func TestDefaultRunnerKillsRatherThanWaits(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, _, _, runErr := defaultRunner(ctx, "sh", []string{"-c", "sleep 30"}, nil)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("the subprocess ran for %v: the context is not bounding it", elapsed)
+	}
+	if runErr == nil {
+		t.Fatal("a cancelled context must fail the run")
 	}
 }

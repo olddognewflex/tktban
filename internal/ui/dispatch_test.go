@@ -290,10 +290,79 @@ func TestDispatchConfigRefusals(t *testing.T) {
 			if m.modal != nil {
 				t.Errorf("a refused dispatch opened a %T", m.modal)
 			}
+			if m.dispatching {
+				t.Error("the latch stayed set, so D would refuse for the rest of the session")
+			}
 			if len(src.listed) != 0 {
 				t.Errorf("a config refusal still called herdr: %v", src.listed)
 			}
 		})
+	}
+}
+
+// withPrepContext swaps the preparation's budget for the test's own.
+func withPrepContext(t *testing.T, mk func() (context.Context, context.CancelFunc)) {
+	t.Helper()
+	orig := dispatchPrepContext
+	dispatchPrepContext = mk
+	t.Cleanup(func() { dispatchPrepContext = orig })
+}
+
+// The budget has to bound the tkt config reads, not just the herdr call:
+// they are subprocesses, and startDispatch latches m.dispatching until a
+// result comes back, so an unbounded read would leave D refusing for the
+// rest of the session.
+func TestDispatchBudgetReachesTheTktReads(t *testing.T) {
+	m, _, cr := dispatchBoard(t)
+	cr.observeCtx = true
+	m = pressD(t, m)
+	if _, ok := m.modal.(dispatchModal); !ok {
+		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+	if len(cr.ctxCalls) != 2 {
+		t.Fatalf("observed %d tkt reads, want the dispatch's two config reads: %+v", len(cr.ctxCalls), cr.ctxCalls)
+	}
+	for _, call := range cr.ctxCalls {
+		if !call.deadline {
+			t.Errorf("tkt %v ran with no deadline: the budget never reached the subprocess", call.args)
+		}
+	}
+}
+
+// And when the budget runs out during those reads, the board says so — both
+// config readers answer their zero value for any failure, so without this a
+// timeout would come out as "no branch_fmt configured" — and the latch
+// clears, so D works again.
+func TestDispatchTimesOutReadingTheConfig(t *testing.T) {
+	withPrepContext(t, func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // the budget is already gone when the command starts
+		return ctx, cancel
+	})
+	m, src, _ := dispatchBoard(t)
+	m = pressD(t, m)
+
+	want := "Timed out reading the tkt config for TKT-1"
+	if m.status != want || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+	}
+	if m.modal != nil {
+		t.Errorf("a timed-out preparation opened a %T", m.modal)
+	}
+	if m.dispatching {
+		t.Error("the latch stayed set after a timeout, so D would refuse forever")
+	}
+	if len(src.listed) != 0 {
+		t.Errorf("a timed-out preparation still called herdr: %v", src.listed)
+	}
+
+	// The latch really is clear: a second D with the budget restored works.
+	withPrepContext(t, func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), dispatchPrepTimeout)
+	})
+	m = pressD(t, m)
+	if _, ok := m.modal.(dispatchModal); !ok {
+		t.Fatalf("after a timeout the next D gave %T (status %q)", m.modal, m.status)
 	}
 }
 
@@ -325,6 +394,9 @@ func TestDispatchPreflightRefusals(t *testing.T) {
 			}
 			if m.modal != nil {
 				t.Errorf("a refused preflight opened a %T", m.modal)
+			}
+			if m.dispatching {
+				t.Error("the latch stayed set, so D would refuse for the rest of the session")
 			}
 			if len(src.listed) != 1 {
 				t.Errorf("worktree.list calls = %v, want exactly one", src.listed)

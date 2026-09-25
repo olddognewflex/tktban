@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,13 +11,13 @@ import (
 
 // runnerWithHiddenDefault wraps the canned captureRunner but answers the
 // `[ui.board] hidden_roles` config lookup with a fixed JSON array.
-func runnerWithHiddenDefault(def string) func(string, []string, []string) ([]byte, []byte, int, error) {
+func runnerWithHiddenDefault(def string) tkt.Runner {
 	cr := &captureRunner{}
-	return func(bin string, args, env []string) ([]byte, []byte, int, error) {
+	return func(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 		if eq(args, "cfg", "ui.board.hidden_roles", "--json") {
 			return []byte(def), nil, 0, nil
 		}
-		return cr.run(bin, args, env)
+		return cr.run(ctx, bin, args, env)
 	}
 }
 

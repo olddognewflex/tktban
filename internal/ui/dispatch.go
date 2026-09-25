@@ -31,7 +31,23 @@ type Dispatcher interface {
 // one herdr worktree.list. It is longer than the 1s every other herdr call
 // gets because a tkt invocation is a Python process start, and shorter than a
 // person's patience for a key that opens a dialog.
+//
+// It has to bound all of it, not just the herdr call. startDispatch latches
+// m.dispatching until a dispatchPrepMsg comes back, so a preparation that
+// never returns would leave D answering "Already preparing a dispatch" for
+// the rest of the session. The budget is what guarantees the latch clears:
+// every path out of dispatchPrepCmd returns a message, and the context makes
+// sure every path is reached — tk.WithContext puts the deadline on the tkt
+// subprocesses themselves, so a wedged tkt is killed rather than waited on.
 const dispatchPrepTimeout = 2 * time.Second
+
+// dispatchPrepContext mints that budget. A variable for the same reason
+// settings.rename and herdr.symbolicRef are: a test needs to see what the
+// code does when the budget has run out, and waiting two real seconds to
+// find out is not a test, it is a delay.
+var dispatchPrepContext = func() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), dispatchPrepTimeout)
+}
 
 // dispatchTarget is the card a dispatch was started from, captured whole at
 // the keypress.
@@ -171,11 +187,30 @@ func (m Model) dispatchAgentKind() string {
 }
 
 // dispatchPrepCmd builds the plan and preflights it, all off the UI loop: two
-// `tkt cfg` subprocesses and exactly one herdr worktree.list, inside one
-// bounded context. It creates nothing.
+// `tkt cfg` subprocesses and exactly one herdr worktree.list, every one of
+// them inside the same bounded context. It creates nothing.
 func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 	return func() tea.Msg {
+		// First statement in the closure: everything below it, tkt
+		// subprocesses included, runs under this deadline.
+		ctx, cancel := dispatchPrepContext()
+		defer cancel()
+		tk = tk.WithContext(ctx)
+
+		// Both config readers are best-effort and answer a zero value for any
+		// failure, a timeout included, so a timed-out read would otherwise
+		// come out as "no branch_fmt configured". Say what happened instead.
+		timedOut := func() *dispatchPrepMsg {
+			if ctx.Err() == nil {
+				return nil
+			}
+			return &dispatchPrepMsg{err: refuse("Timed out reading the tkt config for %s", t.key)}
+		}
+
 		vcs := tk.VCS()
+		if out := timedOut(); out != nil {
+			return *out
+		}
 		if vcs.BranchFmt == "" {
 			return dispatchPrepMsg{err: refuse("No [vcs] branch_fmt in the tkt config, so there is no branch to cut")}
 		}
@@ -188,7 +223,11 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 				"branch_fmt %q doesn't name %s: the board could never badge or jump to its agent",
 				vcs.BranchFmt, t.key)}
 		}
-		targetRole, ok := tkt.AgentTarget(tk.BoardOwnership(), t.role, roleOrder(t.roles))
+		ownership := tk.BoardOwnership()
+		if out := timedOut(); out != nil {
+			return *out
+		}
+		targetRole, ok := tkt.AgentTarget(ownership, t.role, roleOrder(t.roles))
 		if !ok {
 			return dispatchPrepMsg{err: refuse("No agent-owned transition out of %s", laneOf(t.roles, t.role))}
 		}
@@ -207,8 +246,6 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 			AgentArgs:  t.agentArgs,
 			Prompt:     t.prompt,
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), dispatchPrepTimeout)
-		defer cancel()
 		pre, err := herdr.Preflight(ctx, d, plan)
 		return dispatchPrepMsg{plan: plan, pre: pre, err: err}
 	}

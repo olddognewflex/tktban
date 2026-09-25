@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,13 +20,28 @@ type captureRunner struct {
 	// exits non-zero, which both readers treat as "not configured".
 	vcs       string
 	ownership string
+	// observeCtx records, per call made while it is on, whether the context
+	// the runner was handed carried a deadline — i.e. whether the caller's
+	// budget reached the subprocess at all.
+	observeCtx bool
+	ctxCalls   []ctxCall
+}
+
+// ctxCall is one observed invocation and whether it was bounded.
+type ctxCall struct {
+	args     []string
+	deadline bool
 }
 
 // failReply asks captureRunner for a failed tkt invocation.
 const failReply = "!fail"
 
-func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int, error) {
+func (c *captureRunner) run(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 	c.calls = append(c.calls, args)
+	if c.observeCtx {
+		_, ok := ctx.Deadline()
+		c.ctxCalls = append(c.ctxCalls, ctxCall{args: args, deadline: ok})
+	}
 	switch {
 	case eq(args, "cfg", "board.roles", "--json"):
 		return []byte(`{"todo": "To Do", "done": "Done"}`), nil, 0, nil
