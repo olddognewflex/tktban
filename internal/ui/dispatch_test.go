@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/olddognewflex/tktban/internal/herdr"
 	"github.com/olddognewflex/tktban/internal/model"
@@ -374,6 +375,55 @@ func TestDispatchModalShowsTheWholePlan(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("the confirm modal is missing %q:\n%s", want, view)
 		}
+	}
+}
+
+// The dialog is the PR's deliverable, and it is useless if it does not fit.
+// Nothing in the plan has a length the dialog controls — repository paths, a
+// branch built from a ticket summary, a multi-line prompt — so it is checked
+// at the widths people actually run.
+func TestDispatchModalFitsTheTerminal(t *testing.T) {
+	m, _, _ := dispatchBoard(t)
+	// A plan with nothing short in it: a long summary (so a long branch), a
+	// deep repository path, and the built-in prompt.
+	m.columns[0].Cards[0].Summary =
+		"dispatch a ticket to a herdr agent with a great many words in its summary"
+	m = pressD(t, m)
+	dm, ok := m.modal.(dispatchModal)
+	if !ok {
+		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+
+	for _, width := range []int{80, 100, 120, 200, 40} {
+		view := dm.View(m.styles, width, 40)
+		if got := lipgloss.Width(view); got > width {
+			t.Errorf("at width %d the dialog rendered %d columns wide", width, got)
+		}
+		for i, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Errorf("at width %d line %d is %d columns:\n%s", width, i, got, line)
+			}
+		}
+	}
+
+	// Wrapping is display only: the plan the create sequence will consume
+	// still holds the prompt exactly as it was built.
+	if strings.Contains(dm.plan.Prompt, "\n\n") != strings.Contains(herdr.DefaultPrompt, "\n\n") {
+		t.Error("rendering the dialog altered the plan's prompt")
+	}
+}
+
+// The board is sized before the first WindowSizeMsg arrives, and a modal can
+// be asked to render then.
+func TestDispatchModalUnsizedTerminal(t *testing.T) {
+	m, _, _ := dispatchBoard(t)
+	m = pressD(t, m)
+	dm := m.modal.(dispatchModal)
+	if view := dm.View(m.styles, 0, 0); view == "" {
+		t.Fatal("an unsized dialog rendered nothing")
+	}
+	if got := lipgloss.Width(dm.View(m.styles, 0, 0)); got > 90 {
+		t.Fatalf("an unsized dialog rendered %d columns wide", got)
 	}
 }
 

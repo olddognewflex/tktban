@@ -811,11 +811,34 @@ func (m dispatchModal) agentLine() string {
 	return line
 }
 
+// dispatchBodyWidth is the text width inside the dialog: the terminal, less
+// the dialog's own border (2) and padding (4), less a couple of columns so
+// the box never touches the edge, and capped so a wide terminal gets a
+// readable column rather than one very long line.
+//
+// It is computed from the width View is handed rather than one captured when
+// the modal opened, so the dialog re-wraps when the terminal is resized. The
+// create/edit modals take their size at construction only because they have
+// to size bubbles inputs; this one renders plain text and does not.
+func dispatchBodyWidth(width int) int {
+	if width <= 0 {
+		return 72 // unsized (before the first WindowSizeMsg)
+	}
+	return clamp(width-8, 10, 100)
+}
+
 func (m dispatchModal) View(st styles, width, height int) string {
+	// Every line goes through wrap. The plan holds real repository paths, a
+	// branch built from a ticket summary and a multi-line prompt, none of
+	// which have a length this dialog controls, so nothing may be written
+	// out unwrapped.
+	inner := dispatchBodyWidth(width)
+	wrap := lipgloss.NewStyle().Width(inner).Render
+
 	var b strings.Builder
 	b.WriteString(st.dialogTitle.Render("Dispatch "+m.plan.Key) + "\n")
 	if m.plan.Summary != "" {
-		b.WriteString(st.cardSummary.Render(m.plan.Summary) + "\n")
+		b.WriteString(wrap(st.cardSummary.Render(m.plan.Summary)) + "\n")
 	}
 	b.WriteString("\n")
 	for _, row := range [][2]string{
@@ -826,9 +849,9 @@ func (m dispatchModal) View(st styles, width, height int) string {
 		{"worktree", m.worktreeLine()},
 		{"agent", m.agentLine()},
 	} {
-		b.WriteString(st.fieldLabel.Render(row[0]) + "  " + row[1] + "\n")
+		b.WriteString(wrap(st.fieldLabel.Render(row[0])+"  "+row[1]) + "\n")
 	}
-	b.WriteString("\n" + st.fieldLabel.Render("prompt") + "\n" + m.plan.Prompt + "\n")
-	b.WriteString("\n" + st.fieldLabel.Render("Dry run: nothing is created yet. enter close · esc cancel"))
+	b.WriteString("\n" + st.fieldLabel.Render("prompt") + "\n" + wrap(m.plan.Prompt) + "\n")
+	b.WriteString("\n" + wrap(st.fieldLabel.Render("Dry run: nothing is created yet. enter close · esc cancel")))
 	return dialogBox(st, width, height, b.String())
 }
