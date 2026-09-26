@@ -538,7 +538,7 @@ Three calls, in this order, each with its own budget on our side:
 | Stage | Call | Our budget | Note |
 |-------|------|-----------|------|
 | 1 | `worktree.create`, or `worktree.open` when the preflight already saw the branch checked out | 15 s | params exactly `{cwd, branch, base, label, focus:false}` — `worktree.open` the same minus `base` and minus `label` (it is joining a workspace that already has one). No `path`: herdr owns placement. No `trust_repository`: that is a write. |
-| 2 | `agent.start` into `root_pane.pane_id` | 25 s | `timeout_ms: 20000`, deliberately inside our own budget so **herdr's** timer fires first and the failure arrives as a typed error naming what broke, rather than as a closed socket and a bare deadline. |
+| 2 | `agent.start` into `root_pane.pane_id` | 30 s | `timeout_ms: 20000`, deliberately inside our own budget so **herdr's** timer fires first and the failure arrives as a typed error naming what broke, rather than as a closed socket and a bare deadline. The budget bounds the whole retry loop, so it has to be 20 s **plus** the 3.1 s of backoff (`herdr.AgentStartBackoffTotal`) plus margin — 25 s would leave the last attempt 1.9 s and invert the relation. |
 | 3 | `agent.prompt` | 5 s | `{target, text}` only. herdr accepts a `wait` object; it is never sent, because a board must not block on an agent reaching a status. |
 
 Then two `tkt` writes, 5 s each: `transition` (only when the agent really
@@ -549,10 +549,22 @@ and `comment` (always).
   `worktree_created` without a pane id would otherwise turn into a confusing
   `invalid_agent_argument` three seconds later; it is reported at the stage
   that actually went wrong.
-- **The agent name that starts may not be the one the plan wanted.** After an
-  `agent_name_taken` retry it is `tkb-25-2`, and `agent.prompt` has to target
-  *that* — otherwise the prompt lands in the older agent's pane. The result
-  carries the name herdr actually registered, not the planned one.
+- **`AgentInfo` carries `name` as a field of its own, distinct from `agent`.**
+  `agent` is the *kind* (`"claude"`); `name` is the identity `agent.prompt` and
+  `agent.get` take as a `target`. tktban decodes it and prompts **the name in
+  herdr's reply**, falling back to the name it sent only if herdr answers
+  without one. Prompting the sent name is how a prompt lands in another agent's
+  pane — which is reachable, because an `agent_name_taken` retry changes the
+  name to `tkb-25-2`, and herdr is free to normalise or disambiguate one of its
+  own accord. The result therefore carries herdr's name, while the name that
+  was *sent* stays on the start stats, so a refusal can still say which name it
+  tried.
+- **An `agent.start` we did not get an answer to is not a failed start.** herdr
+  answering with a code means herdr decided not to; a closed socket or an
+  expired deadline means we do not know, and herdr may have gone on to start
+  it. Every sentence built from such a failure says "may or may not be
+  running — check the pane", because the alternative sends someone to start a
+  second agent on the same branch.
 
 ### The retry budget, and why it is shaped like that
 

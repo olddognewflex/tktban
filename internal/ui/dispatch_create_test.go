@@ -305,7 +305,7 @@ func TestDispatchFailureMatrix(t *testing.T) {
 			wantTransition: nil,
 			wantComment: []string{
 				"feature/tkt-1-first-thing", "/wt/tkt-1 (created)", "wE", "wE:p1",
-				"agent_blocked", "not started; the worktree and its pane were left in place",
+				"agent_blocked", "not started (tkt-1); the worktree and its pane were left in place",
 			},
 		},
 		{
@@ -722,7 +722,7 @@ func TestDispatchSurvivesABoardRefreshMidSequence(t *testing.T) {
 func TestDispatchStageBudgets(t *testing.T) {
 	want := map[herdr.Stage]time.Duration{
 		herdr.StageWorktree: 15 * time.Second,
-		herdr.StageAgent:    25 * time.Second,
+		herdr.StageAgent:    30 * time.Second,
 		herdr.StagePrompt:   5 * time.Second,
 	}
 	for stage, d := range want {
@@ -730,11 +730,16 @@ func TestDispatchStageBudgets(t *testing.T) {
 			t.Errorf("%v budget = %v, want %v", stage, got, d)
 		}
 	}
-	// herdr's own agent.start timeout has to fire before ours, or a herdr
-	// timeout arrives as a closed socket instead of a typed error.
-	if herdr.AgentStartTimeoutMS*int(time.Millisecond) >= int(dispatchStageBudget(herdr.StageAgent)) {
-		t.Fatalf("herdr's %dms start timeout is not inside our %v budget",
-			herdr.AgentStartTimeoutMS, dispatchStageBudget(herdr.StageAgent))
+	// The relation that matters, and the one a single-attempt check gets wrong:
+	// the agent stage bounds the WHOLE retry loop, so the last attempt must
+	// still have herdr's full startup timeout inside our budget after the
+	// backoff has been spent. Otherwise our deadline cuts it short and a herdr
+	// timeout — which names what failed — becomes a closed socket, which cannot
+	// even say whether the agent started.
+	needed := time.Duration(herdr.AgentStartTimeoutMS)*time.Millisecond + herdr.AgentStartBackoffTotal()
+	if got := dispatchStageBudget(herdr.StageAgent); needed >= got {
+		t.Fatalf("the agent stage gets %v, but herdr's %dms timeout plus %v of backoff needs %v",
+			got, herdr.AgentStartTimeoutMS, herdr.AgentStartBackoffTotal(), needed)
 	}
 
 	// And the contexts really are bounded, per stage, as the board mints them.
@@ -759,7 +764,7 @@ func TestDispatchStageBudgets(t *testing.T) {
 	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
 		t.Fatalf("status = %q", m.status)
 	}
-	wantSeen := []time.Duration{15 * time.Second, 25 * time.Second, 5 * time.Second}
+	wantSeen := []time.Duration{15 * time.Second, 30 * time.Second, 5 * time.Second}
 	if !slices.Equal(seen, wantSeen) {
 		t.Fatalf("stage budgets minted = %v, want %v", seen, wantSeen)
 	}
@@ -1204,6 +1209,96 @@ func countCalls(cr *captureRunner, verb string) int {
 		}
 	}
 	return n
+}
+
+// ---- an agent whose fate herdr never reported ----
+
+// The one case where the header and the comment used to contradict each other:
+// our own deadline cancelled agent.start, so we do not know whether herdr went
+// on to start it. Asserting "not started" there is the guess that sends someone
+// to dispatch a second agent onto the same branch.
+func TestDispatchAgentStartWithNoAnswerAdmitsItMayHaveStarted(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create = createdWorktree()
+	src.startErrs = []error{context.DeadlineExceeded}
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start")
+	for _, want := range []string{
+		"TKT-1's worktree is ready at /wt/tkt-1",
+		"agent.start did not answer",
+		"the agent may or may not be running",
+		"check the pane (o) before dispatching again",
+		"Nothing was removed",
+	} {
+		if !strings.Contains(m.status, want) {
+			t.Errorf("status = %q, want it to contain %q", m.status, want)
+		}
+	}
+	// And above all it must NOT assert the agent did not start.
+	if strings.Contains(m.status, "the agent did not start") {
+		t.Errorf("status = %q asserts something we cannot know", m.status)
+	}
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment")
+	}
+	if !strings.Contains(comment[2], "may or may not have started (tkt-1)") {
+		t.Errorf("the comment does not admit the uncertainty:\n%s", comment[2])
+	}
+	if strings.Contains(comment[2], "not started (tkt-1); the worktree") {
+		t.Errorf("the comment contradicts its own header:\n%s", comment[2])
+	}
+	if cr.last("transition") != nil {
+		t.Error("the lane moved on an agent whose state is unknown")
+	}
+
+	// A herdr error code, by contrast, means herdr decided not to: that one is
+	// allowed to say so plainly.
+	m2, src2, cr2 := dispatchBoard(t)
+	src2.create = createdWorktree()
+	src2.startErrs = []error{&herdr.APIError{Code: herdr.CodeInvalidAgentArgument, Message: "bad --flag"}}
+	m2 = dispatchOnce(t, m2)
+	if !strings.Contains(m2.status, "the agent did not start") {
+		t.Errorf("status = %q, want the plain wording for a herdr refusal", m2.status)
+	}
+	if strings.Contains(m2.status, "may or may not") {
+		t.Errorf("status = %q hedges a refusal herdr was explicit about", m2.status)
+	}
+	if c := cr2.last("comment"); c == nil || !strings.Contains(c[2], "not started (tkt-1); the worktree and its pane were left in place") {
+		t.Errorf("comment = %v", c)
+	}
+}
+
+// The worktree reply with no root pane never reached agent.start, so its comment
+// must not read as an agent that herdr refused OR one that might be running.
+func TestDispatchNoRootPaneSaysItNeverGotToTheAgent(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	wt := createdWorktree()
+	wt.RootPane.PaneID = ""
+	src.create = wt
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create")
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment")
+	}
+	if !strings.Contains(comment[2], "not started: the dispatch stopped before agent.start") {
+		t.Errorf("comment:\n%s", comment[2])
+	}
+	if strings.Contains(comment[2], "may or may not have started") {
+		t.Errorf("the comment hedges an agent that was never asked for:\n%s", comment[2])
+	}
+	// The worktree exists, so nothing may claim otherwise.
+	if strings.Contains(m.status, "Nothing was created") {
+		t.Errorf("status = %q, but the worktree was created", m.status)
+	}
+	if !strings.Contains(m.status, "/wt/tkt-1 is still there") {
+		t.Errorf("status = %q, want it to name the worktree left behind", m.status)
+	}
 }
 
 // ---- the lane skip, and the filter that is not a transition ----

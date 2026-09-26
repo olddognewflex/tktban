@@ -341,13 +341,24 @@ func dispatchRefusalText(plan herdr.Plan, err error) string {
 // for a login shell to reach a prompt and then for a process to come up, and
 // typing a prompt into a running agent is one socket round trip.
 //
-// dispatchAgentTimeout is deliberately longer than herdr's own
-// AgentStartTimeoutMS (20s). herdr's timer therefore fires first, and a herdr
-// timeout arrives as a typed error naming what failed; ours arrives as a
-// closed socket and a bare deadline, which tells nobody anything.
+// dispatchAgentTimeout bounds the agent stage, and the stage is the whole retry
+// loop rather than one call — so it has to cover herdr's own
+// AgentStartTimeoutMS (20s) PLUS the backoff the loop may have spent getting to
+// its last attempt (herdr.AgentStartBackoffTotal, 3.1s), with margin. 25s would
+// have left the final attempt 1.9s, which is the wrong way round: herdr's timer
+// must fire first, because a herdr timeout is a typed error naming what failed,
+// while ours is a closed socket that cannot even say whether the agent started.
+//
+// What it deliberately does not cover is every attempt burning a full 20s in
+// turn. That cannot happen: agent_pane_busy is herdr answering immediately, so
+// a run that retries is a run of fast replies, and the only attempt that can
+// take 20s is one herdr is actually working on.
+//
+// A test asserts the relation rather than the number, so changing the schedule
+// cannot quietly invert it again.
 const (
 	dispatchWorktreeTimeout = 15 * time.Second
-	dispatchAgentTimeout    = 25 * time.Second
+	dispatchAgentTimeout    = 30 * time.Second
 	dispatchPromptTimeout   = 5 * time.Second
 	dispatchWriteTimeout    = 5 * time.Second
 )
@@ -691,6 +702,20 @@ func dispatchStepName(res herdr.DispatchResult) string {
 	return res.Failed.String()
 }
 
+// herdrRefused reports whether err is herdr's own typed error reply.
+//
+// This is the single most important distinction in the whole failure matrix.
+// herdr answering with a code means herdr decided not to do the thing, so we
+// know it did not happen. Anything else — a closed socket, an expired deadline —
+// means we do not know whether it happened, and every sentence built from such
+// a failure has to admit that rather than assert a clean one. It is also why
+// nothing ever retries the worktree step: a retry after "we don't know" is how
+// a ticket ends up with two worktrees.
+func herdrRefused(err error) bool {
+	var apiErr *herdr.APIError
+	return errors.As(err, &apiErr)
+}
+
 // dispatchFailureText words one herdr failure: the step, and either herdr's
 // own code and message or the fact that herdr never answered at all.
 func dispatchFailureText(res herdr.DispatchResult) string {
@@ -722,6 +747,15 @@ func dispatchStatusText(rep dispatchReport) (string, string) {
 		// agent in. It is still there, and nothing here removes it.
 		b.WriteString(plan.Key + " was not dispatched: " + dispatchFailureText(res) +
 			". The worktree at " + res.WorktreePath + " is still there; nothing was removed")
+
+	case res.Failed == herdr.StageAgent && !herdrRefused(res.Err):
+		// We asked herdr to start an agent and got no answer. It may be
+		// running. Saying "the agent did not start" here would be a guess, and
+		// the guess that sends somebody to start a second one.
+		b.WriteString(plan.Key + "'s worktree is ready at " + res.WorktreePath +
+			" but " + dispatchFailureText(res) +
+			" — the agent may or may not be running, so check the pane (o) before dispatching again. " +
+			"Nothing was removed and " + plan.Key + " did not move")
 
 	case res.Failed == herdr.StageAgent:
 		b.WriteString(plan.Key + "'s worktree is ready at " + res.WorktreePath +
@@ -822,7 +856,24 @@ func dispatchCommentBody(rep dispatchReport) string {
 				res.Start.Attempts, res.Start.Busy, res.Start.Renamed, res.Start.Waited))
 		}
 	} else if res.Created {
-		line("agent", "not started; the worktree and its pane were left in place")
+		tried := res.Start.Name
+		if tried != "" {
+			tried = " (" + tried + ")"
+		}
+		switch {
+		case res.Failed != herdr.StageAgent:
+			// The sequence stopped before agent.start was ever called, so
+			// "not started" would imply herdr refused it.
+			line("agent", "not started: the dispatch stopped before agent.start")
+		case herdrRefused(res.Err):
+			line("agent", "not started"+tried+"; the worktree and its pane were left in place")
+		default:
+			// This is the bullet that used to contradict the header. herdr did
+			// not answer, so we cannot say it did not start — and the person
+			// has to check before dispatching again.
+			line("agent", "may or may not have started"+tried+
+				": herdr did not answer. Check the pane before dispatching again; nothing was removed")
+		}
 	}
 	if res.Prompted {
 		line("prompt", "sent")

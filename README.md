@@ -292,18 +292,23 @@ dispatch may be incomplete.
 
 | What failed | What happens |
 |-------------|--------------|
-| `worktree.create` / `worktree.open` | Nothing was created. No transition. A comment carrying herdr's code and message, and a status line that names them. |
-| `agent.start`, after the worktree exists | No rollback: the worktree, workspace and pane stay. The lane does not move. The comment records the branch, the worktree path, the workspace id, the pane id and the error; the status says the worktree is ready but the agent did not start. |
+| `worktree.create` / `worktree.open` refused by herdr | Nothing was created. No transition. A comment carrying herdr's code and message, and a status line that names them. |
+| the worktree was made but herdr's reply carried no pane | The worktree **does** exist, so nothing says otherwise: the status names the path it is still at and the comment records it, while the agent bullet says the dispatch stopped before `agent.start`. No transition, nothing removed. |
+| `agent.start` refused by herdr, after the worktree exists | No rollback: the worktree, workspace and pane stay. The lane does not move. The comment records the branch, the worktree path, the workspace id, the pane id, the name it tried and the error; the status says the worktree is ready but the agent did not start. |
+| `agent.start` never answered (closed socket, deadline) | The same, except that nothing claims the agent did not start — we cannot know. The status and the comment both say it **may or may not** be running and to check the pane with `o` before dispatching again. |
 | `agent.prompt` | The agent **is** dispatched, so the transition and the comment still run. The status says the prompt did not land and that `o` focuses the pane so you can paste it yourself; `agent_blocked` is reported by name. |
 | `tkt transition` | Still comments. The status says dispatched but the lane did not move. |
 | `tkt comment` | A warning on the status line only. It never blocks and never undoes anything. |
 | herdr unreachable, or a deadline mid-sequence | The comment says the dispatch may be incomplete. The worktree step is **not** retried. |
 | the ticket left the dispatch source lane meanwhile | It is dispatched, and the lane is left alone — moving it from wherever it is now to the plan's target is not the move you agreed to. The status and the comment both say which lane it is in now. A card that has merely been *filtered* out of sight is not treated as having moved; one that has vanished from an unfiltered board is. |
 
-Each stage has its own budget: 15 s for the worktree, 25 s for `agent.start`
-(herdr's own 20 s startup timeout fires first, so a timeout arrives as a typed
-error rather than a closed socket), 5 s for the prompt and 5 s for each `tkt`
-call.
+Each stage has its own budget: 15 s for the worktree, 30 s for `agent.start`,
+5 s for the prompt and 5 s for each `tkt` call. The agent budget covers the
+whole retry loop, so it is herdr's own 20 s startup timeout *plus* the 3.1 s of
+backoff the loop may have spent getting to its last attempt, with margin —
+herdr's timer has to be the one that fires, because a herdr timeout is a typed
+error naming what broke, while ours is a closed socket that cannot even say
+whether the agent started.
 
 **Only one dispatch runs at a time.** `D` and the confirm both refuse while one
 is in flight (`Dispatching TKB-25 — wait for it to finish`), and a dialog that
