@@ -90,6 +90,12 @@ type Model struct {
 	// dispatchRep accumulates what to tell the person: the herdr result, then
 	// the outcome of the two tkt writes that follow it.
 	dispatchRep dispatchReport
+	// dispatchRun stamps the run in flight. Every message a dispatch sends
+	// carries the stamp it was issued under, and a handler drops one that does
+	// not match — so a stage message still in flight from an abandoned run
+	// cannot be applied on top of a newer one's state, which would splice two
+	// dispatches into one nonsensical report.
+	dispatchRun int
 
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person
@@ -206,10 +212,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m.fail(msg.err)
 		}
+		var md modal
 		if msg.purpose == "edit" {
-			m.modal = newEditModal(msg.ticket, msg.priorities, m.styles.t.surface, m.width, m.height)
+			md = newEditModal(msg.ticket, msg.priorities, m.styles.t.surface, m.width, m.height)
 		} else {
-			m.modal = newViewerModal(msg.ticket)
+			md = newViewerModal(msg.ticket)
+		}
+		if !m.setModal(md) {
+			return m, m.setStatus(m.dispatchBusyText(), "warn")
 		}
 		return m, nil
 
@@ -217,7 +227,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m.fail(msg.err)
 		}
-		m.modal = newCreateModal(msg.types, msg.priorities, m.styles.t.surface, m.width, m.height)
+		if !m.setModal(newCreateModal(msg.types, msg.priorities, m.styles.t.surface, m.width, m.height)) {
+			return m, m.setStatus(m.dispatchBusyText(), "warn")
+		}
 		return m, nil
 
 	case editorPrepMsg:
@@ -602,7 +614,9 @@ func (m Model) onCreate(msg createMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	m.modal = nil
+	if !m.dispatchBusy() {
+		m.modal = nil
+	}
 	label := "Created ticket"
 	if msg.key != "" {
 		label = "Created " + msg.key
@@ -618,6 +632,42 @@ func (m Model) onCreate(msg createMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) fail(err error) (tea.Model, tea.Cmd) {
 	return m, m.setStatus(err.Error(), "error")
+}
+
+// dispatchBusy reports whether a confirmed dispatch is in flight.
+//
+// It is m.dispatchSrc and deliberately NOT m.modal, because m.modal is not a
+// lock. Several asynchronous reads set it unconditionally whenever they land —
+// a ticket fetch for v or e, an issue-type fetch for n — and every modal's own
+// esc nils it. A dispatch whose progress dialog was replaced that way would be
+// left with nothing swallowing keys, and D would start a second dispatch of the
+// same ticket while the first was still cutting its worktree.
+func (m Model) dispatchBusy() bool { return m.dispatchSrc != nil }
+
+// dispatchBusyText says why the board is refusing, naming the ticket. A key
+// that silently does nothing is the failure mode every refusal here guards
+// against.
+func (m Model) dispatchBusyText() string {
+	key := m.dispatchRep.plan.Key
+	if key == "" {
+		return "A dispatch is running — wait for it to finish"
+	}
+	return "Dispatching " + key + " — wait for it to finish"
+}
+
+// setModal opens a dialog unless a dispatch's progress display is up, and
+// reports whether it opened so the caller can say why not.
+//
+// Every asynchronous modal goes through it. The synchronous ones (m, c, d, f)
+// do not need to: a key cannot reach handleKey while any modal is open. The
+// asynchronous ones can land seconds after the key that asked for them, by
+// which time a dispatch may have started — see dispatchBusy.
+func (m *Model) setModal(md modal) bool {
+	if m.dispatchBusy() {
+		return false
+	}
+	m.modal = md
+	return true
 }
 
 // setStatus records a transient status line and returns a command that clears it

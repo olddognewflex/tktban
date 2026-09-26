@@ -392,7 +392,7 @@ func TestDispatchFailureMatrix(t *testing.T) {
 			wantStatus:     []string{"Dispatched TKT-1", "had already left To Do", "Done now", "the lane was left alone"},
 			wantKind:       "warn",
 			wantTransition: nil,
-			wantComment:    []string{"left alone: TKT-1 had already moved to Done"},
+			wantComment:    []string{"left alone — TKT-1 had already left To Do (it is in Done now)"},
 		},
 	}
 
@@ -686,9 +686,11 @@ func TestDispatchSurvivesABoardRefreshMidSequence(t *testing.T) {
 	m, cmd := update(m, key("enter"))
 	m, next := update(m, cmd().(dispatchResultMsg))
 
+	// The board is filtered, so a card missing from it means hidden, not moved.
+	m.filter = filterState{assignee: "bob"}
 	// The refresh lands between the confirm and the first create, and the board
-	// is now a different board: TKT-1 is not even on it (an assignee filter),
-	// and the selection has moved to another ticket entirely.
+	// is now a different board: TKT-1 is not on it, and the selection has moved
+	// to another ticket entirely.
 	m, _ = update(m, boardMsg{
 		roles: []model.RolePair{{Role: "todo", Lane: "To Do"}, {Role: "done", Lane: "Done"}},
 		columns: []model.Column{
@@ -925,5 +927,365 @@ func TestDispatchIgnoresStaleStageMessages(t *testing.T) {
 		if m.status != "" {
 			t.Errorf("%T set the status to %q", msg, m.status)
 		}
+	}
+}
+
+// ---- one dispatch at a time ----
+//
+// The reachable chain this section exists for, found in review: press `n`
+// (asynchronous — the modal stays nil while `tkt cfg issue_types` runs), press
+// `D`, press enter, and while the sequence is cutting a worktree the pending
+// issueTypesMsg lands and REPLACES the progress dialog. esc then nils it, the
+// board takes keys again, and `D` works — because m.dispatching covers only the
+// ~2s preparation and PickPane finds no agent yet, stage 1 having up to 15s to
+// run. If run 1's worktree.create had landed, run 2 would worktree.open into
+// the same pane, hit agent_name_taken, rename, and start a SECOND agent on one
+// branch.
+//
+// So m.modal is not a lock, and three things make it safe: the key refuses
+// while a run is in flight, the confirm refuses too, and an asynchronous modal
+// declines to displace a running progress dialog.
+
+// startDispatchRun gets a dispatch as far as "stage 1 in flight" and hands back
+// the command that would finish it.
+func startDispatchRun(t *testing.T, m Model) (Model, tea.Cmd) {
+	t.Helper()
+	m = pressD(t, m)
+	m, cmd := update(m, key("enter"))
+	res, ok := cmd().(dispatchResultMsg)
+	if !ok || !res.confirmed {
+		t.Fatalf("enter produced %+v", cmd())
+	}
+	m, next := update(m, res)
+	if !m.dispatchBusy() {
+		t.Fatal("the confirm did not start a run")
+	}
+	if next == nil {
+		t.Fatal("the confirm started no work")
+	}
+	return m, next
+}
+
+// D is refused while a run is in flight, even with no dialog in the way.
+func TestDispatchRefusesASecondDispatchWhileOneIsRunning(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m, next := startDispatchRun(t, m)
+
+	// Take the dialog out of the way, which is exactly what an asynchronous
+	// modal landing and then being escaped does. The board is now taking keys
+	// with a dispatch still in flight.
+	m.modal = nil
+	before := len(src.calls)
+
+	m, _ = update(m, key("D"))
+	if m.status != "Dispatching TKT-1 — wait for it to finish" || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+	// Whether work started is read off m.dispatching, never by running the
+	// returned command: a refusal's command is the status-expiry timer, and
+	// calling it would sit on a real six-second clock.
+	if m.dispatching {
+		t.Fatal("the refused key still started a preparation")
+	}
+	if m.modal != nil {
+		t.Fatalf("the refused key opened a %T", m.modal)
+	}
+	if len(src.calls) != before {
+		t.Fatalf("the refused key made herdr calls %v", src.calls[before:])
+	}
+
+	// And run 1 still finishes, exactly once.
+	m = runDispatch(t, m, next)
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if len(src.createParams) != 1 {
+		t.Fatalf("worktree.create ran %d times", len(src.createParams))
+	}
+	if n := countCalls(cr, "transition"); n != 1 {
+		t.Fatalf("tkt transition ran %d times, want 1", n)
+	}
+}
+
+// And the confirm refuses too, not only the key. A dispatchResultMsg arriving
+// while a run is going would otherwise overwrite that run's source, sequence
+// and report outright.
+func TestDispatchConfirmRefusesWhileARunIsInFlight(t *testing.T) {
+	m, src, _ := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m, next := startDispatchRun(t, m)
+
+	running, ok := m.modal.(dispatchModal)
+	if !ok {
+		t.Fatalf("modal = %T", m.modal)
+	}
+	run := m.dispatchRun
+	before := len(src.calls)
+
+	// A second confirm, for a different ticket, delivered straight to the board.
+	other := herdr.BuildPlan(herdr.PlanInput{
+		Key: "TKT-9", Summary: "another", Dir: testDispatchDir,
+		BranchFmt: "feature/{key-lower}-{slug}", Base: "main",
+		SourceRole: "todo", TargetRole: "done", AgentKind: "claude",
+	})
+	m, _ = update(m, dispatchResultMsg{plan: other, confirmed: true})
+
+	if m.dispatchRun != run {
+		t.Fatalf("the second confirm started run %d, superseding %d", m.dispatchRun, run)
+	}
+	if m.dispatchRep.plan.Key != "TKT-1" {
+		t.Fatalf("the second confirm clobbered the report: now %q", m.dispatchRep.plan.Key)
+	}
+	if got, ok := m.modal.(dispatchModal); !ok || got.progress != running.progress {
+		t.Fatalf("the second confirm replaced the running dialog (%T)", m.modal)
+	}
+	if !strings.Contains(m.status, "Dispatching TKT-1") {
+		t.Errorf("status = %q, want the refusal", m.status)
+	}
+	// The refusal's own command is the status timer, so the proof that no
+	// second sequence started is that herdr was not called and the run stamp
+	// did not move — both asserted here, not by running it.
+	if len(src.calls) != before {
+		t.Fatalf("the refused confirm made herdr calls %v", src.calls[before:])
+	}
+
+	m = runDispatch(t, m, next)
+	if len(src.createParams) != 1 || src.createParams[0].Branch != "feature/tkt-1-first-thing" {
+		t.Fatalf("worktree.create calls = %+v", src.createParams)
+	}
+}
+
+// The chain in full, as a test: an asynchronous modal landing mid-sequence
+// cannot displace the progress dialog, and D after it is still refused.
+//
+// This one fails without the setModal guard: the createModal replaces the
+// progress dialog, and from there the board is back on the keyboard.
+func TestDispatchProgressDialogSurvivesAnAsyncModal(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{"an issue-type fetch for n", issueTypesMsg{types: []string{"Story"}, priorities: []string{"High"}}},
+		{"a ticket fetch for v", ticketMsg{ticket: model.Ticket{"key": "TKT-2", "summary": "x"}, purpose: "view"}},
+		{"a ticket fetch for e", ticketMsg{ticket: model.Ticket{"key": "TKT-2", "summary": "x"}, purpose: "edit"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, src, cr := dispatchBoard(t)
+			src.create, src.start = createdWorktree(), startedAgent()
+			m, next := startDispatchRun(t, m)
+			running := m.modal.(dispatchModal)
+
+			m, _ = update(m, c.msg)
+
+			got, ok := m.modal.(dispatchModal)
+			if !ok {
+				t.Fatalf("%T displaced the progress dialog with a %T", c.msg, m.modal)
+			}
+			if !got.running() || got.progress != running.progress {
+				t.Fatalf("the progress dialog changed: %q → %q", running.progress, got.progress)
+			}
+			if !strings.Contains(m.status, "Dispatching TKT-1") {
+				t.Errorf("status = %q, want it to say why the dialog did not open", m.status)
+			}
+
+			// The dialog is still swallowing keys, and D is refused anyway.
+			herdrBefore := len(src.calls)
+			m, _ = update(m, key("D"))
+			if m.dispatching {
+				t.Fatal("D started a second preparation")
+			}
+			if len(src.calls) != herdrBefore {
+				t.Fatalf("D made herdr calls %v", src.calls[herdrBefore:])
+			}
+
+			m = runDispatch(t, m, next)
+			assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+			if len(src.createParams) != 1 {
+				t.Fatalf("worktree.create ran %d times", len(src.createParams))
+			}
+			if n := countCalls(cr, "comment"); n != 1 {
+				t.Fatalf("tkt comment ran %d times, want 1", n)
+			}
+			// And the dialog it declined to open is openable once the dispatch
+			// is over, so nothing was lost but a keystroke.
+			m, _ = update(m, c.msg)
+			if _, still := m.modal.(dispatchModal); still || m.modal == nil {
+				t.Fatalf("after the dispatch the modal is %T", m.modal)
+			}
+		})
+	}
+}
+
+// A message from a superseded run is inert. Without the run stamp, run 1's
+// in-flight stage message would be applied on top of run 2's state, producing a
+// report that describes neither dispatch.
+func TestDispatchDropsMessagesFromASupersededRun(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+
+	// Run 1, all the way through.
+	m = dispatchOnce(t, m)
+	if m.dispatchRun != 1 || m.dispatchBusy() {
+		t.Fatalf("after run 1: run=%d busy=%v", m.dispatchRun, m.dispatchBusy())
+	}
+
+	// Run 2, stopped with stage 1 in flight.
+	m, next := startDispatchRun(t, m)
+	if m.dispatchRun != 2 {
+		t.Fatalf("run = %d, want 2", m.dispatchRun)
+	}
+	running := m.modal.(dispatchModal)
+	callsBefore, tktBefore := len(src.calls), len(cr.calls)
+
+	// Run 1's messages arrive late. Every one of them must do nothing: a
+	// finished sequence would drive run 2 straight into its tkt writes, and a
+	// done message would close run 2's dialog and report run 1's outcome twice.
+	finished := herdr.NewSequence(herdr.Plan{Key: "TKT-1"}, herdr.PreflightResult{})
+	for _, msg := range []tea.Msg{
+		dispatchStageMsg{run: 1, seq: finished},
+		dispatchLaneMsg{run: 1, skipped: true, why: "nonsense"},
+		dispatchDoneMsg{run: 1},
+	} {
+		var cmd tea.Cmd
+		m, cmd = update(m, msg)
+		if cmd != nil {
+			t.Fatalf("%T from run 1 produced %T", msg, cmd())
+		}
+		got, ok := m.modal.(dispatchModal)
+		if !ok {
+			t.Fatalf("%T from run 1 closed run 2's dialog (%T)", msg, m.modal)
+		}
+		if got.progress != running.progress {
+			t.Fatalf("%T from run 1 moved run 2's dialog on to %q", msg, got.progress)
+		}
+		if m.dispatchRep.laneSkipped || m.dispatchRep.laneWhy != "" {
+			t.Fatalf("%T from run 1 wrote into run 2's report: %+v", msg, m.dispatchRep)
+		}
+	}
+	if len(src.calls) != callsBefore {
+		t.Fatalf("run 1's late messages made herdr calls %v", src.calls[callsBefore:])
+	}
+	if len(cr.calls) != tktBefore {
+		t.Fatalf("run 1's late messages ran tkt %v", cr.calls[tktBefore:])
+	}
+
+	// Run 2 still finishes normally, on its own stamp.
+	m = runDispatch(t, m, next)
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") || m.statusKind != "" {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+	if n := countCalls(cr, "transition"); n != 2 {
+		t.Fatalf("tkt transition ran %d times across two runs, want 2", n)
+	}
+}
+
+// Two runs in a row each get their own stamp, so the stamp really identifies a
+// run rather than being a constant that happens to match.
+func TestDispatchStampsEachRun(t *testing.T) {
+	m, src, _ := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	for want := 1; want <= 3; want++ {
+		m = dispatchOnce(t, m)
+		if m.dispatchRun != want {
+			t.Fatalf("after dispatch %d the run stamp is %d", want, m.dispatchRun)
+		}
+		if m.dispatchBusy() {
+			t.Fatalf("dispatch %d left the board busy", want)
+		}
+	}
+}
+
+// countCalls counts recorded tkt invocations of one verb.
+func countCalls(cr *captureRunner, verb string) int {
+	n := 0
+	for _, call := range cr.calls {
+		if len(call) > 0 && call[0] == verb {
+			n++
+		}
+	}
+	return n
+}
+
+// ---- the lane skip, and the filter that is not a transition ----
+
+// A ticket missing from an UNFILTERED board is not in the source lane any more,
+// whatever the plan says, so the lane is left alone rather than transitioned
+// from a lane it has left.
+func TestDispatchSkipsTheLaneWhenTheTicketLeavesAnUnfilteredBoard(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m, next := startDispatchRun(t, m)
+
+	m, _ = update(m, boardMsg{
+		roles: []model.RolePair{{Role: "todo", Lane: "To Do"}, {Role: "done", Lane: "Done"}},
+		columns: []model.Column{
+			{Lane: "To Do", Role: "todo", Cards: []model.Card{{Key: "TKT-7", Summary: "something else"}}},
+			{Lane: "Done", Role: "done"},
+		},
+	})
+	m = runDispatch(t, m, next)
+
+	if cr.last("transition") != nil {
+		t.Error("a ticket that is not on an unfiltered board was transitioned anyway")
+	}
+	if !strings.Contains(m.status, "TKT-1 is no longer on the board") ||
+		!strings.Contains(m.status, "the lane was left alone") {
+		t.Errorf("status = %q", m.status)
+	}
+	if c := cr.last("comment"); c == nil || !strings.Contains(c[2], "left alone — TKT-1 is no longer on the board") {
+		t.Errorf("comment = %v", c)
+	}
+	// It is still a dispatch: only the lane was left alone.
+	if !strings.Contains(m.status, "Dispatched TKT-1") {
+		t.Errorf("status = %q", m.status)
+	}
+}
+
+// A hidden column is still a lane the ticket is in, so a card behind x must not
+// read as "no longer on the board".
+func TestDispatchLaneSkipLooksThroughHiddenColumns(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m, next := startDispatchRun(t, m)
+
+	// The To Do column is hidden, so it is in allColumns but not columns.
+	m.hidden = map[string]bool{"todo": true}
+	m.applyHidden()
+	if len(m.columns) != 1 {
+		t.Fatalf("setup: %d visible columns", len(m.columns))
+	}
+	m = runDispatch(t, m, next)
+
+	if call := cr.last("transition"); !slices.Equal(call, []string{"transition", "TKT-1", "done"}) {
+		t.Fatalf("tkt transition = %v, want the move to run: a hidden column is still a lane", call)
+	}
+	if strings.Contains(m.status, "no longer on the board") {
+		t.Errorf("status = %q — the card is hidden, not gone", m.status)
+	}
+}
+
+// The board reports and prompts the name herdr registered, not the one it asked
+// for. `name` is a field of its own in herdr's agent_started reply, distinct
+// from `agent` (the kind), and herdr is free to hand back something else.
+func TestDispatchFollowsTheAgentNameHerdrReturns(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create = createdWorktree()
+	started := startedAgent()
+	started.Agent.Name = "tkt-1-herdrs-choice"
+	src.start = started
+
+	m = dispatchOnce(t, m)
+
+	if got := src.startParams[0].Name; got != "tkt-1" {
+		t.Fatalf("agent.start asked for %q, want the planned name", got)
+	}
+	if got := src.promptParams[0].Target; got != "tkt-1-herdrs-choice" {
+		t.Fatalf("agent.prompt targeted %q, want the name in herdr's reply", got)
+	}
+	if !strings.Contains(m.status, "tkt-1-herdrs-choice") {
+		t.Errorf("status = %q, want it to name the agent that exists", m.status)
+	}
+	if c := cr.last("comment"); c == nil || !strings.Contains(c[2], "tkt-1-herdrs-choice (claude)") {
+		t.Errorf("the comment records the wrong agent name: %v", c)
 	}
 }

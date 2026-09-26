@@ -298,12 +298,20 @@ dispatch may be incomplete.
 | `tkt transition` | Still comments. The status says dispatched but the lane did not move. |
 | `tkt comment` | A warning on the status line only. It never blocks and never undoes anything. |
 | herdr unreachable, or a deadline mid-sequence | The comment says the dispatch may be incomplete. The worktree step is **not** retried. |
-| the ticket left the dispatch source lane meanwhile | It is dispatched, and the lane is left alone — moving it from wherever it is now to the plan's target is not the move you agreed to. The status and the comment both say so. |
+| the ticket left the dispatch source lane meanwhile | It is dispatched, and the lane is left alone — moving it from wherever it is now to the plan's target is not the move you agreed to. The status and the comment both say which lane it is in now. A card that has merely been *filtered* out of sight is not treated as having moved; one that has vanished from an unfiltered board is. |
 
 Each stage has its own budget: 15 s for the worktree, 25 s for `agent.start`
 (herdr's own 20 s startup timeout fires first, so a timeout arrives as a typed
 error rather than a closed socket), 5 s for the prompt and 5 s for each `tkt`
 call.
+
+**Only one dispatch runs at a time.** `D` and the confirm both refuse while one
+is in flight (`Dispatching TKB-25 — wait for it to finish`), and a dialog that
+was asked for before the dispatch started — a ticket fetch for `v`, an
+issue-type fetch for `n` — declines to replace the progress display when it
+lands, saying so instead. The progress dialog swallowing keys is not relied on
+as the only lock: it can be displaced, and a second dispatch of one ticket would
+`worktree.open` into the same pane and start a second agent on one branch.
 
 **It is off by default.** `dispatch` in tktban's settings file defaults to
 `false` and the board never writes it — like `notify`, it is a hand edit:

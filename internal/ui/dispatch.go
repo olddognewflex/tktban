@@ -166,6 +166,14 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 	if !m.live.on {
 		return m, m.setStatus("herdr live status unavailable", "warn")
 	}
+	// A dispatch that is actually creating things, as opposed to preparing.
+	// This is the rung that stops two agents ending up on one branch: the
+	// progress dialog swallows keys, but a dialog can be displaced by an
+	// asynchronous modal landing, and dispatching below covers only the ~2s
+	// preparation — it is false for the whole create phase.
+	if m.dispatchBusy() {
+		return m, m.setStatus(m.dispatchBusyText(), "warn")
+	}
 	if m.dispatching {
 		return m, m.setStatus("Already preparing a dispatch", "warn")
 	}
@@ -372,23 +380,40 @@ var (
 	dispatchSleep herdr.Sleeper = herdr.SleepCtx
 )
 
+// Every message a dispatch sends carries the run it belongs to, and every
+// handler drops one whose stamp is not the current run's.
+//
+// It is not theoretical tidiness. A stage can be in flight for fifteen seconds;
+// if a run is ever abandoned — the board refuses a second dispatch now, but a
+// future path may not — its outstanding stage message would otherwise be
+// applied on top of the newer run's state, splicing two dispatches into one
+// report that describes neither. The stamp makes a late message inert instead
+// of dangerous.
+
 // dispatchStageMsg is one finished step of the create sequence, carrying the
 // whole sequence forward. The sequence is a value, so the message holds the
 // state and the model just stores it: two updates never share it.
-type dispatchStageMsg struct{ seq herdr.Sequence }
+type dispatchStageMsg struct {
+	run int
+	seq herdr.Sequence
+}
 
 // dispatchLaneMsg is the outcome of the dispatch's `tkt transition`.
 type dispatchLaneMsg struct {
+	run int
 	err error
-	// skipped means no transition was attempted because the ticket is no
-	// longer in the lane the plan was built for; lane is where it is instead.
+	// skipped means no transition was attempted, and why says which reason —
+	// already worded, because only the board knows the lane names.
 	skipped bool
-	lane    string
+	why     string
 }
 
 // dispatchDoneMsg is the outcome of the dispatch's `tkt comment`, which is the
 // last thing a dispatch does.
-type dispatchDoneMsg struct{ err error }
+type dispatchDoneMsg struct {
+	run int
+	err error
+}
 
 // dispatchReport is everything the status line and the ticket comment are
 // built from: what herdr did, and what the two tkt writes did afterwards.
@@ -398,7 +423,7 @@ type dispatchReport struct {
 
 	laneMoved   bool
 	laneSkipped bool
-	laneNow     string // the lane the ticket is in instead, for a skip
+	laneWhy     string // why the lane was left alone, already worded
 	laneErr     error
 
 	commentErr error
@@ -426,6 +451,14 @@ func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
 		m.modal = nil
 		return m, m.setStatus(msg.plan.Key+" picked up an agent while the dialog was open (o focuses it)", "warn")
 	}
+	// The last rung, and the one that has to be here rather than only on the
+	// key: a confirm answered while another dispatch is still creating things
+	// would overwrite that run's source, sequence and report outright, and
+	// leave two runs' messages landing on one board. The dialog in front of
+	// the person belongs to the run that is going; it stays.
+	if m.dispatchBusy() {
+		return m, m.setStatus(m.dispatchBusyText(), "warn")
+	}
 	disp, ok := m.live.src.(Dispatcher)
 	if !ok {
 		// Unreachable through the D key, which checks this before opening the
@@ -434,16 +467,21 @@ func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
 		m.modal = nil
 		return m, m.setStatus("This board can't dispatch herdr agents", "warn")
 	}
+	m.dispatchRun++
 	m.dispatchSrc = disp
 	m.dispatchSeq = herdr.NewSequence(msg.plan, msg.pre)
 	m.dispatchRep = dispatchReport{plan: msg.plan}
-	// The dialog stays open, now as a progress display. That is what swallows
-	// every further keystroke: a second enter cannot reach this function, so
-	// it cannot create a second worktree.
+	// The dialog stays open, now as a progress display. That is the first line
+	// of defence against a second enter: it swallows every keystroke. The
+	// dispatchBusy rungs above are the second, for the case where an
+	// asynchronous modal displaces it.
 	m.modal = newDispatchModal(msg.plan, msg.pre).
 		withProgress(dispatchStageLabel(m.dispatchSeq))
-	return m, dispatchStageCmd(disp, m.dispatchSeq)
+	return m, dispatchStageCmd(disp, m.dispatchSeq, m.dispatchRun)
 }
+
+// ours reports whether a dispatch message belongs to the run in flight.
+func (m Model) ours(run int) bool { return m.dispatchBusy() && run == m.dispatchRun }
 
 // dispatchStageCmd runs exactly one step of the sequence, under that step's
 // own budget.
@@ -454,26 +492,26 @@ func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
 // this feature makes on Bubble Tea's own command path, where the test harness
 // can see it. A write issued from a `go func()` would escape that, and the
 // test runner has no mutex precisely so the race detector reports it.
-func dispatchStageCmd(d Dispatcher, seq herdr.Sequence) tea.Cmd {
+func dispatchStageCmd(d Dispatcher, seq herdr.Sequence, run int) tea.Cmd {
 	stage := seq.Stage()
 	return func() tea.Msg {
 		ctx, cancel := dispatchStageContext(stage)
 		defer cancel()
-		return dispatchStageMsg{seq: seq.Next(ctx, d, dispatchSleep)}
+		return dispatchStageMsg{run: run, seq: seq.Next(ctx, d, dispatchSleep)}
 	}
 }
 
 // onDispatchStage stores a finished step and runs the next one, or moves on to
 // the ticket writes once herdr's half is over.
 func (m Model) onDispatchStage(msg dispatchStageMsg) (tea.Model, tea.Cmd) {
-	if m.dispatchSrc == nil {
-		return m, nil // not ours: a stale message after the run was torn down
+	if !m.ours(msg.run) {
+		return m, nil // a torn-down or superseded run: inert
 	}
 	m.dispatchSeq = msg.seq
 	m.dispatchRep.res = msg.seq.Res
 	if msg.seq.Stage() != herdr.StageDone {
 		m.modal = m.progressModal(dispatchStageLabel(msg.seq))
-		return m, dispatchStageCmd(m.dispatchSrc, msg.seq)
+		return m, dispatchStageCmd(m.dispatchSrc, msg.seq, m.dispatchRun)
 	}
 	return m.startDispatchWrites()
 }
@@ -495,29 +533,52 @@ func (m Model) startDispatchWrites() (tea.Model, tea.Cmd) {
 	// pressed — a refresh, a colleague, another board. Moving it from wherever
 	// it is now to the plan's target is not the transition the person agreed
 	// to, so it is skipped and said.
-	if role, found := m.roleOfKey(plan.Key); found && role != plan.SourceRole {
-		return m, send(dispatchLaneMsg{skipped: true, lane: laneOf(m.roles, role)})
+	if why, skip := m.laneSkipReason(plan); skip {
+		return m, send(dispatchLaneMsg{run: m.dispatchRun, skipped: true, why: why})
 	}
 	m.modal = m.progressModal("Moving " + plan.Key + " to " + dispatchLaneName(plan) + "…")
-	return m, dispatchLaneCmd(m.tkt, plan)
+	return m, dispatchLaneCmd(m.tkt, plan, m.dispatchRun)
+}
+
+// laneSkipReason says whether to leave the ticket's lane alone, and why.
+//
+// The interesting case is the ticket not being on the board at all. On a
+// filtered board that means nothing — the card is hidden, not moved — so the
+// plan's own move still runs. On an unfiltered board it means the ticket is
+// genuinely not in any lane this board shows any more (deleted, re-keyed, moved
+// to a role that is not in [board.roles]), and guessing that it is still in the
+// source lane would transition it from a lane it has left.
+func (m Model) laneSkipReason(plan herdr.Plan) (string, bool) {
+	role, found := m.roleOfKey(plan.Key)
+	switch {
+	case found && role != plan.SourceRole:
+		return plan.Key + " had already left " + dispatchSourceLaneName(plan) +
+			" (it is in " + laneOf(m.roles, role) + " now)", true
+	case found:
+		return "", false
+	case m.filter != (filterState{}):
+		// A filter is not a transition.
+		return "", false
+	}
+	return plan.Key + " is no longer on the board", true
 }
 
 // dispatchLaneCmd is the dispatch's own `tkt transition`, under its own budget.
-func dispatchLaneCmd(tk *tkt.Tkt, plan herdr.Plan) tea.Cmd {
+func dispatchLaneCmd(tk *tkt.Tkt, plan herdr.Plan, run int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := dispatchWriteContext()
 		defer cancel()
-		return dispatchLaneMsg{err: tk.WithContext(ctx).Transition(plan.Key, plan.TargetRole)}
+		return dispatchLaneMsg{run: run, err: tk.WithContext(ctx).Transition(plan.Key, plan.TargetRole)}
 	}
 }
 
 func (m Model) onDispatchLane(msg dispatchLaneMsg) (tea.Model, tea.Cmd) {
-	if m.dispatchSrc == nil {
+	if !m.ours(msg.run) {
 		return m, nil
 	}
 	m.dispatchRep.laneErr = msg.err
 	m.dispatchRep.laneSkipped = msg.skipped
-	m.dispatchRep.laneNow = msg.lane
+	m.dispatchRep.laneWhy = msg.why
 	m.dispatchRep.laneMoved = !msg.skipped && msg.err == nil
 	return m.startDispatchComment()
 }
@@ -529,15 +590,15 @@ func (m Model) onDispatchLane(msg dispatchLaneMsg) (tea.Model, tea.Cmd) {
 // place they survive the board being closed.
 func (m Model) startDispatchComment() (tea.Model, tea.Cmd) {
 	m.modal = m.progressModal("Recording the dispatch on " + m.dispatchRep.plan.Key + "…")
-	return m, dispatchCommentCmd(m.tkt, m.dispatchRep)
+	return m, dispatchCommentCmd(m.tkt, m.dispatchRep, m.dispatchRun)
 }
 
-func dispatchCommentCmd(tk *tkt.Tkt, rep dispatchReport) tea.Cmd {
+func dispatchCommentCmd(tk *tkt.Tkt, rep dispatchReport, run int) tea.Cmd {
 	body := dispatchCommentBody(rep)
 	return func() tea.Msg {
 		ctx, cancel := dispatchWriteContext()
 		defer cancel()
-		return dispatchDoneMsg{err: tk.WithContext(ctx).Comment(rep.plan.Key, body)}
+		return dispatchDoneMsg{run: run, err: tk.WithContext(ctx).Comment(rep.plan.Key, body)}
 	}
 }
 
@@ -547,7 +608,7 @@ func dispatchCommentCmd(tk *tkt.Tkt, rep dispatchReport) tea.Cmd {
 // agent to go and look at, and the person follows with o; quitting here would
 // take the board away at the exact moment it has something to show.
 func (m Model) onDispatchDone(msg dispatchDoneMsg) (tea.Model, tea.Cmd) {
-	if m.dispatchSrc == nil {
+	if !m.ours(msg.run) {
 		return m, nil
 	}
 	m.dispatchRep.commentErr = msg.err
@@ -632,13 +693,6 @@ func dispatchStepName(res herdr.DispatchResult) string {
 
 // dispatchFailureText words one herdr failure: the step, and either herdr's
 // own code and message or the fact that herdr never answered at all.
-//
-// The distinction matters more than it looks. A typed error reply means herdr
-// decided not to do the thing, so we know it did not happen. A closed socket
-// or an expired deadline means we do not know whether it happened, and the
-// wording has to admit that rather than imply a clean failure — which is also
-// why nothing ever retries the worktree step: a retry after "we don't know"
-// is how a ticket ends up with two worktrees.
 func dispatchFailureText(res herdr.DispatchResult) string {
 	step := dispatchStepName(res)
 	var apiErr *herdr.APIError
@@ -700,11 +754,11 @@ func dispatchStatusText(rep dispatchReport) (string, string) {
 
 	switch {
 	case rep.laneSkipped:
-		b.WriteString(" — " + plan.Key + " had already left " + dispatchSourceLaneName(plan))
-		if rep.laneNow != "" {
-			b.WriteString(" (it is in " + rep.laneNow + " now)")
+		why := rep.laneWhy
+		if why == "" {
+			why = plan.Key + " had already left " + dispatchSourceLaneName(plan)
 		}
-		b.WriteString(", so the lane was left alone")
+		b.WriteString(" — " + why + ", so the lane was left alone")
 		kind = "warn"
 	case rep.laneErr != nil:
 		b.WriteString(" — but the lane did not move: " + rep.laneErr.Error())
@@ -779,11 +833,11 @@ func dispatchCommentBody(rep dispatchReport) string {
 	case rep.laneMoved:
 		line("lane", dispatchSourceLaneName(plan)+" → "+dispatchLaneName(plan))
 	case rep.laneSkipped:
-		lane := rep.laneNow
-		if lane == "" {
-			lane = "another lane"
+		why := rep.laneWhy
+		if why == "" {
+			why = plan.Key + " had already left " + dispatchSourceLaneName(plan)
 		}
-		line("lane", "left alone: "+plan.Key+" had already moved to "+lane)
+		line("lane", "left alone — "+why)
 	case rep.laneErr != nil:
 		line("lane", "did not move: "+rep.laneErr.Error())
 	default:

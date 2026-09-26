@@ -980,6 +980,9 @@ func TestDispatchRecheckUsesThePlanNotTheSelection(t *testing.T) {
 		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
 	}
 
+	// The board is filtered, so TKT-1 dropping out of the refresh below means
+	// hidden rather than moved, and the plan's own transition still runs.
+	m.filter = filterState{assignee: "bob"}
 	// An auto-refresh re-points the selection at a different ticket.
 	m, _ = update(m, boardMsg{
 		roles: []model.RolePair{{Role: "todo", Lane: "To Do"}, {Role: "done", Lane: "Done"}},
