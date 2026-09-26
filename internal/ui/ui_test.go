@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -32,14 +33,19 @@ type captureRunner struct {
 	// budget reached the subprocess at all.
 	observeCtx bool
 	ctxCalls   []ctxCall
+	// failVerbs makes `tkt <verb>` exit non-zero. The dispatch failure matrix
+	// needs it in both directions: a transition that fails must still leave a
+	// comment, and a comment that fails must not block or undo anything.
+	failVerbs map[string]bool
 }
 
-// ctxCall is one observed invocation: whether it was bounded, and whether its
-// context was still live when the call was made.
+// ctxCall is one observed invocation: whether it was bounded, how long the
+// budget was, and whether its context was still live when the call was made.
 type ctxCall struct {
 	args     []string
 	deadline bool
 	live     bool
+	budget   time.Duration // time left on the deadline when the call was made
 }
 
 // failReply asks captureRunner for a failed tkt invocation.
@@ -48,8 +54,15 @@ const failReply = "!fail"
 func (c *captureRunner) run(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 	c.calls = append(c.calls, args)
 	if c.observeCtx {
-		_, ok := ctx.Deadline()
-		c.ctxCalls = append(c.ctxCalls, ctxCall{args: args, deadline: ok, live: ctx.Err() == nil})
+		dl, ok := ctx.Deadline()
+		call := ctxCall{args: args, deadline: ok, live: ctx.Err() == nil}
+		if ok {
+			call.budget = time.Until(dl)
+		}
+		c.ctxCalls = append(c.ctxCalls, call)
+	}
+	if len(args) > 0 && c.failVerbs[args[0]] {
+		return nil, []byte(args[0] + " exploded"), 1, nil
 	}
 	switch {
 	case eq(args, "cfg", "board.roles", "--json"):

@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/olddognewflex/tktban/internal/herdr"
 	"github.com/olddognewflex/tktban/internal/model"
 	"github.com/olddognewflex/tktban/internal/settings"
 	"github.com/olddognewflex/tktban/internal/tkt"
@@ -73,6 +74,22 @@ type Model struct {
 	// person said so, which is a different refusal from having no directory.
 	dispatchOptedOut bool
 	dispatching      bool
+
+	// dispatchSeq is the create sequence a confirmed dispatch is working
+	// through, and dispatchSrc the herdr source it is running against. Both
+	// are captured when the person answers the confirm dialog and carried
+	// until the dispatch is over, so nothing downstream re-reads the board:
+	// the selection, the columns and even m.live may all have changed
+	// underneath a sequence that takes a few seconds.
+	//
+	// dispatchSrc is held rather than re-asserted off m.live.src because live
+	// status can drop its source mid-run (a protocol mismatch clears it), and
+	// a dispatch that has already made a worktree must finish reporting on it.
+	dispatchSeq herdr.Sequence
+	dispatchSrc Dispatcher
+	// dispatchRep accumulates what to tell the person: the herdr result, then
+	// the outcome of the two tkt writes that follow it.
+	dispatchRep dispatchReport
 
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person
@@ -289,6 +306,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dispatchResultMsg:
 		return m.onDispatchResult(msg)
+
+	case dispatchStageMsg:
+		return m.onDispatchStage(msg)
+
+	case dispatchLaneMsg:
+		return m.onDispatchLane(msg)
+
+	case dispatchDoneMsg:
+		return m.onDispatchDone(msg)
 
 	case selectKeyMsg:
 		return m.onSelectKey(msg)

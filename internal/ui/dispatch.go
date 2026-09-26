@@ -15,16 +15,21 @@ import (
 	"github.com/olddognewflex/tktban/internal/tkt"
 )
 
-// Dispatcher is the optional slice of a live source that can prepare a
-// dispatch — a separate interface from LiveSource for the same reason
-// PaneFocuser is: a source that only reads status still drives the badges, it
-// just has no D key.
+// Dispatcher is the optional slice of a live source that can dispatch — a
+// separate interface from LiveSource for the same reason PaneFocuser is: a
+// source that only reads status still drives the badges, it just has no D key.
 //
-// Today it is one read. Creating the worktree and starting the agent land with
-// the change that actually does them; this interface widens then, and the fake
-// in the tests is what proves the dry run calls nothing else.
+// It is herdr.DispatchClient exactly, and that interface is deliberately
+// exhaustive: there is no worktree.remove, no pane.close and no
+// workspace.close in it, so no failure path here can reach one. A worktree
+// that survives a failed agent start is left where it is and recorded on the
+// ticket.
+//
+// The board holds no herdr parameters of its own. Every request this file
+// causes is built by herdr.Sequence; the board's job is to give each step a
+// budget, say which one is running, and word the outcome.
 type Dispatcher interface {
-	WorktreeList(ctx context.Context, cwd string) (herdr.WorktreeListResult, error)
+	herdr.DispatchClient
 }
 
 // dispatchPrepTimeout bounds the whole preparation — two tkt config reads and
@@ -320,31 +325,474 @@ func dispatchRefusalText(plan herdr.Plan, err error) string {
 	return "Couldn't prepare a dispatch: " + err.Error()
 }
 
-// onDispatchResult closes the confirm modal and acts on the answer.
+// ---- the create sequence ----
+
+// The budgets for the staged calls. Each stage gets its own, because they are
+// not comparable amounts of work: cutting a branch and opening a worktree is
+// filesystem work on a repository that may be large, starting an agent waits
+// for a login shell to reach a prompt and then for a process to come up, and
+// typing a prompt into a running agent is one socket round trip.
 //
-// This is the whole of the dry run: enter says what would have happened and
-// nothing happens. No worktree, no agent, no transition, no comment — the only
-// herdr call the D key makes at all is the worktree.list in the preflight
-// above. esc says nothing, because cancelling a dialog needs no announcement.
+// dispatchAgentTimeout is deliberately longer than herdr's own
+// AgentStartTimeoutMS (20s). herdr's timer therefore fires first, and a herdr
+// timeout arrives as a typed error naming what failed; ours arrives as a
+// closed socket and a bare deadline, which tells nobody anything.
+const (
+	dispatchWorktreeTimeout = 15 * time.Second
+	dispatchAgentTimeout    = 25 * time.Second
+	dispatchPromptTimeout   = 5 * time.Second
+	dispatchWriteTimeout    = 5 * time.Second
+)
+
+// dispatchStageBudget is how long one herdr stage gets.
+func dispatchStageBudget(stage herdr.Stage) time.Duration {
+	switch stage {
+	case herdr.StageWorktree:
+		return dispatchWorktreeTimeout
+	case herdr.StageAgent:
+		return dispatchAgentTimeout
+	case herdr.StagePrompt:
+		return dispatchPromptTimeout
+	}
+	return dispatchPromptTimeout
+}
+
+// dispatchStageContext / dispatchWriteContext mint those budgets, and
+// dispatchSleep is the wait between agent.start retries. All three are
+// variables for the same reason dispatchPrepContext is: a test has to be able
+// to see what the code does when a budget runs out, and to read the retry
+// schedule without spending three real seconds on it.
+var (
+	dispatchStageContext = func(stage herdr.Stage) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), dispatchStageBudget(stage))
+	}
+	dispatchWriteContext = func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), dispatchWriteTimeout)
+	}
+	dispatchSleep herdr.Sleeper = herdr.SleepCtx
+)
+
+// dispatchStageMsg is one finished step of the create sequence, carrying the
+// whole sequence forward. The sequence is a value, so the message holds the
+// state and the model just stores it: two updates never share it.
+type dispatchStageMsg struct{ seq herdr.Sequence }
+
+// dispatchLaneMsg is the outcome of the dispatch's `tkt transition`.
+type dispatchLaneMsg struct {
+	err error
+	// skipped means no transition was attempted because the ticket is no
+	// longer in the lane the plan was built for; lane is where it is instead.
+	skipped bool
+	lane    string
+}
+
+// dispatchDoneMsg is the outcome of the dispatch's `tkt comment`, which is the
+// last thing a dispatch does.
+type dispatchDoneMsg struct{ err error }
+
+// dispatchReport is everything the status line and the ticket comment are
+// built from: what herdr did, and what the two tkt writes did afterwards.
+type dispatchReport struct {
+	plan herdr.Plan
+	res  herdr.DispatchResult
+
+	laneMoved   bool
+	laneSkipped bool
+	laneNow     string // the lane the ticket is in instead, for a skip
+	laneErr     error
+
+	commentErr error
+}
+
+// onDispatchResult acts on the confirm dialog's answer. enter starts the
+// create sequence; esc closes the dialog and says nothing, because cancelling
+// a dialog needs no announcement.
 //
-// The plan arrives on the message rather than being rebuilt here, so whatever
-// acts on it acts on exactly what the person was shown.
+// The plan arrives on the message rather than being rebuilt here, so what is
+// created is exactly what the person was shown. Nothing below this line reads
+// the board's selection again.
 func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
-	m.modal = nil
 	if !msg.confirmed {
+		m.modal = nil
 		return m, nil
 	}
 	// The keypress guard is not enough on its own. Live status keeps polling
-	// the whole time the dialog is open, so an agent can appear on this
-	// ticket between D and enter — someone else dispatching it, or a pane
-	// checking the branch out by hand. Today that only changes what the board
-	// says; once enter creates things it is what stops two agents racing one
-	// branch, so the check is here, on the plan's own key, and not on
-	// whatever the selection has become since.
+	// the whole time the dialog is open, so an agent can appear on this ticket
+	// between D and enter — someone else dispatching it, or a pane checking
+	// the branch out by hand. This is what stops two agents racing one branch,
+	// so it is checked on the plan's own key, and not on whatever the
+	// selection has become since.
 	if _, live := herdr.PickPane(m.live.byKey[msg.plan.Key]); live {
+		m.modal = nil
 		return m, m.setStatus(msg.plan.Key+" picked up an agent while the dialog was open (o focuses it)", "warn")
 	}
-	return m, m.setStatus("Dry run — dispatch lands in the next change; nothing was created for "+msg.plan.Key, "")
+	disp, ok := m.live.src.(Dispatcher)
+	if !ok {
+		// Unreachable through the D key, which checks this before opening the
+		// dialog. Refusing beats a nil dereference if it ever becomes
+		// reachable.
+		m.modal = nil
+		return m, m.setStatus("This board can't dispatch herdr agents", "warn")
+	}
+	m.dispatchSrc = disp
+	m.dispatchSeq = herdr.NewSequence(msg.plan, msg.pre)
+	m.dispatchRep = dispatchReport{plan: msg.plan}
+	// The dialog stays open, now as a progress display. That is what swallows
+	// every further keystroke: a second enter cannot reach this function, so
+	// it cannot create a second worktree.
+	m.modal = newDispatchModal(msg.plan, msg.pre).
+		withProgress(dispatchStageLabel(m.dispatchSeq))
+	return m, dispatchStageCmd(disp, m.dispatchSeq)
+}
+
+// dispatchStageCmd runs exactly one step of the sequence, under that step's
+// own budget.
+//
+// One step per command is the whole staging design. It is what gives each step
+// its own deadline, what lets the dialog say which step is running, and — the
+// reason it is a tea.Cmd and never a bare goroutine — what keeps every write
+// this feature makes on Bubble Tea's own command path, where the test harness
+// can see it. A write issued from a `go func()` would escape that, and the
+// test runner has no mutex precisely so the race detector reports it.
+func dispatchStageCmd(d Dispatcher, seq herdr.Sequence) tea.Cmd {
+	stage := seq.Stage()
+	return func() tea.Msg {
+		ctx, cancel := dispatchStageContext(stage)
+		defer cancel()
+		return dispatchStageMsg{seq: seq.Next(ctx, d, dispatchSleep)}
+	}
+}
+
+// onDispatchStage stores a finished step and runs the next one, or moves on to
+// the ticket writes once herdr's half is over.
+func (m Model) onDispatchStage(msg dispatchStageMsg) (tea.Model, tea.Cmd) {
+	if m.dispatchSrc == nil {
+		return m, nil // not ours: a stale message after the run was torn down
+	}
+	m.dispatchSeq = msg.seq
+	m.dispatchRep.res = msg.seq.Res
+	if msg.seq.Stage() != herdr.StageDone {
+		m.modal = m.progressModal(dispatchStageLabel(msg.seq))
+		return m, dispatchStageCmd(m.dispatchSrc, msg.seq)
+	}
+	return m.startDispatchWrites()
+}
+
+// startDispatchWrites runs the ticket half: move the lane, then record what
+// happened.
+//
+// The lane moves only when the agent actually started. A worktree that exists
+// with no agent in it is not a ticket somebody is working on, so moving it
+// would be a lie on the board — and the failure matrix says so for both the
+// worktree and the agent rows.
+func (m Model) startDispatchWrites() (tea.Model, tea.Cmd) {
+	if !m.dispatchSeq.Res.Started {
+		return m.startDispatchComment()
+	}
+	plan := m.dispatchSeq.Plan
+	// Only from the lane the plan was built for. `tkt transition` is a move
+	// between two named roles, and the ticket may have moved since D was
+	// pressed — a refresh, a colleague, another board. Moving it from wherever
+	// it is now to the plan's target is not the transition the person agreed
+	// to, so it is skipped and said.
+	if role, found := m.roleOfKey(plan.Key); found && role != plan.SourceRole {
+		return m, send(dispatchLaneMsg{skipped: true, lane: laneOf(m.roles, role)})
+	}
+	m.modal = m.progressModal("Moving " + plan.Key + " to " + dispatchLaneName(plan) + "…")
+	return m, dispatchLaneCmd(m.tkt, plan)
+}
+
+// dispatchLaneCmd is the dispatch's own `tkt transition`, under its own budget.
+func dispatchLaneCmd(tk *tkt.Tkt, plan herdr.Plan) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := dispatchWriteContext()
+		defer cancel()
+		return dispatchLaneMsg{err: tk.WithContext(ctx).Transition(plan.Key, plan.TargetRole)}
+	}
+}
+
+func (m Model) onDispatchLane(msg dispatchLaneMsg) (tea.Model, tea.Cmd) {
+	if m.dispatchSrc == nil {
+		return m, nil
+	}
+	m.dispatchRep.laneErr = msg.err
+	m.dispatchRep.laneSkipped = msg.skipped
+	m.dispatchRep.laneNow = msg.lane
+	m.dispatchRep.laneMoved = !msg.skipped && msg.err == nil
+	return m.startDispatchComment()
+}
+
+// startDispatchComment records the dispatch on the ticket. It runs on every
+// path, success and failure alike: a worktree that was left behind, a pane an
+// agent never started in and a prompt that did not land are all things the
+// next person to open the ticket needs to know, and the comment is the only
+// place they survive the board being closed.
+func (m Model) startDispatchComment() (tea.Model, tea.Cmd) {
+	m.modal = m.progressModal("Recording the dispatch on " + m.dispatchRep.plan.Key + "…")
+	return m, dispatchCommentCmd(m.tkt, m.dispatchRep)
+}
+
+func dispatchCommentCmd(tk *tkt.Tkt, rep dispatchReport) tea.Cmd {
+	body := dispatchCommentBody(rep)
+	return func() tea.Msg {
+		ctx, cancel := dispatchWriteContext()
+		defer cancel()
+		return dispatchDoneMsg{err: tk.WithContext(ctx).Comment(rep.plan.Key, body)}
+	}
+}
+
+// onDispatchDone closes the dialog and says what happened.
+//
+// It does not quit, even as herdr's popup. A successful dispatch leaves an
+// agent to go and look at, and the person follows with o; quitting here would
+// take the board away at the exact moment it has something to show.
+func (m Model) onDispatchDone(msg dispatchDoneMsg) (tea.Model, tea.Cmd) {
+	if m.dispatchSrc == nil {
+		return m, nil
+	}
+	m.dispatchRep.commentErr = msg.err
+	rep := m.dispatchRep
+	m.modal = nil
+	m.dispatchSrc = nil
+	m.dispatchSeq = herdr.Sequence{}
+	m.dispatchRep = dispatchReport{}
+	text, kind := dispatchStatusText(rep)
+	// The lane may have moved, so the board is out of date either way.
+	return m, tea.Batch(m.setStatus(text, kind), refreshCmd(m.tkt, m.filter))
+}
+
+// progressModal re-renders the confirm dialog with the step now running. A
+// board that is somehow not showing that dialog any more is left alone.
+func (m Model) progressModal(step string) modal {
+	dm, ok := m.modal.(dispatchModal)
+	if !ok {
+		return m.modal
+	}
+	return dm.withProgress(step)
+}
+
+// roleOfKey is the column role a ticket is in right now, across hidden columns
+// too — a hidden lane is still the lane the ticket is in.
+func (m Model) roleOfKey(key string) (string, bool) {
+	for _, col := range m.allColumns {
+		for _, c := range col.Cards {
+			if normalizeKey(c.Key) == key {
+				return col.Role, true
+			}
+		}
+	}
+	return "", false
+}
+
+// ---- wording ----
+
+// dispatchStageLabel is what the dialog says it is doing.
+func dispatchStageLabel(seq herdr.Sequence) string {
+	switch seq.Stage() {
+	case herdr.StageWorktree:
+		if seq.Pre.ExistingWorktreePath != "" {
+			return "Opening the worktree at " + seq.Pre.ExistingWorktreePath + "…"
+		}
+		return "Cutting " + seq.Plan.Branch + " and opening a worktree…"
+	case herdr.StageAgent:
+		return "Starting " + seq.Plan.AgentKind + " in the worktree…"
+	case herdr.StagePrompt:
+		return "Sending the first prompt…"
+	}
+	return "Finishing up…"
+}
+
+// dispatchLaneName is the plan's target lane, falling back to the role key so
+// a message never comes out blank.
+func dispatchLaneName(plan herdr.Plan) string {
+	if plan.TargetLane != "" {
+		return plan.TargetLane
+	}
+	return plan.TargetRole
+}
+
+// dispatchSourceLaneName is the plan's source lane, same fallback.
+func dispatchSourceLaneName(plan herdr.Plan) string {
+	if plan.SourceLane != "" {
+		return plan.SourceLane
+	}
+	return plan.SourceRole
+}
+
+// dispatchStepName is the herdr method that failed. The worktree stage is two
+// methods and which one ran is on the result, so it is named accordingly:
+// "worktree.open failed" sends someone to a different part of herdr's log than
+// "worktree.create failed" does.
+func dispatchStepName(res herdr.DispatchResult) string {
+	if res.Failed == herdr.StageWorktree && res.Reused {
+		return "worktree.open"
+	}
+	return res.Failed.String()
+}
+
+// dispatchFailureText words one herdr failure: the step, and either herdr's
+// own code and message or the fact that herdr never answered at all.
+//
+// The distinction matters more than it looks. A typed error reply means herdr
+// decided not to do the thing, so we know it did not happen. A closed socket
+// or an expired deadline means we do not know whether it happened, and the
+// wording has to admit that rather than imply a clean failure — which is also
+// why nothing ever retries the worktree step: a retry after "we don't know"
+// is how a ticket ends up with two worktrees.
+func dispatchFailureText(res herdr.DispatchResult) string {
+	step := dispatchStepName(res)
+	var apiErr *herdr.APIError
+	if errors.As(res.Err, &apiErr) {
+		return step + " failed — " + apiErr.Code + ": " + apiErr.Message
+	}
+	return step + " did not answer (" + res.Err.Error() + "), so the dispatch may be incomplete"
+}
+
+// dispatchStatusText words the whole outcome for the status line, and says
+// whether it is a warning.
+//
+// One function, one place: every row of the failure matrix is worded here, and
+// the tests walk the same table.
+func dispatchStatusText(rep dispatchReport) (string, string) {
+	plan, res := rep.plan, rep.res
+	var b strings.Builder
+	kind := "warn"
+	switch {
+	case res.Err != nil && res.Failed == herdr.StageWorktree && !res.Created:
+		// AC2: the worktree could not be made, so nothing at all was created.
+		b.WriteString(plan.Key + " was not dispatched: " + dispatchFailureText(res) +
+			". Nothing was created and " + plan.Key + " did not move")
+
+	case res.Err != nil && res.Failed == herdr.StageWorktree:
+		// herdr made the worktree and then answered without a pane to start an
+		// agent in. It is still there, and nothing here removes it.
+		b.WriteString(plan.Key + " was not dispatched: " + dispatchFailureText(res) +
+			". The worktree at " + res.WorktreePath + " is still there; nothing was removed")
+
+	case res.Failed == herdr.StageAgent:
+		b.WriteString(plan.Key + "'s worktree is ready at " + res.WorktreePath +
+			" but the agent did not start — " + dispatchFailureText(res) +
+			". Nothing was removed and " + plan.Key + " did not move")
+
+	case res.Failed == herdr.StagePrompt:
+		// The agent IS dispatched, so this is a partial success: the lane
+		// moves and the prompt is the person's to paste.
+		b.WriteString("Dispatched " + plan.Key + " to " + res.AgentName +
+			", but the first prompt did not land — " + dispatchFailureText(res) +
+			". o focuses the pane so you can paste it")
+
+	default:
+		kind = ""
+		b.WriteString("Dispatched " + plan.Key + " to " + res.AgentName + " in " + res.WorktreePath +
+			" (o focuses it)")
+		if res.Reused {
+			b.WriteString(", reusing its worktree")
+		}
+		if res.Start.Busy > 0 {
+			// Otherwise a dispatch that sat there for three seconds looks
+			// broken rather than patient.
+			b.WriteString(fmt.Sprintf(", after waiting %s for the shell", res.Start.Waited.Round(100*time.Millisecond)))
+		}
+		if res.Start.Renamed > 0 {
+			b.WriteString(" (the name " + herdr.AgentName(plan.Key) + " was taken)")
+		}
+	}
+
+	switch {
+	case rep.laneSkipped:
+		b.WriteString(" — " + plan.Key + " had already left " + dispatchSourceLaneName(plan))
+		if rep.laneNow != "" {
+			b.WriteString(" (it is in " + rep.laneNow + " now)")
+		}
+		b.WriteString(", so the lane was left alone")
+		kind = "warn"
+	case rep.laneErr != nil:
+		b.WriteString(" — but the lane did not move: " + rep.laneErr.Error())
+		kind = "warn"
+	case rep.laneMoved:
+		b.WriteString(" — moved to " + dispatchLaneName(plan))
+	}
+
+	if rep.commentErr != nil {
+		// A comment is a record, not a gate: it never blocks and never undoes
+		// anything, it just says it did not land.
+		b.WriteString(" (not recorded on the ticket: " + rep.commentErr.Error() + ")")
+		kind = "warn"
+	}
+	return b.String(), kind
+}
+
+// dispatchCommentBody is the comment a dispatch leaves on the ticket.
+//
+// It is the only record that outlives the board, and the case it exists for is
+// the half-finished one: a worktree that was left in place, the pane an agent
+// never started in, herdr's own error code. Somebody reading the ticket a week
+// later has to be able to find that worktree and decide what to do with it, so
+// every identifier the sequence learned goes in.
+func dispatchCommentBody(rep dispatchReport) string {
+	plan, res := rep.plan, rep.res
+	var b strings.Builder
+	if res.Err == nil {
+		b.WriteString("tktban dispatched " + plan.Key + " to a herdr agent.\n\n")
+	} else {
+		b.WriteString("tktban could not finish dispatching " + plan.Key +
+			" to a herdr agent; " + dispatchFailureText(res) + ".\n\n")
+	}
+	line := func(label, value string) {
+		if value != "" {
+			b.WriteString("- " + label + ": " + value + "\n")
+		}
+	}
+	line("branch", plan.Branch+" (from "+plan.Base+")")
+	if res.WorktreePath != "" {
+		what := "created"
+		if res.Reused {
+			what = "reused"
+			if res.AlreadyOpen {
+				what = "reused, already open"
+			}
+		}
+		line("worktree", res.WorktreePath+" ("+what+")")
+	}
+	line("workspace", res.WorkspaceID)
+	line("tab", res.TabID)
+	line("pane", res.PaneID)
+	if res.Started {
+		agent := res.AgentName + " (" + plan.AgentKind + ")"
+		if len(res.Argv) > 0 {
+			agent += ", argv: " + strings.Join(res.Argv, " ")
+		}
+		line("agent", agent)
+		if res.Start.Attempts > 1 {
+			line("agent start", fmt.Sprintf("%d attempts, %d busy, %d renamed, waited %s",
+				res.Start.Attempts, res.Start.Busy, res.Start.Renamed, res.Start.Waited))
+		}
+	} else if res.Created {
+		line("agent", "not started; the worktree and its pane were left in place")
+	}
+	if res.Prompted {
+		line("prompt", "sent")
+	} else if res.Started {
+		line("prompt", "NOT sent — paste it into the pane by hand")
+	}
+	switch {
+	case rep.laneMoved:
+		line("lane", dispatchSourceLaneName(plan)+" → "+dispatchLaneName(plan))
+	case rep.laneSkipped:
+		lane := rep.laneNow
+		if lane == "" {
+			lane = "another lane"
+		}
+		line("lane", "left alone: "+plan.Key+" had already moved to "+lane)
+	case rep.laneErr != nil:
+		line("lane", "did not move: "+rep.laneErr.Error())
+	default:
+		line("lane", "unchanged ("+dispatchSourceLaneName(plan)+")")
+	}
+	if res.Prompted {
+		b.WriteString("\nPrompt:\n\n" + plan.Prompt + "\n")
+	}
+	return b.String()
 }
 
 // roleOrder is the board's role keys in board order.

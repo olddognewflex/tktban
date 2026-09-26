@@ -734,7 +734,7 @@ func parseLabels(s string) []string {
 	return out
 }
 
-// ---- Dispatch (dry run) ----
+// ---- Dispatch ----
 
 // worktreePlacement is what the modal says about where the worktree goes.
 // tktban deliberately sends no path: herdr owns worktree placement
@@ -742,27 +742,61 @@ func parseLabels(s string) []string {
 // worktree lands beside the ones the person makes by hand.
 const worktreePlacement = "herdr chooses the path ([worktrees] directory)"
 
-// dispatchModal confirms a dispatch by showing exactly what it would create,
-// field by field, before anything is created.
+// dispatchModal confirms a dispatch by showing exactly what it will create,
+// field by field, before any of it is created — and then stays open as the
+// progress display while it happens.
 //
-// In this change enter creates nothing: it closes the dialog and the board
-// says so. The dialog is the point — it is the last place a wrong repo, a
-// wrong branch or a wrong lane is still cheap — so it is built and tested now,
-// against the same plan the create sequence will later consume unchanged.
+// Staying open is not cosmetic. It is what swallows every keystroke for the few
+// seconds a dispatch takes: while a step is in flight the dialog answers
+// nothing at all, so a second enter cannot reach the board and cannot create a
+// second worktree. The other half of that guarantee is that the board never
+// re-reads its selection; between them, a dispatch acts once, on the plan that
+// was rendered here and agreed to.
 //
-// "Unchanged" is literal: the answer carries the plan and its preflight back
-// out on dispatchResultMsg, so whatever acts on them acts on exactly what was
-// rendered here and agreed to.
+// "The plan that was rendered here" is literal: the answer carries the plan and
+// its preflight back out on dispatchResultMsg, so what the create sequence acts
+// on is the same value, unchanged.
 type dispatchModal struct {
 	plan herdr.Plan
 	pre  herdr.PreflightResult
+
+	// progress is the step running right now, "" while the dialog is still a
+	// question. Non-empty means in flight. done is the steps already finished,
+	// so the dialog reads as a log of what has happened rather than one line
+	// that keeps being replaced — which matters when it stops on a failure and
+	// the person needs to see how far it got.
+	progress string
+	done     []string
 }
 
 func newDispatchModal(plan herdr.Plan, pre herdr.PreflightResult) dispatchModal {
 	return dispatchModal{plan: plan, pre: pre}
 }
 
+// withProgress moves the dialog on to step. The previous step joins the log.
+//
+// The copy of done is not defensive housekeeping: the board holds a Model by
+// value and a modal inside it, and appending in place would let two updates
+// share one backing array. Whether that can happen today is not the point; a
+// dialog that reports a different history than the one that ran is a bad way
+// to find out.
+func (m dispatchModal) withProgress(step string) dispatchModal {
+	if m.progress != "" {
+		m.done = append(append([]string(nil), m.done...), m.progress)
+	}
+	m.progress = step
+	return m
+}
+
+// running reports whether a confirmed dispatch is in flight.
+func (m dispatchModal) running() bool { return m.progress != "" }
+
 func (m dispatchModal) Update(msg tea.Msg) (modal, tea.Cmd) {
+	if m.running() {
+		// Every key, enter and esc included. There is nothing left to answer:
+		// the worktree is being cut, and no keystroke can un-cut it.
+		return m, nil
+	}
 	switch {
 	case keyIn(msg, "esc", "escape"):
 		return m, send(dispatchResultMsg{plan: m.plan, pre: m.pre})
@@ -857,6 +891,16 @@ func (m dispatchModal) View(st styles, width, height int) string {
 		b.WriteString(wrap(st.fieldLabel.Render(row[0])+"  "+row[1]) + "\n")
 	}
 	b.WriteString("\n" + st.fieldLabel.Render("prompt") + "\n" + wrap(m.plan.Prompt) + "\n")
-	b.WriteString("\n" + wrap(st.fieldLabel.Render("Dry run: nothing is created yet. enter close · esc cancel")))
+	if !m.running() {
+		b.WriteString("\n" + wrap(st.fieldLabel.Render("enter dispatch · esc cancel")))
+		return dialogBox(st, width, height, b.String())
+	}
+	// In flight: the log of what has happened, then what is happening. No key
+	// hint, because no key does anything.
+	b.WriteString("\n")
+	for _, step := range m.done {
+		b.WriteString(wrap(st.fieldLabel.Render("✓ "+step)) + "\n")
+	}
+	b.WriteString(wrap(st.cardMeta.Render("▸ "+m.progress)) + "\n")
 	return dialogBox(st, width, height, b.String())
 }
