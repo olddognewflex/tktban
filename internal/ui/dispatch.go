@@ -65,6 +65,11 @@ type dispatchTarget struct {
 
 	roles []model.RolePair // board order, for ranking and naming the target lane
 
+	// configFile is the tkt config to name in a refusal that asks for a
+	// configuration change. Captured with the rest of the target, so the
+	// command never reaches back into the model.
+	configFile string
+
 	agentKind string
 	agentArgs []string
 	prompt    string // "" takes herdr.DefaultPrompt
@@ -141,7 +146,10 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 		return m, m.setStatus("Dispatch is off for this board (--no-herdr-dispatch)", "warn")
 	}
 	if on, _ := m.settings["dispatch"].(bool); !on {
-		return m, m.setStatus("Dispatch is off (set dispatch = true in tktban's settings.toml)", "warn")
+		// Name the file. There are two of them — herdr's plugin state dir and
+		// the standalone config dir — and a person who has just set
+		// dispatch = true in the other one is owed the path, not a noun.
+		return m, m.setStatus("Dispatch is off — set dispatch = true in "+m.settingsFile(), "warn")
 	}
 	if m.live.src == nil {
 		return m, m.setStatus("Live agent status is off", "warn")
@@ -174,17 +182,19 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 		return m, m.setStatus(key+" already has an agent pane (o focuses it)", "warn")
 	}
 	if m.dispatchDir == "" {
-		return m, m.setStatus("Don't know which repo to dispatch "+key+" in", "warn")
+		return m, m.setStatus("Don't know which repo to dispatch "+key+
+			" in — open the board from a pane in the repo", "warn")
 	}
 	target := dispatchTarget{
-		key:       key,
-		summary:   card.Summary,
-		role:      m.columns[m.focusCol].Role,
-		dir:       m.dispatchDir,
-		roles:     m.roles,
-		agentKind: m.dispatchAgentKind(),
-		agentArgs: strings.Fields(str(m.settings["dispatch_args"])),
-		prompt:    str(m.settings["dispatch_prompt"]),
+		key:        key,
+		summary:    card.Summary,
+		role:       m.columns[m.focusCol].Role,
+		dir:        m.dispatchDir,
+		roles:      m.roles,
+		configFile: m.tktConfigFile(),
+		agentKind:  m.dispatchAgentKind(),
+		agentArgs:  strings.Fields(str(m.settings["dispatch_args"])),
+		prompt:     str(m.settings["dispatch_prompt"]),
 	}
 	m.dispatching = true
 	return m, dispatchPrepCmd(m.tkt, disp, target)
@@ -234,7 +244,8 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 			return *out
 		}
 		if vcs.BranchFmt == "" {
-			return dispatchPrepMsg{err: refuse("No [vcs] branch_fmt in the tkt config, so there is no branch to cut")}
+			return dispatchPrepMsg{err: refuse(
+				"No [vcs] branch_fmt in %s, so there is no branch to cut", t.configFile)}
 		}
 		// Rendered here as well as inside BuildPlan. RenderBranch is pure, so
 		// the two agree by construction, and checking it here keeps the
@@ -242,8 +253,8 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 		branch := herdr.RenderBranch(vcs.BranchFmt, t.key, herdr.SlugFromSummary(t.summary))
 		if !herdr.BranchNamesKey(branch, t.key) {
 			return dispatchPrepMsg{err: refuse(
-				"branch_fmt %q doesn't name %s: the board could never badge or jump to its agent",
-				vcs.BranchFmt, t.key)}
+				"branch_fmt %q in %s doesn't name %s: the board could never badge or jump to its agent",
+				vcs.BranchFmt, t.configFile, t.key)}
 		}
 		ownership := btk.BoardOwnership()
 		if out := timedOut(); out != nil {
@@ -251,7 +262,9 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 		}
 		targetRole, ok := tkt.AgentTarget(ownership, t.role, roleOrder(t.roles))
 		if !ok {
-			return dispatchPrepMsg{err: refuse("No agent-owned transition out of %s", laneOf(t.roles, t.role))}
+			return dispatchPrepMsg{err: refuse(
+				"No agent-owned transition out of %s ([board] ownership in %s)",
+				laneOf(t.roles, t.role), t.configFile)}
 		}
 		plan := herdr.BuildPlan(herdr.PlanInput{
 			Key:        t.key,

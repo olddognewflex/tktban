@@ -272,18 +272,29 @@ dispatch_prompt = ""        # empty = the built-in prompt
 and `{lane}`. `--no-herdr-dispatch` turns the key off for one run whatever the
 setting says.
 
+**There are two of those files, and a board reads exactly one.** Setting
+`dispatch = true` in the standalone file will not turn the key on for a board
+herdr launched, which reads the plugin one — the same split that makes `notify`
+land in only one place ([Notifications](#notifications)). So `D` names the file
+*that board* is reading when it refuses, and that is the file to edit:
+
+```
+Dispatch is off — set dispatch = true in ~/.local/state/herdr/plugins/odnf.tktban/settings.toml
+```
+
 Every way `D` can refuse says which one it was, and opens nothing:
 
 | Refusal | Why |
 |---------|-----|
-| `Dispatch is off …` | the opt-in setting is not set |
+| `Dispatch is off — set dispatch = true in <file>` | the opt-in setting is not set in the file this board reads |
 | `Dispatch is off for this board (--no-herdr-dispatch)` | turned off for this run on the command line |
 | `Live agent status is off` / `herdr live status unavailable` | outside herdr, or herdr is not answering |
 | `Select a card first` / `That card has no ticket key` | nothing to dispatch |
 | `TKB-25 already has an agent pane (o focuses it)` | an agent is already on it; two agents racing one branch is not an improvement |
-| `Don't know which repo to dispatch TKB-25 in` | see below |
-| `branch_fmt … doesn't name TKB-25` | the branch would not name the ticket, so the board could never badge or jump to its agent |
-| `No agent-owned transition out of To Do` | `[board] ownership` gives no agent-owned move out of that lane |
+| `Don't know which repo to dispatch TKB-25 in — open the board from a pane in the repo` | see below |
+| `No [vcs] branch_fmt in <config>` | no branch convention to follow |
+| `branch_fmt … in <config> doesn't name TKB-25` | the branch would not name the ticket, so the board could never badge or jump to its agent |
+| `No agent-owned transition out of To Do ([board] ownership in <config>)` | `[board] ownership` gives no agent-owned move out of that lane |
 | `Not a git work tree: …` | herdr says the directory is not a checkout |
 | `This board is open in a worktree …` | there is nothing to branch from |
 | `Timed out reading the tkt config …` | the two `tkt cfg` reads did not finish inside the 2 s budget |
@@ -364,7 +375,8 @@ Things to know:
   by the 30 s flap guard as if this toast had shown. One told `disabled` or
   `no_foreground_client` keeps it, since trying again cannot help.
 - **Turn them off** with `b` on the board. It flips `notify` in the settings
-  file that board is using, says which way it went in the status line, and —
+  file that board is using, says which way it went — naming that file, when it
+  is not the one the hook reads — and —
   on herdr's own board, while live status is on — the subtitle reads
   `herdr live (muted)` until you press `b` again. Editing the file by hand
   still works: `notify = false`, as the TOML boolean (`"false"` or `0` count

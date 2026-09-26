@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,5 +66,46 @@ func TestBoardNeverWritesTheDispatchSettings(t *testing.T) {
 		if got["dispatch_agent"] != "codex" {
 			t.Fatalf("%q: dispatch_agent after a board save = %v; file:\n%s", press, got["dispatch_agent"], raw)
 		}
+	}
+}
+
+// TKB-25: a refusal that asks someone to change a setting has to name the file
+// the board is reading, so abbrevHome must not mangle one.
+func TestAbbrevHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home directory")
+	}
+	sep := string(os.PathSeparator)
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"inside home", filepath.Join(home, ".config", "tktban", "settings.toml"),
+			"~" + sep + filepath.Join(".config", "tktban", "settings.toml")},
+		{"home itself", home, "~"},
+		{"outside home", filepath.Join(sep+"etc", "tktban.toml"), filepath.Join(sep+"etc", "tktban.toml")},
+		{"empty", "", ""},
+		// A different directory that merely starts with the home path must not
+		// be rewritten: ~/x is not the same place as <home>-backup/x.
+		{"home is only a prefix of the path", home + "-backup" + sep + "x", home + "-backup" + sep + "x"},
+	}
+	for _, c := range cases {
+		if got := abbrevHome(c.path); got != c.want {
+			t.Errorf("%s: abbrevHome(%q) = %q, want %q", c.name, c.path, got, c.want)
+		}
+	}
+}
+
+// The two file-naming helpers answer the board's real paths, never a guess.
+func TestSettingsAndConfigFileHelpers(t *testing.T) {
+	m, _ := testModel(t)
+	if got := m.settingsFile(); got != abbrevHome(m.settingsPath) {
+		t.Errorf("settingsFile = %q, want the abbreviated settings path %q", got, m.settingsPath)
+	}
+	// tkt discovering its own config: the conventional name is all we know.
+	if got := m.tktConfigFile(); got != configName {
+		t.Errorf("tktConfigFile with no explicit config = %q, want %q", got, configName)
 	}
 }

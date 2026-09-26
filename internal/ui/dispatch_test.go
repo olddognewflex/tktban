@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/olddognewflex/tktban/internal/herdr"
 	"github.com/olddognewflex/tktban/internal/model"
+	"github.com/olddognewflex/tktban/internal/tkt"
 )
 
 // fakeDispatch is a live source that can also prepare a dispatch. It carries
@@ -191,25 +194,32 @@ func TestDispatchGuardLadder(t *testing.T) {
 		name  string
 		setup func(t *testing.T, m Model, src *fakeDispatch) Model
 		want  string
+		// wantf is for a refusal that names the file the board is reading,
+		// which is a temp directory here. Which file it names is pinned by
+		// TestDispatchOffRefusalNamesTheFileTheBoardReads; this table is
+		// pinning that the rung refuses at all.
+		wantf func(m Model) string
 	}{
 		{"the setting is off", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
 			m.settings["dispatch"] = false
 			return m
-		}, "Dispatch is off (set dispatch = true in tktban's settings.toml)"},
+		}, "", func(m Model) string {
+			return "Dispatch is off — set dispatch = true in " + m.settingsFile()
+		}},
 
 		{"no live source at all", func(t *testing.T, _ Model, _ *fakeDispatch) Model {
 			m, _ := testModel(t)
 			m = m.WithDispatch(DispatchOpts{Dir: testDispatchDir})
 			m.settings["dispatch"] = true
 			return loadBoard(m)
-		}, "Live agent status is off"},
+		}, "Live agent status is off", nil},
 
 		{"a source that only reads status", func(t *testing.T, _ Model, _ *fakeDispatch) Model {
 			m, _ := testModel(t)
 			m = m.WithLive(&fakeLive{}).WithDispatch(DispatchOpts{Dir: testDispatchDir})
 			m.settings["dispatch"] = true
 			return goLive(t, loadBoard(m))
-		}, "This board can't dispatch herdr agents"},
+		}, "This board can't dispatch herdr agents", nil},
 
 		{"herdr has gone quiet", func(t *testing.T, m Model, src *fakeDispatch) Model {
 			src.pollErr = errPoll
@@ -220,19 +230,19 @@ func TestDispatchGuardLadder(t *testing.T) {
 				t.Fatal("setup: live should be off after the failure threshold")
 			}
 			return m
-		}, "herdr live status unavailable"},
+		}, "herdr live status unavailable", nil},
 
 		{"nothing selected", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
 			for i := range m.columns {
 				m.columns[i].Cards = nil
 			}
 			return m
-		}, "Select a card first"},
+		}, "Select a card first", nil},
 
 		{"the card has no key", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
 			m.columns[0].Cards[0].Key = ""
 			return m
-		}, "That card has no ticket key"},
+		}, "That card has no ticket key", nil},
 
 		{"the ticket already has an agent", func(t *testing.T, m Model, src *fakeDispatch) Model {
 			src.byKey = map[string]herdr.Live{"TKT-1": {
@@ -240,30 +250,34 @@ func TestDispatchGuardLadder(t *testing.T) {
 				Panes:  []herdr.PaneRef{{PaneID: "wC:p1", Status: herdr.StatusWorking}},
 			}}
 			return poll(t, m)
-		}, "TKT-1 already has an agent pane (o focuses it)"},
+		}, "TKT-1 already has an agent pane (o focuses it)", nil},
 
 		{"no directory resolved", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
 			return m.WithDispatch(DispatchOpts{})
-		}, "Don't know which repo to dispatch TKT-1 in"},
+		}, "Don't know which repo to dispatch TKT-1 in — open the board from a pane in the repo", nil},
 
 		// A different refusal from the one above, and from the setting being
 		// off: the person turned it off on the command line, and sending them
 		// to look at their config instead would waste their time.
 		{"turned off on the command line", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
 			return m.WithDispatch(DispatchOpts{Dir: testDispatchDir, OptedOut: true})
-		}, "Dispatch is off for this board (--no-herdr-dispatch)"},
+		}, "Dispatch is off for this board (--no-herdr-dispatch)", nil},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m, src, cr := dispatchBoard(t)
 			m = c.setup(t, m, src)
+			want := c.want
+			if c.wantf != nil {
+				want = c.wantf(m)
+			}
 			m, _ = update(m, key("D"))
 			if m.dispatching {
 				t.Fatal("a refused dispatch still started a preparation")
 			}
-			if m.status != c.want || m.statusKind != "warn" {
-				t.Errorf("status = %q (%s), want %q (warn)", m.status, m.statusKind, c.want)
+			if m.status != want || m.statusKind != "warn" {
+				t.Errorf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
 			}
 			if m.modal != nil {
 				t.Errorf("a refused dispatch opened a %T", m.modal)
@@ -275,6 +289,107 @@ func TestDispatchGuardLadder(t *testing.T) {
 				t.Errorf("a refused dispatch ran tkt %v, which is not a read", call)
 			}
 		})
+	}
+}
+
+// dispatchOffStatus is the status a fresh board gives when D is pressed with
+// the setting off. It needs no live source: the opt-in is the first rung.
+func dispatchOffStatus(t *testing.T, settingsPath string) string {
+	t.Helper()
+	cr := &captureRunner{}
+	m := New(tkt.New("", "tkt").WithRunner(cr.run), 10, true, settingsPath)
+	m.width, m.height = 120, 30
+	m = m.WithDispatch(DispatchOpts{Dir: testDispatchDir})
+	m, _ = update(m, key("D"))
+	return m.status
+}
+
+// The bug this test exists for, reported against the dry run: dispatch = true
+// was set in ~/.config/tktban/settings.toml while the board — launched by
+// herdr's popup — reads the plugin file in herdr's state dir. The binary was
+// current; only the file was wrong. The refusal named neither file, so there
+// was nothing to act on.
+//
+// The refusal must name the file THIS board reads, which is one of two.
+func TestDispatchOffRefusalNamesTheFileTheBoardReads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if h, err := os.UserHomeDir(); err != nil || h != home {
+		t.Skip("the home directory is not settable on this platform")
+	}
+
+	plugin := filepath.Join(home, ".local", "state", "herdr", "plugins", "odnf.tktban", "settings.toml")
+	standalone := filepath.Join(home, ".config", "tktban", "settings.toml")
+	tilde := func(rel ...string) string {
+		return "~" + string(os.PathSeparator) + filepath.Join(rel...)
+	}
+	cases := []struct {
+		name  string
+		path  string
+		want  string
+		other string
+	}{
+		{
+			name:  "herdr's own board names the plugin file",
+			path:  plugin,
+			want:  tilde(".local", "state", "herdr", "plugins", "odnf.tktban", "settings.toml"),
+			other: tilde(".config", "tktban", "settings.toml"),
+		},
+		{
+			name:  "a standalone board names the standalone file",
+			path:  standalone,
+			want:  tilde(".config", "tktban", "settings.toml"),
+			other: tilde(".local", "state", "herdr", "plugins", "odnf.tktban", "settings.toml"),
+		},
+	}
+	for _, c := range cases {
+		got := dispatchOffStatus(t, c.path)
+		if !strings.Contains(got, "set dispatch = true in ") {
+			t.Errorf("%s: status = %q, want it to say what to set", c.name, got)
+		}
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: status = %q, want it to name %s", c.name, got, c.want)
+		}
+		// Naming the wrong one is the whole bug, so it is asserted against.
+		if strings.Contains(got, c.other) {
+			t.Errorf("%s: status = %q names the file this board does NOT read", c.name, got)
+		}
+	}
+
+	// An empty settings path is the standalone default, which New resolves,
+	// so the refusal still names a real file rather than nothing.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if got := dispatchOffStatus(t, ""); !strings.Contains(got, tilde(".config", "tktban", "settings.toml")) {
+		t.Errorf("an unset settings path gave %q, want the standalone default", got)
+	}
+}
+
+// A refusal that asks for a configuration change names the config file, and
+// an explicitly configured one is named as given rather than by convention.
+func TestDispatchConfigRefusalNamesTheConfigFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if h, err := os.UserHomeDir(); err != nil || h != home {
+		t.Skip("the home directory is not settable on this platform")
+	}
+	explicit := filepath.Join(home, "src", "other", ".sdlc", "config.toml")
+
+	src := &fakeDispatch{t: t, list: okList()}
+	cr := &captureRunner{ownership: `{"todo->done":"human"}`}
+	m := New(tkt.New(explicit, "tkt").WithRunner(cr.run), 10, true,
+		filepath.Join(t.TempDir(), "settings.toml"))
+	m.width, m.height = 120, 30
+	m = m.WithLive(src).WithDispatch(DispatchOpts{Dir: testDispatchDir})
+	m.settings["dispatch"] = true
+	m = goLive(t, loadBoard(m))
+
+	m = pressD(t, m)
+	want := "~" + string(os.PathSeparator) + filepath.Join("src", "other", ".sdlc", "config.toml")
+	if !strings.Contains(m.status, want) {
+		t.Fatalf("status = %q, want it to name %s", m.status, want)
+	}
+	if strings.Contains(m.status, "the tkt config") {
+		t.Errorf("status = %q still describes the config instead of naming it", m.status)
 	}
 }
 
@@ -315,22 +430,22 @@ func TestDispatchConfigRefusals(t *testing.T) {
 		{
 			name: "no vcs config",
 			vcs:  failReply,
-			want: "No [vcs] branch_fmt in the tkt config, so there is no branch to cut",
+			want: "No [vcs] branch_fmt in .sdlc/config.toml, so there is no branch to cut",
 		},
 		{
 			name: "branch_fmt without the key",
 			vcs:  `{"default_branch":"main","branch_fmt":"feature/{slug}"}`,
-			want: `branch_fmt "feature/{slug}" doesn't name TKT-1: the board could never badge or jump to its agent`,
+			want: `branch_fmt "feature/{slug}" in .sdlc/config.toml doesn't name TKT-1: the board could never badge or jump to its agent`,
 		},
 		{
 			name:      "no agent-owned transition out of the lane",
 			ownership: `{"todo->done":"human"}`,
-			want:      "No agent-owned transition out of To Do",
+			want:      "No agent-owned transition out of To Do ([board] ownership in .sdlc/config.toml)",
 		},
 		{
 			name:      "no ownership config at all",
 			ownership: failReply,
-			want:      "No agent-owned transition out of To Do",
+			want:      "No agent-owned transition out of To Do ([board] ownership in .sdlc/config.toml)",
 		},
 	}
 	for _, c := range cases {
