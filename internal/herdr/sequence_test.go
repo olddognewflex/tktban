@@ -272,6 +272,9 @@ func createdWorktree() WorktreeResult {
 	}
 }
 
+// startedAgent is herdr's agent_started reply. It carries no `name` on purpose:
+// the tests that care about the name set it explicitly, so the ones that do not
+// are exercising the fallback to the name we sent.
 func startedAgent() AgentStartResult {
 	agent := "claude"
 	return AgentStartResult{
@@ -865,17 +868,77 @@ func TestStageStrings(t *testing.T) {
 	}
 }
 
-// The prompt targets the agent by name, but falls back to the pane when there
-// is somehow no name — the pane is the one thing herdr certainly still knows.
-func TestSequencePromptFallsBackToThePane(t *testing.T) {
+// The prompt targets the name herdr REGISTERED, not the one we asked for.
+//
+// herdr's agent_started reply carries `name` as a field of its own — distinct
+// from `agent`, which is the kind — and it is not guaranteed to be the name
+// that was sent. Prompting the sent name when herdr chose another is how a
+// prompt lands in somebody else's pane, so the reply wins.
+func TestSequencePromptTargetsTheNameHerdrRegistered(t *testing.T) {
+	started := startedAgent()
+	started.Agent.Name = "tkb-25-herdrs-choice"
+	f := &recordingDispatch{create: createdWorktree(), start: started}
+
+	res, _ := runSequence(t, f, testPlan(), PreflightResult{}, nil)
+	if res.AgentName != "tkb-25-herdrs-choice" {
+		t.Fatalf("result agent name = %q, want herdr's", res.AgentName)
+	}
+	got := f.only(t, "agent.prompt").(AgentPromptParams).Target
+	if got != "tkb-25-herdrs-choice" {
+		t.Fatalf("prompt target = %q, want the name in herdr's reply", got)
+	}
+	// And the name we sent is still recorded, because a dispatch that comes
+	// back under a different name is worth being able to see.
+	if res.Start.Name != "tkb-25" {
+		t.Errorf("start stats name = %q, want the name that was sent", res.Start.Name)
+	}
+}
+
+// A herdr that answers without a name falls back to the one that was sent,
+// rather than prompting "".
+func TestSequencePromptFallsBackToTheNameSent(t *testing.T) {
 	f := &recordingDispatch{create: createdWorktree(), start: startedAgent()}
-	s := NewSequence(testPlan(), PreflightResult{})
-	s = s.Next(context.Background(), f, nil)
-	s = s.Next(context.Background(), f, nil)
-	s.Res.AgentName = ""
-	s = s.Next(context.Background(), f, nil)
-	if got := f.only(t, "agent.prompt").(AgentPromptParams).Target; got != "wE:p1" {
-		t.Fatalf("prompt target = %q, want the pane id", got)
+	res, _ := runSequence(t, f, testPlan(), PreflightResult{}, nil)
+	if res.AgentName != "tkb-25" {
+		t.Fatalf("result agent name = %q, want the sent name as the fallback", res.AgentName)
+	}
+	if got := f.only(t, "agent.prompt").(AgentPromptParams).Target; got != "tkb-25" {
+		t.Fatalf("prompt target = %q", got)
+	}
+}
+
+// A failed start leaves no agent name, because no agent exists — but it does
+// leave the name it tried, which is the useful half of "tkb-25-2 was refused".
+func TestSequenceFailedStartLeavesNoAgentNameButRecordsTheOneTried(t *testing.T) {
+	taken := &APIError{Code: CodeAgentNameTaken, Message: "taken"}
+	f := &recordingDispatch{create: createdWorktree(), startErrs: []error{taken, taken}}
+	res, _ := runSequence(t, f, testPlan(), PreflightResult{}, (&recordingSleep{}).sleep)
+	if res.AgentName != "" {
+		t.Fatalf("AgentName = %q after a failed start; no agent exists to name", res.AgentName)
+	}
+	if res.Start.Name != "tkb-25-2" {
+		t.Errorf("Start.Name = %q, want the last name tried", res.Start.Name)
+	}
+}
+
+// The retry budget has to fit inside whatever deadline a caller puts on the
+// whole stage, with herdr's own timeout for the LAST attempt inside it too.
+// That is the relation a caller sizes its budget from, so it is exported and
+// asserted rather than recomputed by hand.
+func TestAgentStartBackoffTotal(t *testing.T) {
+	if got, want := AgentStartBackoffTotal(), 3100*time.Millisecond; got != want {
+		t.Fatalf("AgentStartBackoffTotal = %v, want %v", got, want)
+	}
+	// Each entry counted exactly once, in case somebody adds one.
+	var sum time.Duration
+	for _, d := range agentStartBackoff {
+		sum += d
+	}
+	if sum != AgentStartBackoffTotal() {
+		t.Fatalf("total %v does not match the schedule %v", AgentStartBackoffTotal(), agentStartBackoff)
+	}
+	if len(agentStartBackoff) != 5 {
+		t.Fatalf("the schedule has %d retries, want 5", len(agentStartBackoff))
 	}
 }
 
@@ -949,14 +1012,22 @@ func TestSequenceRequestJSONOverARealSocket(t *testing.T) {
 			`"worktree":{"path":"/wt/tkb-25","branch":"feature/tkb-25-dispatch-a-ticket",` +
 			`"label":"TKB-25","open_workspace_id":"wE","is_bare":false,"is_detached":false,` +
 			`"is_linked_worktree":true,"is_prunable":false}}}`,
+		// The reply names the agent, and names it something other than what
+		// was asked for. That is the case this pins: `name` decoded off a real
+		// socket, and the prompt following it.
 		`{"id":"b","result":{"type":"agent_started","argv":["claude","--permission-mode","plan"],` +
-			`"agent":{"pane_id":"wE:p1","agent":"claude","agent_status":"idle"}}}`,
+			`"agent":{"pane_id":"wE:p1","agent":"claude","name":"tkb-25-renamed",` +
+			`"agent_status":"idle","workspace_id":"wE","tab_id":"wE:t1","terminal_id":"term_1",` +
+			`"focused":false,"revision":2}}}`,
 		`{"id":"c","result":{"type":"ok"}}`,
 	})
 
 	res, _ := runSequence(t, src, testPlan(), PreflightResult{RepoRoot: "/src/tktban"}, nil)
 	if res.Err != nil {
 		t.Fatalf("result = %+v", res)
+	}
+	if res.AgentName != "tkb-25-renamed" {
+		t.Fatalf("agent name = %q, want the one herdr's reply carried", res.AgentName)
 	}
 
 	got := recorded()
@@ -977,7 +1048,8 @@ func TestSequenceRequestJSONOverARealSocket(t *testing.T) {
 			"args": []any{"--permission-mode", "plan"}, "timeout_ms": float64(20000),
 		}},
 		{"agent.prompt", map[string]any{
-			"target": "tkb-25", "text": testPlan().Prompt,
+			// herdr's reply, not the plan's name and not the name sent.
+			"target": "tkb-25-renamed", "text": testPlan().Prompt,
 		}},
 	}
 	for i, want := range wantParams {

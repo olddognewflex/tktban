@@ -156,14 +156,20 @@ func (c *Client) Ping(ctx context.Context) (Pong, error) {
 // panes that run an agent, and a closed pane simply drops out of the list.
 // Unknown fields are ignored; nullable strings decode to "".
 type Agent struct {
-	PaneID        string  `json:"pane_id"`
-	WorkspaceID   string  `json:"workspace_id"`
-	TabID         string  `json:"tab_id"`
-	Agent         *string `json:"agent"` // nil once the agent is released
-	Status        Status  `json:"agent_status"`
-	Cwd           string  `json:"cwd"`
-	ForegroundCwd string  `json:"foreground_cwd"` // where the agent actually runs
-	Focused       bool    `json:"focused"`
+	PaneID      string  `json:"pane_id"`
+	WorkspaceID string  `json:"workspace_id"`
+	TabID       string  `json:"tab_id"`
+	Agent       *string `json:"agent"` // nil once the agent is released
+	// Name is the name herdr registered this agent under, which is NOT the
+	// same field as Agent: `agent` is the kind ("claude"), `name` is the
+	// identity agent.prompt and agent.get take as a target. herdr may hand
+	// back a name other than the one asked for, so a dispatch prompts the one
+	// in the reply and never the one it sent.
+	Name          string `json:"name"`
+	Status        Status `json:"agent_status"`
+	Cwd           string `json:"cwd"`
+	ForegroundCwd string `json:"foreground_cwd"` // where the agent actually runs
+	Focused       bool   `json:"focused"`
 	// StateChangeSeq is herdr's state-change counter for this pane as of
 	// this reply. Two hook processes that re-read the same transition see
 	// the same number, which is what the notify hook dedupes on. It is

@@ -378,10 +378,17 @@ func Preflight(ctx context.Context, c WorktreeLister, p Plan) (PreflightResult, 
 // AgentStartTimeoutMS is the startup budget tktban gives herdr for
 // agent.start: 20s, comfortably inside herdr's own 3000 < t <= 300000 range.
 //
-// It is deliberately shorter than the context the board wraps the call in (25s
-// there), so herdr's own timeout is the one that fires. A herdr timeout comes
-// back as a typed error reply naming what failed; our context expiring comes
-// back as a closed socket and a bare deadline, which tells nobody anything.
+// It is deliberately shorter than the context the board wraps the stage in, so
+// herdr's own timeout is the one that fires. A herdr timeout comes back as a
+// typed error reply naming what failed; our context expiring comes back as a
+// closed socket and a bare deadline, which tells nobody anything — and worse,
+// leaves us unable to say whether the agent started.
+//
+// "Inside the stage's budget" has to account for the retries, not just one
+// attempt: the last attempt of a run that spent the whole backoff must still
+// have its full 20s. AgentStartBackoffTotal is exported so a caller sizing that
+// budget can add the two together rather than guess, and a test asserts the
+// relation holds.
 const AgentStartTimeoutMS = 20000
 
 // Sleeper waits for d, or gives up early when ctx ends. It is injected so the
@@ -408,6 +415,19 @@ var agentStartBackoff = []time.Duration{
 	400 * time.Millisecond,
 	800 * time.Millisecond,
 	1600 * time.Millisecond,
+}
+
+// AgentStartBackoffTotal is the whole time StartAgentWithRetry can spend
+// waiting between attempts. A caller bounding the stage has to add it to
+// AgentStartTimeoutMS, or its own deadline cuts the last attempt short and
+// turns a herdr timeout — which says what broke — into a closed socket, which
+// says nothing and leaves the agent's state unknown.
+func AgentStartBackoffTotal() time.Duration {
+	var total time.Duration
+	for _, d := range agentStartBackoff {
+		total += d
+	}
+	return total
 }
 
 // AgentStarter is the slice of the client StartAgentWithRetry needs.
@@ -570,8 +590,11 @@ type DispatchResult struct {
 	PaneID       string // root_pane: the pane the agent is started in
 
 	// The agent step.
-	Started   bool     // agent.start succeeded: the agent is dispatched
-	AgentName string   // the name it was started under, which may not be Plan's
+	Started bool // agent.start succeeded: the agent is dispatched
+	// AgentName is the name herdr registered, which may be neither the plan's
+	// nor the last one sent. It is empty until an agent exists; a failed start
+	// leaves the name it tried on Start instead.
+	AgentName string
 	Argv      []string // the argv herdr actually ran
 	Start     AgentStartStats
 
@@ -698,31 +721,41 @@ func (s Sequence) worktree(ctx context.Context, c DispatchClient) Sequence {
 // StartAgentWithRetry documents.
 func (s Sequence) agent(ctx context.Context, c DispatchClient, sleep Sleeper) Sequence {
 	res, stats, err := StartAgentWithRetry(ctx, c, s.Plan, s.Res.PaneID, sleep)
+	// Start carries the name that was last *sent*, which is what a failure has
+	// to report — "tkt-25-2 was refused" is the useful sentence. AgentName is
+	// the name of an agent that exists, so it stays empty until one does.
 	s.Res.Start = stats
-	s.Res.AgentName = stats.Name
 	if err != nil {
 		s.Res.Failed, s.Res.Err = StageAgent, err
 		return s
 	}
 	s.Res.Started = true
 	s.Res.Argv = res.Argv
+	// The name herdr registered, in preference to the one we asked for. They
+	// are not guaranteed to match — herdr may normalise or disambiguate — and
+	// agent.prompt takes this name as its target, so prompting the name we
+	// sent rather than the name that exists is how a prompt ends up in
+	// somebody else's pane. The sent name is the fallback only for a herdr
+	// that answers without one.
+	s.Res.AgentName = res.Agent.Name
+	if s.Res.AgentName == "" {
+		s.Res.AgentName = stats.Name
+	}
 	return s
 }
 
 // prompt hands the started agent its first prompt.
+//
+// The target is Res.AgentName — the name herdr registered, not the one the plan
+// asked for. There is no fallback: this stage only runs after a successful
+// agent.start, which always leaves a name behind.
 //
 // No wait: herdr's agent.prompt accepts a wait object that blocks until the
 // agent reaches a status, and a board must never block on an agent. It is
 // fire-and-forget by design — and if it does fail, the agent is already
 // dispatched, which is why this is the one failure that still moves the lane.
 func (s Sequence) prompt(ctx context.Context, c DispatchClient) Sequence {
-	target := s.Res.AgentName
-	if target == "" {
-		// agent.prompt takes a pane id or an agent name; the pane is the one
-		// thing we are certain herdr still knows by this point.
-		target = s.Res.PaneID
-	}
-	if err := c.AgentPrompt(ctx, AgentPromptParams{Target: target, Text: s.Plan.Prompt}); err != nil {
+	if err := c.AgentPrompt(ctx, AgentPromptParams{Target: s.Res.AgentName, Text: s.Plan.Prompt}); err != nil {
 		s.Res.Failed, s.Res.Err = StagePrompt, err
 		return s
 	}
