@@ -293,6 +293,7 @@ dispatch may be incomplete.
 | What failed | What happens |
 |-------------|--------------|
 | `worktree.create` / `worktree.open` refused by herdr | Nothing was created. No transition. A comment carrying herdr's code and message, and a status line that names them. |
+| `worktree.create` / `worktree.open` never answered (closed socket, deadline) | Nothing claims nothing was created — herdr may have cut the branch and opened a workspace before the socket dropped. The status says `TKB-25 may be half dispatched` and to check `herdr worktree list`, and the comment carries a worktree line saying the same. That comment is the **only** record that an orphan may exist, so it is written even though there is no path to name. |
 | the worktree was made but herdr's reply carried no pane | The worktree **does** exist, so nothing says otherwise: the status names the path it is still at and the comment records it, while the agent bullet says the dispatch stopped before `agent.start`. No transition, nothing removed. |
 | `agent.start` refused by herdr, after the worktree exists | No rollback: the worktree, workspace and pane stay. The lane does not move. The comment records the branch, the worktree path, the workspace id, the pane id, the name it tried and the error; the status says the worktree is ready but the agent did not start. |
 | `agent.start` never answered (closed socket, deadline) | The same, except that nothing claims the agent did not start — we cannot know. The status and the comment both say it **may or may not** be running and to check the pane with `o` before dispatching again. |
@@ -318,6 +319,11 @@ or `E`, and a stale `esc` from the confirm dialog itself. The progress dialog
 swallowing keys is not relied on as the only lock — it can be displaced, and a
 second dispatch of one ticket would `worktree.open` into the same pane and start
 a second agent on one branch.
+
+**When the retries took a while, the comment says so.** A dispatch that spent
+three seconds being told the shell was not ready records
+`agent start: 4 attempts, 3 busy, 0 renamed, waited 700ms`, on the failure path
+as well as the successful one — one attempt and six are very different stories.
 
 **It is off by default.** `dispatch` in tktban's settings file defaults to
 `false` and the board never writes it — like `notify`, it is a hand edit:

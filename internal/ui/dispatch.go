@@ -722,6 +722,15 @@ func dispatchStepName(res herdr.DispatchResult) string {
 // nothing ever retries the worktree step: a retry after "we don't know" is how
 // a ticket ends up with two worktrees.
 func herdrRefused(err error) bool {
+	// A deadline that expired mid-retry wraps BOTH the context error and the
+	// last thing herdr said, so errors.As finds an *APIError on it — and that
+	// is not a refusal. herdr was still answering "not yet"; it was our own
+	// budget that ended the attempt, and we do not know what herdr did next.
+	// Checking the context error first is what keeps agent_pane_busy from
+	// reading as a decision.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var apiErr *herdr.APIError
 	return errors.As(err, &apiErr)
 }
@@ -731,9 +740,14 @@ func herdrRefused(err error) bool {
 func dispatchFailureText(res herdr.DispatchResult) string {
 	step := dispatchStepName(res)
 	var apiErr *herdr.APIError
-	if errors.As(res.Err, &apiErr) {
+	// herdrRefused, not a bare errors.As: a deadline that expired mid-retry
+	// wraps the last herdr reply as well, and reporting only that reply would
+	// turn "we stopped asking" into "herdr said no".
+	if herdrRefused(res.Err) && errors.As(res.Err, &apiErr) {
 		return step + " failed — " + apiErr.Code + ": " + apiErr.Message
 	}
+	// The error's own text carries both halves when there are two — the
+	// deadline, and the last thing herdr said before it.
 	return step + " did not answer (" + res.Err.Error() + "), so the dispatch may be incomplete"
 }
 
@@ -747,8 +761,19 @@ func dispatchStatusText(rep dispatchReport) (string, string) {
 	var b strings.Builder
 	kind := "warn"
 	switch {
+	case res.Err != nil && res.Failed == herdr.StageWorktree && !res.Created && !herdrRefused(res.Err):
+		// The sibling of the agent-stage arm below, on the more consequential
+		// stage. herdr never answered, so we do not know whether it cut the
+		// branch and opened a workspace before the socket dropped. "Nothing was
+		// created" would be the guess that leaves an orphan worktree nobody
+		// ever goes looking for.
+		b.WriteString(plan.Key + " may be half dispatched: " + dispatchFailureText(res) +
+			" — a worktree may or may not exist for " + plan.Branch +
+			", so check `herdr worktree list` before dispatching again. " +
+			"Nothing was removed and " + plan.Key + " did not move")
+
 	case res.Err != nil && res.Failed == herdr.StageWorktree && !res.Created:
-		// AC2: the worktree could not be made, so nothing at all was created.
+		// AC2: herdr refused, so nothing at all was created.
 		b.WriteString(plan.Key + " was not dispatched: " + dispatchFailureText(res) +
 			". Nothing was created and " + plan.Key + " did not move")
 
@@ -842,7 +867,8 @@ func dispatchCommentBody(rep dispatchReport) string {
 		}
 	}
 	line("branch", plan.Branch+" (from "+plan.Base+")")
-	if res.WorktreePath != "" {
+	switch {
+	case res.WorktreePath != "":
 		what := "created"
 		if res.Reused {
 			what = "reused"
@@ -851,6 +877,18 @@ func dispatchCommentBody(rep dispatchReport) string {
 			}
 		}
 		line("worktree", res.WorktreePath+" ("+what+")")
+	case res.Err != nil && res.Failed == herdr.StageWorktree && !herdrRefused(res.Err):
+		// There is no path to report, because herdr never told us one — which
+		// is exactly why this line has to exist. It is the only record that an
+		// orphan may be sitting under herdr's worktrees directory, and the
+		// comment is the only place that record survives the board closing.
+		what := "may or may not have been created"
+		if res.Reused {
+			what = "already existed; whether herdr opened it is unknown"
+		}
+		line("worktree", what+" — herdr did not answer "+dispatchStepName(res)+
+			". Check `herdr worktree list` for "+plan.Branch+
+			" before dispatching again; nothing was removed")
 	}
 	line("workspace", res.WorkspaceID)
 	line("tab", res.TabID)
@@ -861,10 +899,6 @@ func dispatchCommentBody(rep dispatchReport) string {
 			agent += ", argv: " + strings.Join(res.Argv, " ")
 		}
 		line("agent", agent)
-		if res.Start.Attempts > 1 {
-			line("agent start", fmt.Sprintf("%d attempts, %d busy, %d renamed, waited %s",
-				res.Start.Attempts, res.Start.Busy, res.Start.Renamed, res.Start.Waited))
-		}
 	} else if res.Created {
 		tried := res.Start.Name
 		if tried != "" {
@@ -884,6 +918,14 @@ func dispatchCommentBody(rep dispatchReport) string {
 			line("agent", "may or may not have started"+tried+
 				": herdr did not answer. Check the pane before dispatching again; nothing was removed")
 		}
+	}
+	// On both paths, not just the successful one. One attempt and six are very
+	// different stories — a dispatch that spent three seconds being told the
+	// shell was not ready, and then hit our own deadline, reads as a mystery
+	// without this — and the failure path is where the reader most needs it.
+	if res.Start.Attempts > 1 {
+		line("agent start", fmt.Sprintf("%d attempts, %d busy, %d renamed, waited %s",
+			res.Start.Attempts, res.Start.Busy, res.Start.Renamed, res.Start.Waited))
 	}
 	if res.Prompted {
 		line("prompt", "sent")

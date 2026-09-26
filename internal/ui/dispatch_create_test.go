@@ -255,8 +255,10 @@ func TestDispatchFailureMatrix(t *testing.T) {
 				src.createErr = createFail
 				return m
 			},
-			wantCalls:      []string{"worktree.list", "worktree.create"},
-			wantStatus:     []string{"TKT-1 was not dispatched", "worktree.create failed", "worktree_create_failed", "fatal: invalid reference: main", "Nothing was created"},
+			wantCalls:  []string{"worktree.list", "worktree.create"},
+			wantStatus: []string{"TKT-1 was not dispatched", "worktree.create failed", "worktree_create_failed", "fatal: invalid reference: main", "Nothing was created"},
+			// herdr decided, so nothing may hedge about it.
+			wantAbsent:     []string{"may or may not", "herdr worktree list"},
 			wantKind:       "warn",
 			wantTransition: nil,
 			wantComment:    []string{"could not finish dispatching TKT-1", "worktree_create_failed", "fatal: invalid reference: main", "lane: unchanged (To Do)"},
@@ -373,11 +375,25 @@ func TestDispatchFailureMatrix(t *testing.T) {
 				src.createErr = errDial
 				return m
 			},
-			wantCalls:      []string{"worktree.list", "worktree.create"},
-			wantStatus:     []string{"worktree.create did not answer", "the dispatch may be incomplete"},
+			wantCalls: []string{"worktree.list", "worktree.create"},
+			wantStatus: []string{
+				"TKT-1 may be half dispatched", "worktree.create did not answer",
+				"the dispatch may be incomplete",
+				"a worktree may or may not exist for feature/tkt-1-first-thing",
+				"check `herdr worktree list` before dispatching again",
+				"Nothing was removed",
+			},
+			// The whole point of the arm: we do not know, so we must not say we
+			// know. This is the assertion that was missing.
+			wantAbsent:     []string{"Nothing was created"},
 			wantKind:       "warn",
 			wantTransition: nil,
-			wantComment:    []string{"may be incomplete"},
+			wantComment: []string{
+				"may be incomplete",
+				"worktree: may or may not have been created",
+				"herdr did not answer worktree.create",
+				"Check `herdr worktree list` for feature/tkt-1-first-thing",
+			},
 		},
 		{
 			// The ticket left the lane the plan was built for while the
@@ -817,11 +833,27 @@ func TestDispatchStageContextRunsOut(t *testing.T) {
 	if !strings.Contains(m.status, "may be incomplete") {
 		t.Errorf("status = %q, want it to admit the dispatch may be incomplete", m.status)
 	}
+	// A deadline tells us nothing about what herdr did, so nothing may claim
+	// nothing was created — herdr may have cut the branch and opened a
+	// workspace before our budget ran out.
+	if strings.Contains(m.status, "Nothing was created") {
+		t.Errorf("status = %q asserts something a deadline cannot tell us", m.status)
+	}
+	if !strings.Contains(m.status, "check `herdr worktree list`") {
+		t.Errorf("status = %q, want it to say how to look for an orphan", m.status)
+	}
 	if cr.last("transition") != nil {
 		t.Error("a timed-out dispatch moved the lane")
 	}
-	if c := cr.last("comment"); c == nil || !strings.Contains(c[2], "may be incomplete") {
+	c := cr.last("comment")
+	if c == nil || !strings.Contains(c[2], "may be incomplete") {
 		t.Fatalf("comment = %v, want it to say the dispatch may be incomplete", c)
+	}
+	// The only record that an orphan may exist. Without it the README's
+	// "nothing is ever removed, and the comment says where" is a promise the
+	// code does not keep.
+	if !strings.Contains(c[2], "worktree: may or may not have been created") {
+		t.Errorf("the comment records no possible orphan:\n%s", c[2])
 	}
 }
 
@@ -1469,6 +1501,106 @@ func TestDispatchStaleCancelDoesNotEraseTheProgressDialog(t *testing.T) {
 	if n := countCalls(cr, "transition"); n != 1 {
 		t.Fatalf("tkt transition ran %d times, want 1", n)
 	}
+}
+
+// ---- a deadline that landed mid-retry ----
+
+// sleepFailingAfter injects a Sleeper that waits (recording, never really
+// waiting) n times and then reports the context as gone, which is what our own
+// stage budget expiring during the backoff looks like.
+func sleepFailingAfter(t *testing.T, n int) *[]time.Duration {
+	t.Helper()
+	var waits []time.Duration
+	orig := dispatchSleep
+	dispatchSleep = func(_ context.Context, d time.Duration) error {
+		if len(waits) >= n {
+			return context.DeadlineExceeded
+		}
+		waits = append(waits, d)
+		return nil
+	}
+	t.Cleanup(func() { dispatchSleep = orig })
+	return &waits
+}
+
+// Our budget expired while the retry loop was waiting. That failure wraps BOTH
+// the deadline and the last thing herdr said, and errors.As finds the *APIError
+// on it — so a bare errors.As test reads agent_pane_busy as a decision herdr
+// made. It is not: herdr was answering "not yet", and we stopped asking.
+//
+// Both facts have to survive into the wording, and the attempt count has to be
+// on the failure path, or the reader cannot tell one attempt from six.
+func TestDispatchAgentDeadlineMidBackoffReportsBothAndTheAttempts(t *testing.T) {
+	busy := &herdr.APIError{Code: herdr.CodeAgentPaneBusy, Message: "pane is not at a shell prompt"}
+	waits := sleepFailingAfter(t, 2)
+	m, src, cr := dispatchBoard(t)
+	src.create = createdWorktree()
+	src.startErrs = []error{busy, busy, busy, busy}
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create",
+		"agent.start", "agent.start", "agent.start")
+	if want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}; !slices.Equal(*waits, want) {
+		t.Fatalf("waits = %v, want %v", *waits, want)
+	}
+
+	for _, want := range []string{
+		"context deadline exceeded", // ours: why we stopped
+		"agent_pane_busy",           // herdr's: what it last said
+		"may or may not be running",
+		"check the pane (o) before dispatching again",
+	} {
+		if !strings.Contains(m.status, want) {
+			t.Errorf("status = %q, want it to contain %q", m.status, want)
+		}
+	}
+	// The one it must not say: herdr never refused anything.
+	if strings.Contains(m.status, "the agent did not start —") {
+		t.Errorf("status = %q reads a timed-out retry as a herdr refusal", m.status)
+	}
+
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment")
+	}
+	// Three attempts, not one. Without this line a dispatch that spent 300ms
+	// being told the shell was not ready is indistinguishable from one that
+	// failed immediately.
+	if !strings.Contains(comment[2], "agent start: 3 attempts, 3 busy, 0 renamed, waited 300ms") {
+		t.Errorf("the comment does not account for the attempts:\n%s", comment[2])
+	}
+	if !strings.Contains(comment[2], "may or may not have started (tkt-1)") {
+		t.Errorf("the comment does not admit the uncertainty:\n%s", comment[2])
+	}
+	if cr.last("transition") != nil {
+		t.Error("the lane moved on an agent whose state is unknown")
+	}
+}
+
+// The attempt count is on the success path too, and says so honestly there.
+func TestDispatchRecordsTheAttemptsOnASuccessfulRetry(t *testing.T) {
+	busy := &herdr.APIError{Code: herdr.CodeAgentPaneBusy, Message: "busy"}
+	recordSleeps(t)
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.startErrs = []error{busy, busy}
+
+	m = dispatchOnce(t, m)
+
+	if c := cr.last("comment"); c == nil ||
+		!strings.Contains(c[2], "agent start: 3 attempts, 2 busy, 0 renamed, waited 300ms") {
+		t.Fatalf("comment = %v", c)
+	}
+	// A clean first attempt says nothing at all, rather than "1 attempt".
+	m2, src2, cr2 := dispatchBoard(t)
+	src2.create, src2.start = createdWorktree(), startedAgent()
+	m2 = dispatchOnce(t, m2)
+	if c := cr2.last("comment"); c == nil || strings.Contains(c[2], "agent start:") {
+		t.Errorf("a clean start still reported attempts:\n%v", c)
+	}
+	_ = m2
+	_ = m
 }
 
 // ---- $EDITOR must not land on top of a dispatch ----

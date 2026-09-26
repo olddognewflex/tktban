@@ -559,12 +559,20 @@ and `comment` (always).
   own accord. The result therefore carries herdr's name, while the name that
   was *sent* stays on the start stats, so a refusal can still say which name it
   tried.
-- **An `agent.start` we did not get an answer to is not a failed start.** herdr
-  answering with a code means herdr decided not to; a closed socket or an
-  expired deadline means we do not know, and herdr may have gone on to start
-  it. Every sentence built from such a failure says "may or may not be
-  running — check the pane", because the alternative sends someone to start a
-  second agent on the same branch.
+- **A call we did not get an answer to is not a failed call.** herdr answering
+  with a code means herdr decided not to; a closed socket or an expired deadline
+  means we do not know, and herdr may have gone on to do it. Every sentence
+  built from such a failure admits that — "the agent may or may not be running,
+  check the pane", "a worktree may or may not exist, check
+  `herdr worktree list`" — because the alternative sends someone to create a
+  second one. The worktree case additionally has to write a comment line with no
+  path in it, since a possible orphan under `[worktrees] directory` is otherwise
+  recorded nowhere.
+- **A deadline that lands mid-retry wraps the last herdr reply too**, so a bare
+  `errors.As(err, &*APIError)` finds `agent_pane_busy` on it and reads "we
+  stopped asking" as "herdr said no". The predicate that decides the wording
+  therefore checks the context error first. The error's own text carries both
+  halves, which is what keeps the deadline from being dropped from the message.
 
 ### The retry budget, and why it is shaped like that
 
