@@ -236,6 +236,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m.fail(msg.err)
 		}
+		// N and E are asynchronous too, and this one does not open a modal: it
+		// suspends the whole TUI into $EDITOR. Landing mid-dispatch would put
+		// the editor over the progress display and overlap its `tkt apply` with
+		// the dispatch's own writes. Same refusal as a modal gets.
+		if m.dispatchBusy() {
+			return m, m.setStatus(m.dispatchBusyText(), "warn")
+		}
 		return m, launchEditorCmd(msg)
 
 	case editorClosedMsg:

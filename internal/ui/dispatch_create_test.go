@@ -1384,3 +1384,124 @@ func TestDispatchFollowsTheAgentNameHerdrReturns(t *testing.T) {
 		t.Errorf("the comment records the wrong agent name: %v", c)
 	}
 }
+
+// ---- a stale answer to a dialog whose run has started ----
+
+// The twin of TestDispatchConfirmRefusesWhileARunIsInFlight, on the arm that
+// was wrong: a CANCEL. It is reachable with two keystrokes, because `send` runs
+// the answer as a command and dispatchModal.Update mutates nothing it is called
+// on — so a dialog that has not yet been swapped for the progress display
+// accepts enter and then esc, putting two dispatchResultMsgs in flight.
+//
+// The confirmed one starts the run and installs the progress display. The
+// cancel used to nil it, and progressModal cannot restore a nil: the dispatch
+// went on cutting a worktree behind a board showing nothing, with the ordinary
+// modal keys reachable again and auto-refresh resumed.
+func TestDispatchStaleCancelDoesNotEraseTheProgressDialog(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m = pressD(t, m)
+
+	// Both answers come out of the same dialog, as two keystrokes on it do.
+	dialog := m.modal.(dispatchModal)
+	_, confirmCmd := dialog.Update(key("enter"))
+	_, cancelCmd := dialog.Update(key("esc"))
+	if confirmCmd == nil || cancelCmd == nil {
+		t.Fatal("the dialog answered one of the two keys with nothing")
+	}
+	confirm, ok := confirmCmd().(dispatchResultMsg)
+	if !ok || !confirm.confirmed {
+		t.Fatalf("enter produced %+v", confirmCmd())
+	}
+	cancel, ok := cancelCmd().(dispatchResultMsg)
+	if !ok || cancel.confirmed {
+		t.Fatalf("esc produced %+v", cancelCmd())
+	}
+
+	// The confirm lands first and the run starts.
+	m, next := update(m, confirm)
+	running, ok := m.modal.(dispatchModal)
+	if !ok || !running.running() {
+		t.Fatalf("modal = %T after the confirm", m.modal)
+	}
+	run := m.dispatchRun
+
+	// Then the cancel lands, for a dialog that no longer exists.
+	m, cmd := update(m, cancel)
+	got, ok := m.modal.(dispatchModal)
+	if !ok {
+		t.Fatalf("a stale cancel erased the progress dialog (modal = %T)", m.modal)
+	}
+	if !got.running() || got.progress != running.progress {
+		t.Fatalf("a stale cancel changed the dialog: %q → %q", running.progress, got.progress)
+	}
+	if m.dispatchRun != run || !m.dispatchBusy() {
+		t.Fatalf("a stale cancel disturbed the run: run=%d busy=%v", m.dispatchRun, m.dispatchBusy())
+	}
+	// A cancel says nothing, stale or not.
+	if m.status != "" {
+		t.Errorf("a stale cancel set the status to %q", m.status)
+	}
+	if cmd != nil {
+		t.Errorf("a stale cancel produced a %T", cmd())
+	}
+
+	// The dialog is therefore still swallowing keys — which is the property the
+	// erasure destroyed. m and c would otherwise open dialogs the dispatch's
+	// own completion then discards.
+	for _, k := range []string{"m", "c", "D", "r", "q"} {
+		var kc tea.Cmd
+		m, kc = update(m, key(k))
+		if kc != nil {
+			t.Fatalf("%q reached the board mid-dispatch: %T", k, kc())
+		}
+		if _, still := m.modal.(dispatchModal); !still {
+			t.Fatalf("%q opened a %T mid-dispatch", k, m.modal)
+		}
+	}
+
+	// And the run finishes normally, once.
+	m = runDispatch(t, m, next)
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+		t.Fatalf("status = %q", m.status)
+	}
+	if n := countCalls(cr, "transition"); n != 1 {
+		t.Fatalf("tkt transition ran %d times, want 1", n)
+	}
+}
+
+// ---- $EDITOR must not land on top of a dispatch ----
+
+// N and E are asynchronous like v and n, and this one does not open a modal at
+// all: it suspends the whole TUI into $EDITOR. Landing mid-dispatch would put
+// the editor over the progress display and overlap its `tkt apply` with the
+// dispatch's own two writes.
+func TestDispatchRefusesToLaunchTheEditorMidSequence(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m, next := startDispatchRun(t, m)
+	running := m.modal.(dispatchModal)
+	tktBefore := len(cr.calls)
+
+	// The returned command is not inspected: a refusal's command is the
+	// status-expiry timer, and calling it would sit on a real six-second clock.
+	// That the editor did not launch is read off the status and the fact that no
+	// tkt ran, which is the observable effect anyway.
+	m, _ = update(m, editorPrepMsg{key: "TKT-1", path: "/tmp/nope.md", isNew: false})
+	if got, ok := m.modal.(dispatchModal); !ok || got.progress != running.progress {
+		t.Fatalf("the refusal disturbed the dialog (%T)", m.modal)
+	}
+	if !strings.Contains(m.status, "Dispatching TKT-1") {
+		t.Errorf("status = %q, want the refusal", m.status)
+	}
+	if len(cr.calls) != tktBefore {
+		t.Fatalf("the refused editor ran tkt %v", cr.calls[tktBefore:])
+	}
+
+	m = runDispatch(t, m, next)
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if n := countCalls(cr, "apply"); n != 0 {
+		t.Fatalf("tkt apply ran %d times during a dispatch", n)
+	}
+}

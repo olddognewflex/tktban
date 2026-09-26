@@ -311,12 +311,13 @@ error naming what broke, while ours is a closed socket that cannot even say
 whether the agent started.
 
 **Only one dispatch runs at a time.** `D` and the confirm both refuse while one
-is in flight (`Dispatching TKB-25 — wait for it to finish`), and a dialog that
-was asked for before the dispatch started — a ticket fetch for `v`, an
-issue-type fetch for `n` — declines to replace the progress display when it
-lands, saying so instead. The progress dialog swallowing keys is not relied on
-as the only lock: it can be displaced, and a second dispatch of one ticket would
-`worktree.open` into the same pane and start a second agent on one branch.
+is in flight (`Dispatching TKB-25 — wait for it to finish`), and anything that
+was asked for before the dispatch started declines to land on top of it: a
+ticket fetch for `v`, an issue-type fetch for `n`, an `$EDITOR` launch for `N`
+or `E`, and a stale `esc` from the confirm dialog itself. The progress dialog
+swallowing keys is not relied on as the only lock — it can be displaced, and a
+second dispatch of one ticket would `worktree.open` into the same pane and start
+a second agent on one branch.
 
 **It is off by default.** `dispatch` in tktban's settings file defaults to
 `false` and the board never writes it — like `notify`, it is a hand edit:

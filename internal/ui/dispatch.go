@@ -448,6 +448,24 @@ type dispatchReport struct {
 // created is exactly what the person was shown. Nothing below this line reads
 // the board's selection again.
 func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
+	// First, above every other branch including the cancel: an answer to a
+	// dialog whose run has already started is stale by definition, and the only
+	// safe thing to do with it is nothing.
+	//
+	// The cancel is the one that has to be here. `send` runs the modal's answer
+	// as a command, and dispatchModal.Update mutates nothing it is called on, so
+	// a dialog that has not yet been swapped for the progress display accepts
+	// enter AND a following esc — two dispatchResultMsgs in flight for one
+	// dialog. The confirmed one starts the run and installs the progress
+	// display; the cancel then nil'd it, and progressModal cannot restore a nil.
+	// The dispatch went on cutting a worktree behind a board showing nothing,
+	// with the ordinary modal keys reachable again and auto-refresh resumed.
+	if m.dispatchBusy() {
+		if !msg.confirmed {
+			return m, nil // a stale cancel, as silent as any other cancel
+		}
+		return m, m.setStatus(m.dispatchBusyText(), "warn")
+	}
 	if !msg.confirmed {
 		m.modal = nil
 		return m, nil
@@ -461,14 +479,6 @@ func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
 	if _, live := herdr.PickPane(m.live.byKey[msg.plan.Key]); live {
 		m.modal = nil
 		return m, m.setStatus(msg.plan.Key+" picked up an agent while the dialog was open (o focuses it)", "warn")
-	}
-	// The last rung, and the one that has to be here rather than only on the
-	// key: a confirm answered while another dispatch is still creating things
-	// would overwrite that run's source, sequence and report outright, and
-	// leave two runs' messages landing on one board. The dialog in front of
-	// the person belongs to the run that is going; it stays.
-	if m.dispatchBusy() {
-		return m, m.setStatus(m.dispatchBusyText(), "warn")
 	}
 	disp, ok := m.live.src.(Dispatcher)
 	if !ok {
