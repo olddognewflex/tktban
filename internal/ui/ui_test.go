@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,12 +13,44 @@ import (
 
 // captureRunner is a fake tkt Runner: it records argv and replies with canned
 // JSON keyed off the verb, so the UI can be driven without a real tkt or a TTY.
+//
+// It has no mutex, and that is deliberate: please do not add one. Every test
+// here drives the model synchronously, so there is nothing to race — and the
+// unsynchronised append is itself a guard. A tkt call issued from a bare
+// goroutine rather than a tea.Cmd would land concurrently with the test's own
+// recorded calls, and `go test -race` would report it. A mutex would make
+// that write safe, and silently take the detector away.
 type captureRunner struct {
 	calls [][]string
+	// vcs and ownership override the canned `tkt cfg` replies the dispatch
+	// guards read. "" is the default reply below; failReply is a tkt that
+	// exits non-zero, which both readers treat as "not configured".
+	vcs       string
+	ownership string
+	// observeCtx records, per call made while it is on, whether the context
+	// the runner was handed carried a deadline — i.e. whether the caller's
+	// budget reached the subprocess at all.
+	observeCtx bool
+	ctxCalls   []ctxCall
 }
 
-func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int, error) {
+// ctxCall is one observed invocation: whether it was bounded, and whether its
+// context was still live when the call was made.
+type ctxCall struct {
+	args     []string
+	deadline bool
+	live     bool
+}
+
+// failReply asks captureRunner for a failed tkt invocation.
+const failReply = "!fail"
+
+func (c *captureRunner) run(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
 	c.calls = append(c.calls, args)
+	if c.observeCtx {
+		_, ok := ctx.Deadline()
+		c.ctxCalls = append(c.ctxCalls, ctxCall{args: args, deadline: ok, live: ctx.Err() == nil})
+	}
 	switch {
 	case eq(args, "cfg", "board.roles", "--json"):
 		return []byte(`{"todo": "To Do", "done": "Done"}`), nil, 0, nil
@@ -32,6 +65,12 @@ func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int
 		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"todo","description":"d","labels":[],"blocked_by":[]}`), nil, 0, nil
 	case eq(args, "cfg", "issue_types", "--json"):
 		return []byte(`{"full_sdlc":["Story","Bug"],"deliverable":["Task"]}`), nil, 0, nil
+	case eq(args, "cfg", "vcs", "--json"):
+		return cfgReply(c.vcs, `{"provider":"github","repo":"olddognewflex/tktban",`+
+			`"default_branch":"main","branch_fmt":"feature/{key-lower}-{slug}",`+
+			`"hotfix_fmt":"hotfix/{key-lower}-{slug}"}`)
+	case eq(args, "cfg", "board.ownership", "--json"):
+		return cfgReply(c.ownership, `{"todo->done":"agent"}`)
 	case eq(args, "cfg", "priorities", "--json"):
 		return []byte(`["Highest","High","Medium","Low","Lowest"]`), nil, 0, nil
 	case len(args) >= 2 && args[0] == "apply" && args[1] == "--template":
@@ -40,6 +79,18 @@ func (c *captureRunner) run(bin string, args, env []string) ([]byte, []byte, int
 		return []byte(`{"key":"TKB-99"}`), nil, 0, nil
 	default: // transition, comment, edit, create
 		return []byte(`{"key":"TKT-1"}`), nil, 0, nil
+	}
+}
+
+// cfgReply serves an overridden `tkt cfg` reply, the default, or a failure.
+func cfgReply(override, def string) ([]byte, []byte, int, error) {
+	switch override {
+	case "":
+		return []byte(def), nil, 0, nil
+	case failReply:
+		return nil, []byte("config error"), 2, nil
+	default:
+		return []byte(override), nil, 0, nil
 	}
 }
 

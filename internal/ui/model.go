@@ -64,6 +64,16 @@ type Model struct {
 	// live is herdr agent status for card badges; zero (off) outside herdr.
 	live liveState
 
+	// dispatchDir is the checkout the D key dispatches in, "" when the key is
+	// off (no opt-in setting, or no directory that was safe to resolve — see
+	// herdr.DispatchDir). dispatching is true while one preparation is in
+	// flight, so a leaned-on key cannot start several.
+	dispatchDir string
+	// dispatchOptedOut is --no-herdr-dispatch: the key is off because the
+	// person said so, which is a different refusal from having no directory.
+	dispatchOptedOut bool
+	dispatching      bool
+
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person
 	// typed it (--select) rather than it being read off a git branch
@@ -274,6 +284,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jumpMsg:
 		return m.onJump(msg)
 
+	case dispatchPrepMsg:
+		return m.onDispatchPrep(msg)
+
+	case dispatchResultMsg:
+		return m.onDispatchResult(msg)
+
 	case selectKeyMsg:
 		return m.onSelectKey(msg)
 
@@ -378,6 +394,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, prepEditorEditCmd(m.tkt, card.Key)
 	case "o":
 		return m.jumpToAgentPane()
+	case "D":
+		// Capital D on purpose: lowercase d is the date modal, and a dispatch
+		// is not something to reach by a neighbouring keystroke.
+		return m.startDispatch()
 	case "x":
 		return m.hideFocusedColumn()
 	case "X":
@@ -442,7 +462,9 @@ func (m Model) toggleNotify() (tea.Model, tea.Cmd) {
 		label = "herdr notifications on"
 	}
 	if !m.pluginSettings {
-		label += " (herdr's own board keeps a separate setting)"
+		// Name the file that was written. "It had no effect" is only
+		// actionable once you know which of the two files you changed.
+		label += " in " + m.settingsFile() + " (herdr's own board keeps a separate setting)"
 	}
 	prev, had := m.settings["notify"]
 	m.settings["notify"] = on
@@ -637,6 +659,51 @@ func (m Model) showAllColumns() (tea.Model, tea.Cmd) {
 	m.hidden = map[string]bool{}
 	m.applyHidden()
 	return m, m.persistHidden("Showing all columns")
+}
+
+// settingsFile is the settings file this board actually reads and writes,
+// abbreviated for a status line. New resolves the path before storing it, so
+// this is never empty and never a guess.
+//
+// Every message that asks someone to change a setting goes through it. A board
+// reads one of two files — herdr's plugin state dir under --herdr, the
+// standalone config dir otherwise — and "set it in tktban's settings.toml" is
+// no help whatever when you have just set it in the other one. That is not
+// hypothetical: it is how TKB-25's dispatch setting came to look broken after
+// being turned on in the standalone file while herdr's popup read the plugin
+// one, which is the same trap TKB-24's notify toggle had to warn about.
+func (m Model) settingsFile() string {
+	return abbrevHome(m.settingsPath)
+}
+
+// tktConfigFile is the tkt config behind a refusal that asks someone to change
+// a configured value. An empty Config means tkt discovered the file itself, in
+// which case its conventional name is all we honestly know.
+func (m Model) tktConfigFile() string {
+	if m.tkt.Config != "" {
+		return abbrevHome(m.tkt.Config)
+	}
+	return configName
+}
+
+// configName is the tkt config file tkt auto-discovers.
+const configName = ".sdlc/config.toml"
+
+// abbrevHome shortens a path inside the home directory to ~/…, so a status
+// line can carry the whole path instead of just its tail.
+func abbrevHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	sep := string(os.PathSeparator)
+	if rest, ok := strings.CutPrefix(path, home+sep); ok {
+		return "~" + sep + rest
+	}
+	return path
 }
 
 // boardSettings are the settings keys the board owns and writes.

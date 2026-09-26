@@ -290,3 +290,227 @@ func (c *Client) ShowNotification(ctx context.Context, n Notification) (bool, st
 	}
 	return r.Shown, r.Reason, nil
 }
+
+// ---- error codes ----
+//
+// herdr names every failure with a stable `code` in its error reply. These are
+// the ones tktban branches on; they were read out of herdr's own binary and
+// its protocol-22 schema (see docs/herdr-events.md, "Verified in TKB-25").
+// Anything else falls through to the generic wording, so an unknown code is
+// reported rather than mistaken for a known one.
+const (
+	CodePaneNotFound = "pane_not_found"
+
+	// Worktree failures. not_git_worktree and linked_worktree_source are the
+	// two a dispatch must refuse outright rather than retry: the first means
+	// the directory is not a checkout at all, the second that the checkout is
+	// itself a linked worktree, which herdr will not branch a worktree from.
+	CodeNotGitWorktree              = "not_git_worktree"
+	CodeLinkedWorktreeSource        = "linked_worktree_source"
+	CodeWorktreeOperationInProgress = "worktree_operation_in_progress"
+	CodeWorktreeCreateFailed        = "worktree_create_failed"
+	CodeStaleWorktreeOperation      = "stale_worktree_operation"
+	CodeAmbiguousWorktreeBranch     = "ambiguous_worktree_branch"
+	CodeWorktreeNotFound            = "worktree_not_found"
+
+	// Agent failures. agent_pane_busy is the expected one right after a
+	// worktree is created: the pane exists but its shell is not at a prompt
+	// yet, so the start is retried rather than failed.
+	CodeAgentPaneBusy        = "agent_pane_busy"
+	CodeAgentNameTaken       = "agent_name_taken"
+	CodeAgentBlocked         = "agent_blocked"
+	CodeInvalidAgentName     = "invalid_agent_name"
+	CodeInvalidAgentArgument = "invalid_agent_argument"
+)
+
+// ErrorCode returns the herdr error code err carries, or "" when it is not a
+// herdr error reply at all (a dial failure, a timeout, a bad decode).
+func ErrorCode(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code
+	}
+	return ""
+}
+
+// ---- worktrees ----
+
+// WorktreeInfo is one git worktree as herdr reports it. A null branch (a
+// detached or bare checkout) decodes to "", as does an absent
+// open_workspace_id (the worktree is on disk but no herdr workspace has it
+// open).
+type WorktreeInfo struct {
+	Path             string `json:"path"`
+	Branch           string `json:"branch"`
+	Label            string `json:"label"`
+	OpenWorkspaceID  string `json:"open_workspace_id"`
+	IsBare           bool   `json:"is_bare"`
+	IsDetached       bool   `json:"is_detached"`
+	IsLinkedWorktree bool   `json:"is_linked_worktree"`
+	IsPrunable       bool   `json:"is_prunable"`
+}
+
+// WorktreeSource is the repository a worktree.list was answered about: the
+// checkout herdr resolved from the request's cwd, and the repo it belongs to.
+type WorktreeSource struct {
+	RepoKey            string `json:"repo_key"`
+	RepoName           string `json:"repo_name"`
+	RepoRoot           string `json:"repo_root"`
+	SourceCheckoutPath string `json:"source_checkout_path"`
+	SourceWorkspaceID  string `json:"source_workspace_id"`
+}
+
+// WorktreeListParams asks about the repository containing cwd. trust_repository
+// is deliberately omitted while it is false: it is a write (it records the
+// repository as trusted), and listing must stay a read.
+type WorktreeListParams struct {
+	Cwd             string `json:"cwd,omitempty"`
+	WorkspaceID     string `json:"workspace_id,omitempty"`
+	TrustRepository bool   `json:"trust_repository,omitempty"`
+}
+
+// WorktreeListResult is herdr's worktree_list reply.
+type WorktreeListResult struct {
+	Source    WorktreeSource `json:"source"`
+	Worktrees []WorktreeInfo `json:"worktrees"`
+}
+
+// WorktreeList lists the worktrees of the repository containing cwd. It is the
+// one herdr call a dry-run dispatch makes: it answers "is this a checkout at
+// all", "which repo is it", and "is this branch already checked out
+// somewhere", without creating anything.
+func (c *Client) WorktreeList(ctx context.Context, p WorktreeListParams) (WorktreeListResult, error) {
+	var r WorktreeListResult
+	err := c.Call(ctx, "worktree.list", p, &r)
+	return r, err
+}
+
+// WorktreeCreateParams creates a worktree on a new branch. branch is
+// effectively required — herdr answers "branch is required" without it — and
+// path is deliberately left empty so the worktree lands under herdr's own
+// [worktrees] directory (default ~/.herdr/worktrees), next to the ones the
+// person makes by hand. focus is sent even when false, because false is a
+// decision: the board dispatches without stealing the screen.
+type WorktreeCreateParams struct {
+	WorkspaceID     string `json:"workspace_id,omitempty"`
+	Cwd             string `json:"cwd,omitempty"`
+	Branch          string `json:"branch,omitempty"`
+	Base            string `json:"base,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Label           string `json:"label,omitempty"`
+	Focus           bool   `json:"focus"`
+	TrustRepository bool   `json:"trust_repository,omitempty"`
+}
+
+// WorktreeOpenParams opens a worktree that already exists. It is
+// WorktreeCreateParams minus base: there is no branch to cut.
+type WorktreeOpenParams struct {
+	WorkspaceID     string `json:"workspace_id,omitempty"`
+	Cwd             string `json:"cwd,omitempty"`
+	Branch          string `json:"branch,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Label           string `json:"label,omitempty"`
+	Focus           bool   `json:"focus"`
+	TrustRepository bool   `json:"trust_repository,omitempty"`
+}
+
+// WorkspaceInfo / TabInfo / PaneInfo are the subsets of herdr's own structs a
+// worktree reply carries. RootPane is the pane a dispatch would start an agent
+// in: herdr always opens it at a shell, never at a command of our choosing.
+type WorkspaceInfo struct {
+	WorkspaceID string `json:"workspace_id"`
+	Label       string `json:"label"`
+	Number      int    `json:"number"`
+}
+
+type TabInfo struct {
+	TabID       string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Label       string `json:"label"`
+}
+
+type PaneInfo struct {
+	PaneID      string `json:"pane_id"`
+	WorkspaceID string `json:"workspace_id"`
+	TabID       string `json:"tab_id"`
+	TerminalID  string `json:"terminal_id"`
+	Cwd         string `json:"cwd"`
+	Focused     bool   `json:"focused"`
+}
+
+// WorktreeResult is the reply to worktree.create and worktree.open: the
+// workspace, tab and root pane herdr made for the worktree, and the worktree
+// itself. AlreadyOpen is set only by worktree.open.
+type WorktreeResult struct {
+	Workspace   WorkspaceInfo `json:"workspace"`
+	Tab         TabInfo       `json:"tab"`
+	RootPane    PaneInfo      `json:"root_pane"`
+	Worktree    WorktreeInfo  `json:"worktree"`
+	AlreadyOpen bool          `json:"already_open"`
+}
+
+// WorktreeCreate cuts a branch and opens a worktree for it.
+//
+// Nothing in tktban calls it yet: the D key is a dry run that shows what this
+// call would be given and then makes no call at all. It exists now so the wire
+// shape is pinned against herdr protocol 22 by a test rather than written from
+// memory later.
+func (c *Client) WorktreeCreate(ctx context.Context, p WorktreeCreateParams) (WorktreeResult, error) {
+	var r WorktreeResult
+	err := c.Call(ctx, "worktree.create", p, &r)
+	return r, err
+}
+
+// WorktreeOpen opens the worktree of a branch that already has one. Same
+// standing as WorktreeCreate: typed now, called later.
+func (c *Client) WorktreeOpen(ctx context.Context, p WorktreeOpenParams) (WorktreeResult, error) {
+	var r WorktreeResult
+	err := c.Call(ctx, "worktree.open", p, &r)
+	return r, err
+}
+
+// ---- agents ----
+
+// AgentStartParams starts an agent in a pane that already exists.
+//
+// This is the reason a dispatch is two steps rather than one: no herdr
+// creation method takes a command or an argv. worktree.create opens a pane at
+// a shell, and the agent is started into that pane afterwards — which is also
+// why it can answer agent_pane_busy while the shell is still coming up.
+//
+// TimeoutMS is herdr's own startup budget: greater than 3000 and at most
+// 300000, omitted to take herdr's default.
+type AgentStartParams struct {
+	Name      string   `json:"name"`
+	Kind      string   `json:"kind"`
+	PaneID    string   `json:"pane_id"`
+	Args      []string `json:"args,omitempty"`
+	TimeoutMS int      `json:"timeout_ms,omitempty"`
+}
+
+// AgentStartResult is herdr's agent_started reply: the agent it registered and
+// the argv it actually ran.
+type AgentStartResult struct {
+	Agent Agent    `json:"agent"`
+	Argv  []string `json:"argv"`
+}
+
+// AgentStart registers an agent in an existing pane. Typed now, called later.
+func (c *Client) AgentStart(ctx context.Context, p AgentStartParams) (AgentStartResult, error) {
+	var r AgentStartResult
+	err := c.Call(ctx, "agent.start", p, &r)
+	return r, err
+}
+
+// AgentPromptParams sends text to a started agent. Target is a pane id or an
+// agent name. herdr also accepts a `wait` object ({until, timeout_ms}); it is
+// left off, because a board must not block on an agent reaching a status.
+type AgentPromptParams struct {
+	Target string `json:"target"`
+	Text   string `json:"text"`
+}
+
+// AgentPrompt types a prompt into a started agent. Typed now, called later.
+func (c *Client) AgentPrompt(ctx context.Context, p AgentPromptParams) error {
+	return c.Call(ctx, "agent.prompt", p, nil)
+}

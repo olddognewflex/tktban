@@ -90,7 +90,7 @@ func TestLiveSourceOnlyInsideHerdr(t *testing.T) {
 	for _, c := range cases {
 		// Compare the interface itself: a typed nil pointer inside it would read
 		// as "live on" to the board.
-		if got := liveSource(envOf(c.env), herdrLive{off: c.disabled}); (got != nil) != c.want {
+		if got := liveSource(envOf(c.env), herdrOpts{off: c.disabled}); (got != nil) != c.want {
 			t.Errorf("%s: live source = %v, want present=%v", c.name, got, c.want)
 		}
 	}
@@ -211,10 +211,11 @@ func TestPopupFlagWiring(t *testing.T) {
 	}
 	orig := board
 	t.Cleanup(func() { board = orig })
+	pinEnv(t, "") // run() reads the real environment and settings file
 	for _, c := range cases {
 		got := false
 		ran := false
-		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, _ ui.LiveSource, _ string, _ func() string, popup bool) int {
+		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, _ ui.LiveSource, _ ui.DispatchOpts, _ string, _ func() string, popup bool) int {
 			ran, got = true, popup
 			return 0
 		}
@@ -233,6 +234,9 @@ func TestPopupFlagWiring(t *testing.T) {
 // --no-herdr-tokens has to reach the live source itself, not just parse: the
 // board never sees it, the SocketSource does.
 func TestNoHerdrTokensFlag(t *testing.T) {
+	// pinEnv first, then the two variables this test is actually about: it
+	// clears every HERDR_* var, so setting them before it would be undone.
+	pinEnv(t, "")
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_SOCKET_PATH", "/run/herdr.sock")
 	cases := []struct {
@@ -248,7 +252,7 @@ func TestNoHerdrTokensFlag(t *testing.T) {
 	t.Cleanup(func() { board = orig })
 	for _, c := range cases {
 		var got ui.LiveSource
-		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, live ui.LiveSource, _ string, _ func() string, _ bool) int {
+		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, live ui.LiveSource, _ ui.DispatchOpts, _ string, _ func() string, _ bool) int {
 			got = live
 			return 0
 		}
@@ -269,7 +273,7 @@ func TestNoHerdrTokensFlag(t *testing.T) {
 func TestNoHerdrLiveAlsoStopsTokens(t *testing.T) {
 	if got := liveSource(envOf(map[string]string{
 		"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock",
-	}), herdrLive{off: true}); got != nil {
+	}), herdrOpts{off: true}); got != nil {
 		t.Fatalf("live source = %v, want none", got)
 	}
 }
@@ -279,10 +283,11 @@ func TestNoHerdrLiveAlsoStopsTokens(t *testing.T) {
 func TestDoctorDoesNotRunTheBoard(t *testing.T) {
 	origBoard, origDoctor := board, doctor
 	t.Cleanup(func() { board, doctor = origBoard, origDoctor })
-	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, string, func() string, bool) int {
+	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, ui.DispatchOpts, string, func() string, bool) int {
 		t.Error("doctor ran the board")
 		return 1
 	}
+	pinEnv(t, "")
 	ran := false
 	doctor = func(*tkt.Tkt) int { ran = true; return 0 }
 	if code := run([]string{"--select-from-cwd", "doctor"}); code != 0 {
@@ -291,4 +296,137 @@ func TestDoctorDoesNotRunTheBoard(t *testing.T) {
 	if !ran {
 		t.Fatal("doctor did not run")
 	}
+}
+
+// ---- TKB-25: the D key is off unless three things agree ----
+
+// writeSettings puts a settings file at path with the given TOML body.
+func writeSettings(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "settings.toml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestDispatchOptsGating(t *testing.T) {
+	on := "dispatch = true\n"
+	off := "dispatch = false\n"
+	inHerdrWithContext := map[string]string{
+		"HERDR_ENV":                 "1",
+		"HERDR_PLUGIN_CONTEXT_JSON": `{"workspace_id":"w1","focused_pane_cwd":"/pane"}`,
+	}
+	cases := []struct {
+		name     string
+		settings string
+		env      map[string]string
+		opt      herdrOpts
+		cwd      string
+		want     ui.DispatchOpts
+	}{
+		{"off by default", "", nil, herdrOpts{}, "/work", ui.DispatchOpts{}},
+		{"explicitly off", off, nil, herdrOpts{}, "/work", ui.DispatchOpts{}},
+		{"on, outside herdr, uses the working directory", on, nil, herdrOpts{}, "/work",
+			ui.DispatchOpts{Dir: "/work"}},
+		{"on, inside herdr, uses the focused pane", on, inHerdrWithContext, herdrOpts{}, "/work",
+			ui.DispatchOpts{Dir: "/pane"}},
+		// The guard that matters: a plugin pane with no context runs in
+		// tktban's own install checkout, so there is no safe directory.
+		{"on, a plugin pane with no context at all", on, map[string]string{
+			"HERDR_ENV": "1", "HERDR_PLUGIN_STATE_DIR": "/state/odnf.tktban",
+		}, herdrOpts{}, "/plugin/install", ui.DispatchOpts{}},
+		// An ordinary herdr terminal pane is not a plugin process: its
+		// working directory is exactly the repo the person meant.
+		{"on, a plain herdr terminal pane", on, map[string]string{
+			"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock",
+		}, herdrOpts{}, "/src/tktban", ui.DispatchOpts{Dir: "/src/tktban"}},
+		// The opt-out is reported as itself, not as a missing directory, so
+		// the board can say which refusal it was.
+		{"--no-herdr-dispatch wins over the setting", on, nil, herdrOpts{noDispatch: true}, "/work",
+			ui.DispatchOpts{OptedOut: true}},
+		{"--no-herdr-dispatch with the setting off", off, nil, herdrOpts{noDispatch: true}, "/work",
+			ui.DispatchOpts{OptedOut: true}},
+	}
+	for _, c := range cases {
+		path := writeSettings(t, c.settings)
+		if got := dispatchOpts(envOf(c.env), c.cwd, path, c.opt); got != c.want {
+			t.Errorf("%s: dispatchOpts = %+v, want %+v", c.name, got, c.want)
+		}
+	}
+}
+
+// pinEnv makes a run()-level test independent of where it ran.
+//
+// run() reads the real process environment and the real standalone settings
+// file, and these tests may themselves be running inside a herdr pane. Two
+// tests here predate the dispatch and did not pin anything, so run() went on
+// to stat and read the developer's own ~/.config/tktban/settings.toml — inert
+// only because it happens to have no dispatch key in it. Every run()-level
+// test pins both now.
+func pinEnv(t *testing.T, settingsBody string) {
+	t.Helper()
+	for _, k := range []string{
+		"HERDR_ENV", "HERDR_PLUGIN_CONTEXT_JSON", "HERDR_PLUGIN_STATE_DIR",
+		"HERDR_PLUGIN_ID", "HERDR_SOCKET_PATH",
+	} {
+		t.Setenv(k, "")
+	}
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if settingsBody == "" {
+		return
+	}
+	dir := filepath.Join(xdg, "tktban")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.toml"), []byte(settingsBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --no-herdr-dispatch reaches the board as an opt-out rather than as a
+// missing directory, so the board can name that refusal, and it does not
+// disturb the live-status opt-outs that sit next to it in the same struct.
+func TestNoHerdrDispatchFlagWiring(t *testing.T) {
+	origBoard := board
+	t.Cleanup(func() { board = origBoard })
+	pinEnv(t, "dispatch = true\n")
+
+	for _, c := range []struct {
+		argv []string
+		want ui.DispatchOpts
+	}{
+		{nil, ui.DispatchOpts{Dir: mustCwd(t)}},
+		{[]string{"--no-herdr-dispatch"}, ui.DispatchOpts{OptedOut: true}},
+		// The other opt-outs must not take the dispatch with them.
+		{[]string{"--no-herdr-live"}, ui.DispatchOpts{Dir: mustCwd(t)}},
+		{[]string{"--no-herdr-tokens"}, ui.DispatchOpts{Dir: mustCwd(t)}},
+	} {
+		var got ui.DispatchOpts
+		ran := false
+		board = func(_ *tkt.Tkt, _ float64, _ bool, _ string, _ ui.LiveSource, d ui.DispatchOpts, _ string, _ func() string, _ bool) int {
+			ran, got = true, d
+			return 0
+		}
+		if code := run(c.argv); code != 0 {
+			t.Fatalf("%v: run = %d", c.argv, code)
+		}
+		if !ran {
+			t.Fatalf("%v: the board never ran", c.argv)
+		}
+		if got != c.want {
+			t.Errorf("%v: dispatch = %+v, want %+v", c.argv, got, c.want)
+		}
+	}
+}
+
+func mustCwd(t *testing.T) string {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cwd
 }

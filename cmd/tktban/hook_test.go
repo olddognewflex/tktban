@@ -89,7 +89,7 @@ func TestHerdrHookNoSocketNoops(t *testing.T) {
 func TestHerdrHookRouted(t *testing.T) {
 	origBoard, origDoctor, origHook, origOut := board, doctor, herdrHook, hookOut
 	t.Cleanup(func() { board, doctor, herdrHook, hookOut = origBoard, origDoctor, origHook, origOut })
-	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, string, func() string, bool) int {
+	board = func(*tkt.Tkt, float64, bool, string, ui.LiveSource, ui.DispatchOpts, string, func() string, bool) int {
 		t.Error("herdr-hook ran the board")
 		return 1
 	}
@@ -97,6 +97,7 @@ func TestHerdrHookRouted(t *testing.T) {
 		t.Error("herdr-hook ran doctor")
 		return 1
 	}
+	pinEnv(t, "") // run() reads the real environment and settings file
 	for _, argv := range [][]string{{"herdr-hook"}, {"--herdr", "herdr-hook"}} {
 		ran := false
 		herdrHook = func(func(string) string, io.Writer) int { ran = true; return 0 }

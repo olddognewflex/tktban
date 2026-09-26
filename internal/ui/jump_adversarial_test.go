@@ -204,8 +204,9 @@ func TestJumpBeforeBoardLoads(t *testing.T) {
 
 // The single-key actions must be inert behind every modal kind that opens
 // synchronously off a keypress, not just the filter modal jump_test.go already
-// covers: o and ga must not jump, and b must not touch the notify setting the
-// herdr hook reads (TKB-24).
+// covers: o and ga must not jump, b must not touch the notify setting the
+// herdr hook reads (TKB-24), and D must not start a dispatch (TKB-25) — on a
+// board where every one of them would otherwise work.
 func TestSingleKeyActionsInertBehindEveryModalKind(t *testing.T) {
 	openers := map[string]string{
 		"move (m)":    "m",
@@ -215,12 +216,16 @@ func TestSingleKeyActionsInertBehindEveryModalKind(t *testing.T) {
 	for name, opener := range openers {
 		src := &fakeFocus{fakeLive: fakeLive{byKey: panes("TKT-1", herdr.StatusWorking, ref("wC:p1", herdr.StatusWorking, false))}}
 		m := jumpBoard(t, src)
+		// Dispatch on, so D behind a modal is inert because the modal has the
+		// keys — not because the dispatch guards happened to refuse it.
+		m = m.WithDispatch(DispatchOpts{Dir: "/src/tktban"})
+		m.settings["dispatch"] = true
 		m = step(m, key(opener))
 		if m.modal == nil {
 			t.Fatalf("%s: modal did not open", name)
 		}
 		notifyBefore := m.settings["notify"]
-		for _, keys := range [][]string{{"o"}, {"g", "a"}, {"b"}} {
+		for _, keys := range [][]string{{"o"}, {"g", "a"}, {"b"}, {"D"}} {
 			nm := m
 			var cmd tea.Cmd
 			for _, k := range keys {
@@ -240,6 +245,12 @@ func TestSingleKeyActionsInertBehindEveryModalKind(t *testing.T) {
 			}
 			if _, err := os.Stat(nm.settingsPath); !os.IsNotExist(err) {
 				t.Fatalf("%s: %v wrote the settings file from behind the modal (stat err=%v)", name, keys, err)
+			}
+			if nm.dispatching {
+				t.Fatalf("%s: %v started a dispatch from behind the modal", name, keys)
+			}
+			if len(src.listed) != 0 {
+				t.Fatalf("%s: %v called herdr %v from behind the modal", name, keys, src.listed)
 			}
 		}
 	}

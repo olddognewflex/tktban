@@ -50,6 +50,7 @@ tktban --config path/to/.sdlc/config.toml
 | `c` | Comment on the selected card (`tkt comment`) |
 | `n` | Create a new ticket (`tkt create`) |
 | `o` / `ga` | Focus the herdr pane running this card's agent (inside herdr) |
+| `D` | Dispatch this card to a herdr agent — a dry run for now ([Dispatch a ticket to an agent](#dispatch-a-ticket-to-an-agent)) |
 | `b` | Silence herdr's ticket toasts, or turn them back on ([Notifications](#notifications)) |
 | `q` | Quit |
 | `tab` / arrows | Move focus between columns and cards |
@@ -237,6 +238,92 @@ token is cleared). Nothing is written when herdr already agrees, so a board
 left open makes no calls at all. A pane that has closed needs no cleaning up:
 its metadata goes with it.
 
+### Dispatch a ticket to an agent
+
+`D` on a card is the start of handing a ticket to a herdr agent: cut the
+ticket's branch, open a worktree for it, start an agent there and give it a
+first prompt.
+
+**Today `D` creates nothing.** It is a dry run. The key opens a confirm dialog
+showing exactly what *would* be made — the lane the ticket would move to, the
+branch, the base it would be cut from, the repository, where the worktree
+would land, the agent kind and name, and the prompt — and `enter` closes it
+saying so. `esc` closes it saying nothing. No branch, no worktree, no agent,
+no `tkt transition`, no comment. The only herdr call the whole key makes is
+one read-only `worktree.list`, to answer "is this a git checkout, which repo
+is it, and does this branch already have a worktree". The sequence that acts
+on the plan lands in the next change; the dialog is deliberately built and
+shipped first, because it is the last place a wrong repo or a wrong branch is
+still cheap.
+
+**It is off by default.** `dispatch` in tktban's settings file defaults to
+`false` and the board never writes it — like `notify`, it is a hand edit:
+
+```toml
+# ~/.local/state/herdr/plugins/odnf.tktban/settings.toml  (herdr's own board)
+# ~/.config/tktban/settings.toml                          (everywhere else)
+dispatch = true
+dispatch_agent = "claude"   # the herdr agent kind to start
+dispatch_args = ""          # extra argv for it, split on spaces
+dispatch_prompt = ""        # empty = the built-in prompt
+```
+
+`dispatch_prompt` may use `{key}`, `{summary}`, `{branch}`, `{base}`, `{role}`
+and `{lane}`. `--no-herdr-dispatch` turns the key off for one run whatever the
+setting says.
+
+**There are two of those files, and a board reads exactly one.** Setting
+`dispatch = true` in the standalone file will not turn the key on for a board
+herdr launched, which reads the plugin one — the same split that makes `notify`
+land in only one place ([Notifications](#notifications)). So `D` names the file
+*that board* is reading when it refuses, and that is the file to edit:
+
+```
+Dispatch is off — set dispatch = true in ~/.local/state/herdr/plugins/odnf.tktban/settings.toml
+```
+
+Every way `D` can refuse says which one it was, and opens nothing:
+
+| Refusal | Why |
+|---------|-----|
+| `Dispatch is off — set dispatch = true in <file>` | the opt-in setting is not set in the file this board reads |
+| `Dispatch is off for this board (--no-herdr-dispatch)` | turned off for this run on the command line |
+| `Live agent status is off` / `herdr live status unavailable` | outside herdr, or herdr is not answering |
+| `Select a card first` / `That card has no ticket key` | nothing to dispatch |
+| `TKB-25 already has an agent pane (o focuses it)` | an agent is already on it; two agents racing one branch is not an improvement |
+| `Don't know which repo to dispatch TKB-25 in — open the board from a pane in the repo` | see below |
+| `No [vcs] branch_fmt in <config>` | no branch convention to follow |
+| `branch_fmt … in <config> doesn't name TKB-25` | the branch would not name the ticket, so the board could never badge or jump to its agent |
+| `No agent-owned transition out of To Do ([board] ownership in <config>)` | `[board] ownership` gives no agent-owned move out of that lane |
+| `Not a git work tree: …` | herdr says the directory is not a checkout |
+| `This board is open in a worktree …` | there is nothing to branch from |
+| `Timed out reading the tkt config …` | the two `tkt cfg` reads did not finish inside the 2 s budget |
+| `TKB-25 picked up an agent while the dialog was open` | an agent appeared between `D` and `enter`; live status keeps polling behind the dialog |
+
+Two details worth knowing:
+
+- **The lane comes from your config, not from tktban.** The target is the
+  first agent-owned transition out of the card's own role in
+  `[board] ownership` (`"todo->in_progress" = "agent"`), ranked by board
+  order. No lane name is hard-coded.
+- **The repo is resolved, never guessed.** A herdr *plugin* process that was
+  given no herdr context refuses rather than fall back to its working
+  directory — a plugin pane started without `--cwd` runs in tktban's own
+  install checkout, and two repositories here share one board, so a guess
+  could branch the wrong repository for a real ticket. `tktban` typed in an
+  ordinary herdr terminal pane is not a plugin process and does use its
+  working directory, which is exactly the repo you meant; `--select-from-cwd`
+  refuses more broadly, because mis-selecting a card costs a keystroke and
+  mis-resolving a repository costs a worktree in the wrong repo.
+- **The lane has to be one the board has.** A target role that is not in
+  `[board.roles]` — a typo like `"todo->in_progres" = "agent"` — is refused
+  rather than transitioned into, since moving a ticket there would take the
+  card off the board.
+
+Because the branch names the ticket, everything above already works on a
+dispatched agent the moment it exists: the ⚙ badge appears on the card and `o`
+jumps to its pane, with no further wiring.
+
 ### Notifications
 
 The manifest also hooks herdr's `pane.agent_status_changed` event, so herdr
@@ -288,7 +375,8 @@ Things to know:
   by the 30 s flap guard as if this toast had shown. One told `disabled` or
   `no_foreground_client` keeps it, since trying again cannot help.
 - **Turn them off** with `b` on the board. It flips `notify` in the settings
-  file that board is using, says which way it went in the status line, and —
+  file that board is using, says which way it went — naming that file, when it
+  is not the one the hook reads — and —
   on herdr's own board, while live status is on — the subtitle reads
   `herdr live (muted)` until you press `b` again. Editing the file by hand
   still works: `notify = false`, as the TOML boolean (`"false"` or `0` count
@@ -336,6 +424,8 @@ herdr plugin link .
 | read columns | `tkt cfg board.roles --json` |
 | read tickets | `tkt list --query all --json` |
 | move | `tkt transition KEY ROLE` |
+| dispatch: branch convention | `tkt cfg vcs --json` |
+| dispatch: which lane an agent owns | `tkt cfg board.ownership --json` |
 | comment | `tkt comment KEY BODY` |
 | create | `tkt create --type T --summary S [...] --json` |
 

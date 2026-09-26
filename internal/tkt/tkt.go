@@ -14,12 +14,15 @@ package tkt
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/olddognewflex/tktban/internal/model"
 )
@@ -45,13 +48,18 @@ func (e *Error) Error() string { return e.Message }
 // process exit code (0 on success); runErr is non-nil only when the process
 // could not be started at all (e.g. binary not found). It is injectable so
 // tests can stand in for a real subprocess.
-type Runner func(bin string, args, env []string) (stdout, stderr []byte, code int, runErr error)
+//
+// ctx bounds the subprocess itself: cancelling it kills the process rather
+// than only abandoning the wait, which is what lets a caller put a real
+// deadline on a tkt read (see WithContext).
+type Runner func(ctx context.Context, bin string, args, env []string) (stdout, stderr []byte, code int, runErr error)
 
 // Tkt wraps the tkt CLI.
 type Tkt struct {
 	Config string // explicit config path, or "" to let tkt auto-discover
 	Binary string
 	run    Runner
+	ctx    context.Context // nil means context.Background()
 }
 
 // New builds a Tkt. binary defaults to $TKT_BIN, else "tkt".
@@ -71,8 +79,35 @@ func (t *Tkt) WithRunner(r Runner) *Tkt {
 	return t
 }
 
-func defaultRunner(bin string, args, env []string) ([]byte, []byte, int, error) {
-	cmd := exec.Command(bin, args...)
+// WithContext returns a copy of t whose subprocesses are bounded by ctx.
+//
+// A copy, not a mutation: the board holds one long-lived *Tkt for every read
+// it makes, and one caller putting a two-second budget on a config read must
+// not put it on the board's refresh as well. The receiver is untouched.
+func (t *Tkt) WithContext(ctx context.Context) *Tkt {
+	c := *t
+	c.ctx = ctx
+	return &c
+}
+
+// context is the deadline this Tkt's subprocesses run under.
+func (t *Tkt) context() context.Context {
+	if t.ctx == nil {
+		return context.Background()
+	}
+	return t.ctx
+}
+
+func defaultRunner(ctx context.Context, bin string, args, env []string) ([]byte, []byte, int, error) {
+	// CommandContext, not Command: a wedged tkt must die with its deadline,
+	// not outlive the board that asked it a question.
+	cmd := exec.CommandContext(ctx, bin, args...)
+	// Killing tkt is not enough on its own: Run still waits on the goroutines
+	// copying stdout and stderr, and a grandchild that inherited the pipe
+	// holds them open after its parent dies. WaitDelay gives that a second
+	// and then closes the pipes, so a deadline really does end the call —
+	// which is what the dispatch's latch is relying on.
+	cmd.WaitDelay = time.Second
 	if env != nil {
 		cmd.Env = env
 	}
@@ -102,7 +137,14 @@ func (t *Tkt) env() []string {
 // run shells out to a verb. With asJSON, the stdout is returned raw for the
 // caller to unmarshal; otherwise the trimmed stdout string is returned.
 func (t *Tkt) runArgs(args []string) ([]byte, error) {
-	stdout, stderr, code, runErr := t.run(t.Binary, args, t.env())
+	ctx := t.context()
+	stdout, stderr, code, runErr := t.run(ctx, t.Binary, args, t.env())
+	// A killed process reports an exit code of its own; say what actually
+	// happened rather than "exit -1".
+	if err := ctx.Err(); err != nil {
+		return nil, &Error{Message: fmt.Sprintf(
+			"tkt %s did not finish in time (%v)", strings.Join(args, " "), err)}
+	}
 	if runErr != nil {
 		return nil, &Error{Message: fmt.Sprintf(
 			"tkt binary not found: %q. Put tkt on PATH or set TKT_BIN.", t.Binary)}
@@ -203,6 +245,106 @@ func (t *Tkt) BoardHiddenRoles() []string {
 	var out []string
 	if err := t.runJSON([]string{"cfg", "ui.board.hidden_roles", "--json"}, &out); err != nil {
 		return nil
+	}
+	return out
+}
+
+// BoardOwnership returns the `[board] ownership` map from
+// `tkt cfg board.ownership --json`: a transition ("todo->in_progress") to who
+// owns it ("agent" or "human").
+//
+// Best-effort, like BoardHiddenRoles: a missing key or any read error yields
+// nil. A board with no ownership config simply has no agent-owned transition
+// to dispatch into, and the caller says so.
+func (t *Tkt) BoardOwnership() map[string]string {
+	var out map[string]string
+	if err := t.runJSON([]string{"cfg", "board.ownership", "--json"}, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// ownerAgent is the ownership value that means an agent drives the transition.
+const ownerAgent = "agent"
+
+// AgentTarget is the role an agent-owned transition moves fromRole to: the
+// lane a ticket lands in when an agent picks it up. ok is false when no
+// agent-owned transition leaves fromRole, which is the board saying this
+// column is not something to hand to an agent.
+//
+// order is the board's own role order (from board.roles). It does two jobs.
+//
+// It decides "first": ownership is a map, so candidates are ranked by their
+// target's position on the board, and the answer is the same on every run and
+// reads as "the next lane" rather than "whichever the runtime happened to
+// hash first".
+//
+// And it decides acceptability. A target the board does not list is dropped,
+// not merely ranked last: it is a role this board cannot show, so moving a
+// ticket into it would take the card off the board — a config typo
+// ("todo->in_progres") must refuse rather than transition somewhere nobody
+// can see. An empty order (a board that has not loaded its roles yet) has
+// nothing to check against, so it falls back to ranking by name alone.
+//
+// No role name is hard-coded; a board that renames its lanes keeps working.
+func AgentTarget(ownership map[string]string, fromRole string, order []string) (string, bool) {
+	var targets []string
+	for transition, owner := range ownership {
+		if owner != ownerAgent {
+			continue
+		}
+		from, to, ok := strings.Cut(transition, "->")
+		if !ok || strings.TrimSpace(from) != fromRole {
+			continue
+		}
+		to = strings.TrimSpace(to)
+		if to == "" {
+			continue
+		}
+		if len(order) > 0 && !slices.Contains(order, to) {
+			continue // a lane this board does not have
+		}
+		targets = append(targets, to)
+	}
+	if len(targets) == 0 {
+		return "", false
+	}
+	rank := func(role string) int {
+		if i := slices.Index(order, role); i >= 0 {
+			return i
+		}
+		return len(order)
+	}
+	slices.SortFunc(targets, func(a, b string) int {
+		if d := rank(a) - rank(b); d != 0 {
+			return d
+		}
+		return strings.Compare(a, b)
+	})
+	return targets[0], true
+}
+
+// VCSConfig is the `[vcs]` block from `tkt cfg vcs --json` — the branch
+// convention a dispatch has to follow so the board can find the agent again.
+type VCSConfig struct {
+	Provider      string `json:"provider"`
+	Repo          string `json:"repo"`
+	DefaultBranch string `json:"default_branch"`
+	BranchFmt     string `json:"branch_fmt"`
+	HotfixFmt     string `json:"hotfix_fmt"`
+}
+
+// VCS reads the [vcs] config. Best-effort: a zero VCSConfig on any failure,
+// which the caller reads as "no branch convention", and refuses to dispatch.
+//
+// The format is returned unrendered on purpose. `tkt cfg vcs.branch_fmt
+// --ticket X` renders it with an empty slug, which yields a branch ending in a
+// bare separator, so the caller has to own slugification anyway — and then it
+// may as well own the whole substitution (herdr.RenderBranch).
+func (t *Tkt) VCS() VCSConfig {
+	var out VCSConfig
+	if err := t.runJSON([]string{"cfg", "vcs", "--json"}, &out); err != nil {
+		return VCSConfig{}
 	}
 	return out
 }

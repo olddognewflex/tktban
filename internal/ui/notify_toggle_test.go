@@ -176,7 +176,7 @@ func TestBKeyOutsideHerdrSaysWhereItLanded(t *testing.T) {
 	m = loadBoard(m)
 
 	m = step(m, key("b"))
-	if m.status != "herdr notifications off (herdr's own board keeps a separate setting)" {
+	if m.status != "herdr notifications off in "+m.settingsFile()+" (herdr's own board keeps a separate setting)" {
 		t.Fatalf("status = %q", m.status)
 	}
 	standalone := filepath.Join(home, "tktban", "settings.toml")

@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/olddognewflex/tktban/internal/herdr"
 	"github.com/olddognewflex/tktban/internal/model"
 	"github.com/olddognewflex/tktban/internal/ticket"
 	"github.com/olddognewflex/tktban/internal/tkt"
@@ -731,4 +732,131 @@ func parseLabels(s string) []string {
 		}
 	}
 	return out
+}
+
+// ---- Dispatch (dry run) ----
+
+// worktreePlacement is what the modal says about where the worktree goes.
+// tktban deliberately sends no path: herdr owns worktree placement
+// ([worktrees] directory, default ~/.herdr/worktrees), so a dispatched
+// worktree lands beside the ones the person makes by hand.
+const worktreePlacement = "herdr chooses the path ([worktrees] directory)"
+
+// dispatchModal confirms a dispatch by showing exactly what it would create,
+// field by field, before anything is created.
+//
+// In this change enter creates nothing: it closes the dialog and the board
+// says so. The dialog is the point — it is the last place a wrong repo, a
+// wrong branch or a wrong lane is still cheap — so it is built and tested now,
+// against the same plan the create sequence will later consume unchanged.
+//
+// "Unchanged" is literal: the answer carries the plan and its preflight back
+// out on dispatchResultMsg, so whatever acts on them acts on exactly what was
+// rendered here and agreed to.
+type dispatchModal struct {
+	plan herdr.Plan
+	pre  herdr.PreflightResult
+}
+
+func newDispatchModal(plan herdr.Plan, pre herdr.PreflightResult) dispatchModal {
+	return dispatchModal{plan: plan, pre: pre}
+}
+
+func (m dispatchModal) Update(msg tea.Msg) (modal, tea.Cmd) {
+	switch {
+	case keyIn(msg, "esc", "escape"):
+		return m, send(dispatchResultMsg{plan: m.plan, pre: m.pre})
+	case keyIn(msg, "enter"):
+		return m, send(dispatchResultMsg{plan: m.plan, pre: m.pre, confirmed: true})
+	}
+	return m, nil
+}
+
+// worktreeLine is what the modal says about the worktree: reusing the one the
+// branch already has, or letting herdr place a new one.
+func (m dispatchModal) worktreeLine() string {
+	if m.pre.ExistingWorktreePath != "" {
+		return "reuse " + m.pre.ExistingWorktreePath
+	}
+	return worktreePlacement
+}
+
+func (m dispatchModal) repoLine() string {
+	parts := make([]string, 0, 2)
+	if m.plan.Repo != "" {
+		parts = append(parts, m.plan.Repo)
+	}
+	if root := m.pre.RepoRoot; root != "" {
+		parts = append(parts, root)
+	}
+	if len(parts) == 0 {
+		return m.plan.Dir
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+func (m dispatchModal) laneLine() string {
+	from := m.plan.SourceLane
+	if from == "" {
+		from = m.plan.SourceRole
+	}
+	to := m.plan.TargetLane
+	if to == "" {
+		to = m.plan.TargetRole
+	}
+	return from + " → " + to
+}
+
+func (m dispatchModal) agentLine() string {
+	line := m.plan.AgentKind + " as " + m.plan.AgentName
+	if len(m.plan.AgentArgs) > 0 {
+		line += "  " + strings.Join(m.plan.AgentArgs, " ")
+	}
+	return line
+}
+
+// dispatchBodyWidth is the text width inside the dialog: the terminal, less
+// the dialog's own border (2) and padding (4), less a couple of columns so
+// the box never touches the edge, and capped so a wide terminal gets a
+// readable column rather than one very long line.
+//
+// It is computed from the width View is handed rather than one captured when
+// the modal opened, so the dialog re-wraps when the terminal is resized. The
+// create/edit modals take their size at construction only because they have
+// to size bubbles inputs; this one renders plain text and does not.
+func dispatchBodyWidth(width int) int {
+	if width <= 0 {
+		return 72 // unsized (before the first WindowSizeMsg)
+	}
+	return clamp(width-8, 10, 100)
+}
+
+func (m dispatchModal) View(st styles, width, height int) string {
+	// Every line goes through wrap, the title included. The plan holds real
+	// repository paths, a branch built from a ticket summary, a multi-line
+	// prompt and a ticket key — and nothing bounds a key's length, so even
+	// the title is not a line this dialog controls. Nothing may be written
+	// out unwrapped.
+	inner := dispatchBodyWidth(width)
+	wrap := lipgloss.NewStyle().Width(inner).Render
+
+	var b strings.Builder
+	b.WriteString(wrap(st.dialogTitle.Render("Dispatch "+m.plan.Key)) + "\n")
+	if m.plan.Summary != "" {
+		b.WriteString(wrap(st.cardSummary.Render(m.plan.Summary)) + "\n")
+	}
+	b.WriteString("\n")
+	for _, row := range [][2]string{
+		{"lane", m.laneLine()},
+		{"branch", m.plan.Branch},
+		{"base", m.plan.Base},
+		{"repo", m.repoLine()},
+		{"worktree", m.worktreeLine()},
+		{"agent", m.agentLine()},
+	} {
+		b.WriteString(wrap(st.fieldLabel.Render(row[0])+"  "+row[1]) + "\n")
+	}
+	b.WriteString("\n" + st.fieldLabel.Render("prompt") + "\n" + wrap(m.plan.Prompt) + "\n")
+	b.WriteString("\n" + wrap(st.fieldLabel.Render("Dry run: nothing is created yet. enter close · esc cancel")))
+	return dialogBox(st, width, height, b.String())
 }

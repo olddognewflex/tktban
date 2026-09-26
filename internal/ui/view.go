@@ -87,7 +87,7 @@ func (m Model) liveLabel() string {
 // footerKeys is the key hint line. It is a value rather than a literal inside
 // renderStatus so a test can assert against it without depending on where the
 // terminal width happens to wrap it.
-const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · n new · N new-in-$EDITOR · x hide · X show all · b notify · q quit"
+const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · D dispatch · n new · N new-in-$EDITOR · x hide · X show all · b notify · q quit"
 
 func (m Model) renderStatus() string {
 	if m.status != "" {

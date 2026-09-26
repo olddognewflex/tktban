@@ -419,3 +419,113 @@ from the TKB-24 research against herdr 0.9.0 and are not re-measured here.
   itself: a 5 s context for the work, plus up to 1 s each for giving a claim
   back and clearing its settle marker, so about 7 s at worst; and `working` / `idle` / `unknown` exit before any
   I/O.
+
+## Verified in TKB-25
+
+Read out of `herdr api schema --json` (protocol 22), `herdr --default-config`
+and the herdr binary's own error-code strings, while building the dispatch dry
+run. Everything below was checked against the running herdr, not remembered.
+
+### No creation method takes a command
+
+This is the finding that shapes the whole feature. **Nothing in herdr's API
+starts a pane at a command of your choosing.** `worktree.create`,
+`worktree.open` and `pane.split` all open a shell; `PaneSplitParams` carries
+`cwd`, `direction`, `env`, `focus`, `ratio`, `right_click`, `target_pane_id`
+and `workspace_id`, and no `command` or `argv` anywhere.
+
+So a dispatch is necessarily two steps: make the worktree (which opens a pane
+at a shell), then `agent.start` into that pane. Which is also why the second
+step can fail with `agent_pane_busy` — the pane exists before its shell is at
+a prompt — and why a retry, not an error, is the right answer to that code.
+
+### The interface
+
+| Method | Params | Reply |
+|--------|--------|-------|
+| `worktree.list` | `cwd?`, `workspace_id?`, `trust_repository` | `worktree_list`: `source` (required) + `worktrees[]` |
+| `worktree.create` | `workspace_id?`, `cwd?`, `branch?`, `base?`, `path?`, `label?`, `focus` (default false), `trust_repository` | `worktree_created`: `workspace`, `tab`, `root_pane` (full `PaneInfo`), `worktree` — all required |
+| `worktree.open` | the same minus `base` | `worktree_opened`: the above plus `already_open` |
+| `agent.start` | `name`, `kind`, `pane_id` (all required), `args []string`, `timeout_ms?` | `agent_started`: `agent` + `argv` |
+| `agent.prompt` | `target`, `text` (required), `wait?` (`{until[], timeout_ms}`) | — |
+
+- `branch` is typed `string | null` but is **effectively required** on
+  `worktree.create`: without it herdr answers "branch is required".
+- `timeout_ms` must be **greater than 3000 and at most 300000**; omit it to
+  take herdr's own default.
+- `WorktreeInfo` is `path`, `is_bare`, `is_detached`, `is_prunable`,
+  `is_linked_worktree`, `label` (required) plus `branch` and
+  `open_workspace_id` (both nullable).
+- `WorktreeSourceInfo` is `repo_key`, `repo_name`, `repo_root`,
+  `source_checkout_path` (required) plus `source_workspace_id` (nullable).
+- **`trust_repository` is a write.** tktban omits it from `worktree.list`, so
+  listing stays a read; a pinned request-JSON test asserts it is not on the
+  wire.
+
+### Error codes
+
+All of these are present in herdr's binary at protocol 22. The two a dispatch
+must refuse outright rather than retry are marked.
+
+| Code | Meaning |
+|------|---------|
+| `not_git_worktree` | **refuse** — the directory is not a checkout |
+| `linked_worktree_source` | **refuse** — the source checkout is itself a linked worktree |
+| `worktree_operation_in_progress` | another worktree operation is running |
+| `worktree_create_failed` | the create itself failed |
+| `stale_worktree_operation` | a previous operation was left half-done |
+| `ambiguous_worktree_branch` | the branch matches more than one worktree |
+| `worktree_not_found` | no such worktree |
+| `agent_pane_busy` | the pane's shell is not at a prompt yet — retry |
+| `agent_name_taken` | pick the next candidate name |
+| `agent_blocked` | herdr refused to start this agent |
+| `invalid_agent_name` | the name breaks the rule below |
+| `invalid_agent_argument` | a bad entry in `args` |
+
+`linked_worktree_source` also shows up without an error: a `worktree.list`
+whose `source.source_checkout_path` appears in `worktrees[]` with
+`is_linked_worktree: true` is herdr saying "you are inside a worktree
+already", and tktban refuses on that too.
+
+### Agent names
+
+`^[a-z][a-z0-9_-]{0,31}$`, and unique among **live** agents. A ticket key
+lowercases straight into one (`TKB-25` → `tkb-25`), which is what makes a
+dispatched agent recognisable in herdr's own agent list; `agent_name_taken`
+falls back to `tkb-25-2`, with the suffix sharing the 32-character budget.
+
+### herdr owns worktree placement
+
+`herdr --default-config` documents `[worktrees] directory`, defaulting to
+`~/.herdr/worktrees`. tktban therefore sends **no `path`**, so a dispatched
+worktree lands exactly where the ones a person makes by hand do.
+
+### What tkt contributes
+
+- `tkt cfg board.ownership --json` → `{"todo->in_progress":"agent",
+  "in_progress->review":"agent","review->done":"agent"}`. The dispatch target
+  is the first **agent**-owned transition out of the card's own role, ranked
+  by board order; no role name is hard-coded.
+- `tkt cfg vcs --json` → `branch_fmt` `"feature/{key-lower}-{slug}"`,
+  `default_branch` `"main"`, `repo`. The branch is rendered in Go, not by tkt:
+  `tkt cfg vcs.branch_fmt --ticket X` renders it without a slug and leaves a
+  dangling separator (`feature/tkb-25-`), so the caller owns slugification
+  anyway.
+- A `branch_fmt` with no `{key-lower}` in it is refused up front. The card
+  badge and the `o` jump both work by reading a pane's branch back through
+  `KeysFromBranch`, so such an agent would be dispatched and then invisible.
+- A target role that is not in `[board.roles]` is refused too: a config typo
+  would otherwise transition a ticket into a lane no column can show.
+- Both reads run under the dispatch's own 2 s budget
+  (`tkt.WithContext` → `exec.CommandContext`), so a wedged `tkt` is killed
+  rather than waited on. That matters because the board latches the `D` key
+  while a preparation is in flight.
+
+### Which herdr processes get refused a working directory
+
+`HERDR_ENV=1` is set in **every** herdr pane, so it does not distinguish a
+plugin process from a shell someone is typing in. The `HERDR_PLUGIN_*`
+variables do: herdr sets them only for plugin processes. Only a plugin process
+can be started in the plugin's own install checkout (the TKB-23 finding), so
+only that one is refused a fall-back to its working directory — `tktban` run
+by hand in a herdr terminal is where the person already is.
