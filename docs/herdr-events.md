@@ -479,6 +479,8 @@ must refuse outright rather than retry are marked.
 | `ambiguous_worktree_branch` | the branch matches more than one worktree |
 | `worktree_not_found` | no such worktree |
 | `agent_pane_busy` | the pane's shell is not at a prompt yet — retry |
+| `agent_not_ready` | the agent is there but not accepting interactive input yet — retry (see below) |
+| `agent_prompt_failed` | the submission failed part-way — do **not** retry |
 | `agent_name_taken` | pick the next candidate name |
 | `agent_blocked` | herdr refused to start this agent |
 | `invalid_agent_name` | the name breaks the rule below |
@@ -538,8 +540,8 @@ Three calls, in this order, each with its own budget on our side:
 | Stage | Call | Our budget | Note |
 |-------|------|-----------|------|
 | 1 | `worktree.create`, or `worktree.open` when the preflight already saw the branch checked out | 15 s | params exactly `{cwd, branch, base, label, focus:false}` — `worktree.open` the same minus `base` and minus `label` (it is joining a workspace that already has one). No `path`: herdr owns placement. No `trust_repository`: that is a write. |
-| 2 | `agent.start` into `root_pane.pane_id` | 30 s | `timeout_ms: 20000`, deliberately inside our own budget so **herdr's** timer fires first and the failure arrives as a typed error naming what broke, rather than as a closed socket and a bare deadline. The budget bounds the whole retry loop, so it has to be 20 s **plus** the 3.1 s of backoff (`herdr.AgentStartBackoffTotal`) plus margin — 25 s would leave the last attempt 1.9 s and invert the relation. |
-| 3 | `agent.prompt` | 10 s | `{target, text}` only. `agent_not_ready` (name not registered yet) is retried on a 100 ms…3.2 s backoff; nothing else is. herdr accepts a `wait` object; it is never sent, because a board must not block on an agent reaching a status. |
+| 2 | `agent.start` into `root_pane.pane_id` | 35 s | `timeout_ms: 20000`, deliberately inside our own budget so **herdr's** timer fires first and the failure arrives as a typed error naming what broke, rather than as a closed socket and a bare deadline. The budget bounds the whole retry loop, so it has to be 20 s **plus** the 6.3 s of backoff (`herdr.AgentRetryBackoffTotal`) plus margin; too small and the last attempt is cut short, inverting the relation. |
+| 3 | `agent.prompt` | 15 s | `{target, text}` only. herdr accepts a `wait` object; it is never sent, because a board must not block on an agent reaching a status. Also a retry loop — see "`agent.start` succeeding does not mean you may prompt" — so the budget covers the 6.3 s schedule plus the submission, whose delay herdr notes grows with prompt size. |
 
 Then two `tkt` writes, 5 s each: `transition` (only when the agent really
 started, and only when the ticket is still in the lane the plan was built for)
@@ -574,24 +576,88 @@ and `comment` (always).
   therefore checks the context error first. The error's own text carries both
   halves, which is what keeps the deadline from being dropped from the message.
 
+### `agent.start` succeeding does not mean you may prompt
+
+This was learned the hard way, and it is exactly the kind of thing that gets
+re-learned the hard way, so: **a successful `agent.start` means herdr detected
+the expected agent in the pane. It does not mean `agent.prompt` will be
+accepted.** The registry of active *named* agents lags that detection, and the
+observed symptom is `agent_not_ready`.
+
+The first live dispatch (TKB-27) did exactly this. The worktree and the agent
+came up correctly and the prompt was dropped, so the agent sat idle waiting to
+be told something until a human pasted it in by hand:
+
+    - agent: tkb-27 (claude), argv: claude
+    - agent start: 5 attempts, 4 busy, 0 renamed, waited 1.5s
+    - prompt: NOT sent - paste it into the pane by hand
+      agent.prompt failed - agent_not_ready: agent tkb-27 is not an active named agent
+
+`herdr agent list` immediately afterwards showed pane `wV:p1` carrying
+name `tkb-27`, agent `claude`, status `working` - so the name was right and herdr
+had registered it. It simply was not an active named agent at the moment we
+asked, and we asked once. `agent.start` had retries; `agent.prompt` had none.
+
+herdr's own skill text says the same thing from the other side: *"If the agent is
+blocked during startup, the command returns `agent_not_ready` immediately but
+keeps the name available... Wait until the agent becomes idle before prompting
+it."* That instruction - wait, then prompt - is a retry loop.
+
+So `agent.prompt` gets the same budget as `agent.start`, on `agent_not_ready`
+and `agent_pane_busy`. What it must **not** retry:
+
+- **`agent_blocked`.** herdr documents that it "rejects an agent already waiting
+  at an approval or question dialog with `agent_blocked` before sending any
+  input". Asking again cannot help while the dialog is up, and once a human
+  dismisses it the prompt would be typed into whatever replaced it.
+- **`agent_prompt_failed`.** herdr "sends text followed by encoded Enter as one
+  ordered submission" and "reports successful submission only after both have
+  been written", so a failure may have left part of the prompt in the pane.
+  Sending it again could append to a half-delivered one.
+- **`agent_not_found` / `agent_name_not_found` and the `invalid_*` refusals.** A
+  target herdr does not know, or an argument it will never accept, does not come
+  right by being asked again.
+
+`agent_prompt_stalled` and `timeout` cannot arrive at all: herdr documents both
+as outcomes of a *waited* submission, and tktban never sends `wait`.
+
 ### The retry budget, and why it is shaped like that
 
-`agent_pane_busy` is not an error in the ordinary sense: `worktree.create`
-returns as soon as the pane exists, and `agent.start` needs that pane's login
-shell to have reached an *interactive prompt*. So the budget is 5 retries at
-100/200/400/800/1600 ms — about 3.1 s of waiting at worst.
+Neither `agent_pane_busy` nor `agent_not_ready` is an error in the ordinary
+sense. Each is one step returning before the next step's precondition holds:
+`worktree.create` returns as soon as the pane exists, while `agent.start` needs
+that pane's login shell to have reached an *interactive prompt*; `agent.start`
+returns as soon as herdr has detected the agent, while `agent.prompt` needs it
+registered and accepting input. One schedule serves both, because in both cases
+the only useful answer is to ask again shortly.
 
-The shape is the decision. A plain `sh` is ready almost immediately, so the
-first retries are cheap; a shell with a prompt framework, a version manager and
-a plugin loader in its rc files takes roughly half a second, and the tail is
-long. Five doublings from 100 ms covers that with room to spare. `agent_name_taken`
-gets exactly one retry, spending a slot of the *same* budget — two name
-collisions in a row means something else is holding these names, and walking up
-the sequence would only make more of them. Every other code
+**Six retries at 100/200/400/800/1600/3200 ms - 6.3 s of waiting at worst.**
+
+The shape is geometric so that the early retries are cheap (a fast shell and a
+prompt-ready agent both cost 100 ms, not a flat second), the tail is patient
+because the slow end is very slow, and each added step buys the most headroom
+per unit of worst-case latency.
+
+The *length* comes from measurement. TKB-27's live dispatch needed **5 attempts
+and 1.5 s** for `agent.start` on a real shell - it succeeded on the 800 ms retry
+- which left exactly one slot of the original five-retry, 3.1 s schedule spare. A
+2x margin on an observed number is not a margin. The 3200 ms step doubles the
+budget for one extra attempt and puts the observed case at about a quarter of it.
+Going further was considered and rejected: another doubling would make the worst
+case 12.7 s per stage, and the failure is recoverable - the worktree, the pane
+and the agent all exist, and the ticket comment says so - so patience past this
+point costs more than it buys.
+
+`agent_name_taken` gets exactly one retry, spending a slot of the *same* budget:
+two name collisions in a row means something else is holding these names, and
+walking up the sequence would only make more of them. Every other code
 (`invalid_agent_name`, `invalid_agent_argument`, `agent_blocked`, a dial
 failure) returns at once: none of them comes right by being asked again.
 
-Giving up is never a rollback. The worktree and its pane stay.
+Giving up is never a rollback. The worktree, its pane and any started agent all
+stay, and the comment records the attempt counts (`agent start: 5 attempts, 4
+busy...`, `prompt attempts: 7 attempts, 7 not ready...`) so the next failure is
+diagnosable from the ticket alone.
 
 ### No creation method takes an undo either
 

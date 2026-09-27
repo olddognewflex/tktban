@@ -39,8 +39,9 @@ type recordingDispatch struct {
 	startErrs []error
 	start     AgentStartResult
 
-	// promptErrs is served one per agent.prompt call, like startErrs; once
-	// it runs out, promptErr answers every later call.
+	// promptErrs is served one per agent.prompt call, oldest first; a short
+	// slice means every later call succeeds. promptErr is the simpler form,
+	// applied to every call.
 	promptErrs []error
 	promptErr  error
 }
@@ -660,33 +661,59 @@ func TestStartAgentRetriesOnPaneBusy(t *testing.T) {
 // its pane are still there for the person to use.
 func TestStartAgentGivesUpAfterTheBudget(t *testing.T) {
 	busy := &APIError{Code: CodeAgentPaneBusy, Message: "pane is not at a shell prompt"}
-	f := &recordingDispatch{startErrs: []error{busy, busy, busy, busy, busy, busy}}
+	f := &recordingDispatch{startErrs: []error{busy, busy, busy, busy, busy, busy, busy, busy}}
 	sl := &recordingSleep{}
 
 	_, stats, err := StartAgentWithRetry(context.Background(), f, testPlan(), "wE:p1", sl.sleep)
 	if err == nil {
-		t.Fatal("six busies must give up, not keep trying")
+		t.Fatal("a pane that stays busy must give up, not keep trying")
 	}
 	if code := ErrorCode(err); code != CodeAgentPaneBusy {
 		t.Errorf("error code = %q, want the last herdr reply's", code)
 	}
-	if len(f.calls) != 6 {
-		t.Fatalf("agent.start calls = %d, want 6 (one attempt plus five retries)", len(f.calls))
+	if len(f.calls) != 7 {
+		t.Fatalf("agent.start calls = %d, want 7 (one attempt plus six retries)", len(f.calls))
 	}
 	want := []time.Duration{
 		100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond,
-		800 * time.Millisecond, 1600 * time.Millisecond,
+		800 * time.Millisecond, 1600 * time.Millisecond, 3200 * time.Millisecond,
 	}
 	if !slices.Equal(sl.waits, want) {
 		t.Fatalf("waits = %v, want %v", sl.waits, want)
 	}
-	if stats.Attempts != 6 || stats.Busy != 6 {
+	if stats.Attempts != 7 || stats.Busy != 7 {
 		t.Errorf("stats = %+v", stats)
 	}
-	if stats.Waited != 3100*time.Millisecond {
-		t.Errorf("total wait = %v, want 3.1s", stats.Waited)
+	if stats.Waited != 6300*time.Millisecond {
+		t.Errorf("total wait = %v, want 6.3s", stats.Waited)
 	}
 	assertNothingDestroyed(t, f)
+}
+
+// The case the live dispatch actually hit, replayed: four busy replies then a
+// success on attempt five, 1.5s of waiting. It is here so that shortening the
+// schedule back below the measured need fails a test rather than a dispatch.
+func TestStartAgentSurvivesTheObservedSlowShell(t *testing.T) {
+	busy := &APIError{Code: CodeAgentPaneBusy, Message: "pane is not at a shell prompt"}
+	f := &recordingDispatch{
+		startErrs: []error{busy, busy, busy, busy},
+		start:     startedAgent(),
+	}
+	sl := &recordingSleep{}
+	_, stats, err := StartAgentWithRetry(context.Background(), f, testPlan(), "wE:p1", sl.sleep)
+	if err != nil {
+		t.Fatalf("the observed slow shell must still be dispatchable: %v", err)
+	}
+	if stats.Attempts != 5 || stats.Busy != 4 {
+		t.Fatalf("stats = %+v, want the observed 5 attempts / 4 busy", stats)
+	}
+	if stats.Waited != 1500*time.Millisecond {
+		t.Fatalf("waited %v, want the observed 1.5s", stats.Waited)
+	}
+	// And there is real headroom left, not one slot.
+	if left := len(agentRetryBackoff) - stats.Busy; left < 2 {
+		t.Fatalf("only %d retry slots spare on the observed case", left)
+	}
 }
 
 // A name collision means an earlier agent on this ticket is still live
@@ -937,20 +964,33 @@ func TestSequenceFailedStartLeavesNoAgentNameButRecordsTheOneTried(t *testing.T)
 // whole stage, with herdr's own timeout for the LAST attempt inside it too.
 // That is the relation a caller sizes its budget from, so it is exported and
 // asserted rather than recomputed by hand.
-func TestAgentStartBackoffTotal(t *testing.T) {
-	if got, want := AgentStartBackoffTotal(), 3100*time.Millisecond; got != want {
-		t.Fatalf("AgentStartBackoffTotal = %v, want %v", got, want)
+func TestAgentRetryBackoffTotal(t *testing.T) {
+	if got, want := AgentRetryBackoffTotal(), 6300*time.Millisecond; got != want {
+		t.Fatalf("AgentRetryBackoffTotal = %v, want %v", got, want)
 	}
 	// Each entry counted exactly once, in case somebody adds one.
 	var sum time.Duration
-	for _, d := range agentStartBackoff {
+	for _, d := range agentRetryBackoff {
 		sum += d
 	}
-	if sum != AgentStartBackoffTotal() {
-		t.Fatalf("total %v does not match the schedule %v", AgentStartBackoffTotal(), agentStartBackoff)
+	if sum != AgentRetryBackoffTotal() {
+		t.Fatalf("total %v does not match the schedule %v", AgentRetryBackoffTotal(), agentRetryBackoff)
 	}
-	if len(agentStartBackoff) != 5 {
-		t.Fatalf("the schedule has %d retries, want 5", len(agentStartBackoff))
+	if len(agentRetryBackoff) != 6 {
+		t.Fatalf("the schedule has %d retries, want 6", len(agentRetryBackoff))
+	}
+	// Geometric, and it has to stay geometric: the whole argument for the
+	// length is that each step buys the most headroom per unit of worst-case
+	// latency, which a flattened tail would quietly undo.
+	for i := 1; i < len(agentRetryBackoff); i++ {
+		if agentRetryBackoff[i] != 2*agentRetryBackoff[i-1] {
+			t.Fatalf("the schedule stopped doubling at %d: %v", i, agentRetryBackoff)
+		}
+	}
+	// The measured case (TKB-27: agent.start succeeded on attempt 5, after
+	// 1.5s of waiting) must sit well inside the budget, not at its edge.
+	if observed := 1500 * time.Millisecond; AgentRetryBackoffTotal() < 3*observed {
+		t.Fatalf("budget %v is less than 3x the observed %v", AgentRetryBackoffTotal(), observed)
 	}
 }
 
@@ -1147,93 +1187,287 @@ func TestSequenceRealSocketErrorReplyStopsTheSequence(t *testing.T) {
 	}
 }
 
-// ---- the prompt retry ----
+// ---- the prompt's own retry budget ----
+//
+// The bug this section exists for, from the first live dispatch (TKB-27): the
+// worktree and the agent came up correctly and the prompt was dropped on the
+// floor, so the agent sat idle waiting to be told something until a human
+// pasted the prompt in by hand.
+//
+//	agent: tkb-27 (claude), argv: claude
+//	agent start: 5 attempts, 4 busy, 0 renamed, waited 1.5s
+//	prompt: NOT sent — paste it into the pane by hand
+//	agent.prompt failed — agent_not_ready: agent tkb-27 is not an active named agent
+//
+// `herdr agent list` then showed tkb-27 registered and working, so the name was
+// right and herdr did register it — just not by the time we asked, once. A
+// successful agent.start does not mean agent.prompt will be accepted.
 
-// promptReady is a sequence whose agent has just started, so Next runs the
-// prompt stage.
-func promptReady() Sequence {
-	s := NewSequence(testPlan(), PreflightResult{})
-	s.Res.Created, s.Res.Started = true, true
-	s.Res.PaneID, s.Res.AgentName = "wE:p1", "tkb-25"
-	return s
+// herdr's own answer while the named-agent registry catches up.
+func notReady(name string) error {
+	return &APIError{Code: CodeAgentNotReady, Message: "agent " + name + " is not an active named agent"}
 }
 
-// agent.start can return before herdr has registered the name it gave, so
-// the first prompt meets agent_not_ready. That is retried on the backoff and
-// the same text goes to the same target each time.
-func TestPromptRetriesOnNotReady(t *testing.T) {
-	notReady := &APIError{Code: CodeAgentNotReady, Message: "agent tkb-25 is not an active named agent"}
-	f := &recordingDispatch{promptErrs: []error{notReady, notReady}}
+// Two not-ready replies then a success: three calls, and the delays are the
+// documented schedule's first two steps.
+func TestPromptAgentRetriesOnNotReady(t *testing.T) {
+	f := &recordingDispatch{promptErrs: []error{notReady("tkb-25"), notReady("tkb-25")}}
 	sl := &recordingSleep{}
 
-	got := promptReady().Next(context.Background(), f, sl.sleep)
-	if !got.Res.Prompted || got.Res.Err != nil {
-		t.Fatalf("two not-readies then a success must land the prompt: %+v", got.Res)
+	stats, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", sl.sleep)
+	if err != nil {
+		t.Fatalf("two not-readies then a success must succeed: %v", err)
 	}
-	if got.Stage() != StageDone {
-		t.Errorf("stage = %v, want done", got.Stage())
+	if len(f.calls) != 3 {
+		t.Fatalf("agent.prompt calls = %d (%v), want 3", len(f.calls), f.methods())
 	}
-	if want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}; !slices.Equal(sl.waits, want) {
+	want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}
+	if !slices.Equal(sl.waits, want) {
 		t.Fatalf("waits = %v, want %v", sl.waits, want)
 	}
-	if p := got.Res.Prompt; p.Attempts != 3 || p.NotReady != 2 || p.Waited != 300*time.Millisecond {
-		t.Errorf("prompt stats = %+v", p)
+	if stats.Attempts != 3 || stats.NotReady != 2 || stats.Busy != 0 {
+		t.Errorf("stats = %+v", stats)
 	}
+	if stats.Waited != 300*time.Millisecond {
+		t.Errorf("total wait = %v, want 300ms", stats.Waited)
+	}
+	// Every attempt asks for the same thing. A retry that changed the target or
+	// the text would be a different call, not a retry — and a changed text is
+	// how an agent ends up with half a prompt twice.
 	for i, c := range f.calls {
 		p := c.params.(AgentPromptParams)
-		if p.Target != "tkb-25" || p.Text != testPlan().Prompt {
+		if p.Target != "tkb-25" || p.Text != "go" {
 			t.Errorf("attempt %d = %+v", i, p)
 		}
 	}
 }
 
-// The budget is finite; running out leaves the prompt as the person's to
-// paste, exactly like any other prompt failure.
-func TestPromptGivesUpAfterTheBudget(t *testing.T) {
-	notReady := &APIError{Code: CodeAgentNotReady, Message: "not ready"}
-	f := &recordingDispatch{promptErr: notReady}
+// agent_pane_busy is retried here too: it is the same "the pane is not there
+// yet" the start waits out.
+func TestPromptAgentRetriesOnPaneBusy(t *testing.T) {
+	f := &recordingDispatch{promptErrs: []error{&APIError{Code: CodeAgentPaneBusy, Message: "busy"}}}
+	sl := &recordingSleep{}
+	stats, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", sl.sleep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Attempts != 2 || stats.Busy != 1 || stats.NotReady != 0 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+// The budget is finite here as well, and running out changes nothing on disk:
+// the agent is running, it just has not been told what to do.
+func TestPromptAgentGivesUpAfterTheBudget(t *testing.T) {
+	errs := make([]error, 10)
+	for i := range errs {
+		errs[i] = notReady("tkb-25")
+	}
+	f := &recordingDispatch{promptErrs: errs}
 	sl := &recordingSleep{}
 
-	got := promptReady().Next(context.Background(), f, sl.sleep)
-	if got.Res.Prompted || got.Res.Failed != StagePrompt || ErrorCode(got.Res.Err) != CodeAgentNotReady {
-		t.Fatalf("result = %+v, want a prompt failure carrying agent_not_ready", got.Res)
+	stats, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", sl.sleep)
+	if code := ErrorCode(err); code != CodeAgentNotReady {
+		t.Fatalf("err = %v, want agent_not_ready", err)
 	}
-	if len(f.calls) != len(promptBackoff)+1 {
-		t.Fatalf("agent.prompt calls = %d, want %d", len(f.calls), len(promptBackoff)+1)
+	if len(f.calls) != 7 {
+		t.Fatalf("agent.prompt calls = %d, want 7 (one attempt plus six retries)", len(f.calls))
 	}
-	if got.Res.Prompt.Waited != PromptBackoffTotal() {
-		t.Errorf("waited %v, want %v", got.Res.Prompt.Waited, PromptBackoffTotal())
+	want := []time.Duration{
+		100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond,
+		800 * time.Millisecond, 1600 * time.Millisecond, 3200 * time.Millisecond,
+	}
+	if !slices.Equal(sl.waits, want) {
+		t.Fatalf("waits = %v, want %v", sl.waits, want)
+	}
+	if stats.Attempts != 7 || stats.NotReady != 7 || stats.Waited != 6300*time.Millisecond {
+		t.Errorf("stats = %+v", stats)
 	}
 	assertNothingDestroyed(t, f)
 }
 
-// Nothing but agent_not_ready is retried. agent_blocked in particular is a
-// dialog a person has to answer, not a race.
-func TestPromptDoesNotRetryOtherCodes(t *testing.T) {
-	for _, code := range []string{CodeAgentBlocked, CodeAgentPaneBusy, "agent_prompt_failed"} {
-		f := &recordingDispatch{promptErr: &APIError{Code: code, Message: code}}
+// agent_blocked is NOT retried. herdr rejects the submission before sending any
+// input because the agent is at an approval or question dialog: asking again
+// cannot help while it is up, and once a human dismisses it the prompt would be
+// typed into whatever replaced it.
+//
+// Nor are the refusals that will never come right, nor agent_prompt_failed —
+// herdr writes the text and the Enter as one submission and reports success
+// only once both are through, so a failure may have left part of the prompt in
+// the pane, and sending it again could append to it.
+func TestPromptAgentDoesNotRetryTheseCodes(t *testing.T) {
+	for _, code := range []string{
+		CodeAgentBlocked,
+		CodeAgentPromptFailed,
+		CodeInvalidAgentArgument,
+		CodeInvalidAgentName,
+		"agent_not_found",
+		"agent_name_not_found",
+		CodePaneNotFound,
+	} {
+		f := &recordingDispatch{promptErr: &APIError{Code: code, Message: "no"}}
 		sl := &recordingSleep{}
-		got := promptReady().Next(context.Background(), f, sl.sleep)
-		if len(f.calls) != 1 || len(sl.waits) != 0 {
-			t.Errorf("%s: %d calls, waits %v — want one call, no wait", code, len(f.calls), sl.waits)
+		stats, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", sl.sleep)
+		if ErrorCode(err) != code {
+			t.Errorf("%s: err = %v", code, err)
 		}
-		if got.Res.Failed != StagePrompt || ErrorCode(got.Res.Err) != code {
-			t.Errorf("%s: result = %+v", code, got.Res)
+		if len(f.calls) != 1 {
+			t.Errorf("%s: agent.prompt calls = %d, want 1", code, len(f.calls))
 		}
+		if len(sl.waits) != 0 {
+			t.Errorf("%s: waited %v before giving up", code, sl.waits)
+		}
+		if stats.Attempts != 1 {
+			t.Errorf("%s: stats = %+v", code, stats)
+		}
+	}
+	// A dial failure is not retried either.
+	f := &recordingDispatch{promptErr: errors.New("connection refused")}
+	if _, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", (&recordingSleep{}).sleep); err == nil {
+		t.Fatal("a dial failure must be reported")
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("agent.prompt calls = %d, want 1", len(f.calls))
 	}
 }
 
-// A context that ends mid-backoff stops the loop and keeps both facts.
-func TestPromptStopsWhenTheContextEnds(t *testing.T) {
-	notReady := &APIError{Code: CodeAgentNotReady, Message: "not ready"}
-	f := &recordingDispatch{promptErr: notReady}
-	sleep := func(context.Context, time.Duration) error { return context.DeadlineExceeded }
+// A context that ends mid-backoff stops the retries and reports both halves.
+func TestPromptAgentStopsWhenTheContextEndsMidBackoff(t *testing.T) {
+	nr := notReady("tkb-25")
+	f := &recordingDispatch{promptErrs: []error{nr, nr, nr}}
+	sl := &recordingSleep{err: context.DeadlineExceeded}
 
-	got := promptReady().Next(context.Background(), f, sleep)
-	if got.Res.Prompted || got.Res.Failed != StagePrompt {
-		t.Fatalf("result = %+v", got.Res)
+	stats, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", sl.sleep)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the deadline", err)
 	}
-	if !errors.Is(got.Res.Err, context.DeadlineExceeded) || ErrorCode(got.Res.Err) != CodeAgentNotReady {
-		t.Errorf("err = %v, want both the deadline and the herdr code", got.Res.Err)
+	if !errors.Is(err, nr) {
+		t.Errorf("err = %v, want the last herdr reply wrapped too", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("agent.prompt calls = %d, want 1", len(f.calls))
+	}
+	if stats.Waited != 0 {
+		t.Errorf("stats.Waited = %v, want 0", stats.Waited)
+	}
+}
+
+// A nil Sleeper is the real one, as for the start.
+func TestPromptAgentDefaultsItsSleeper(t *testing.T) {
+	f := &recordingDispatch{}
+	if _, err := PromptAgentWithRetry(context.Background(), f, "tkb-25", "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("calls = %v", f.methods())
+	}
+}
+
+// And through the whole sequence: the prompt that used to be dropped now lands,
+// and the result records what it took.
+func TestSequenceRetriesTheFirstPromptAndRecordsIt(t *testing.T) {
+	f := &recordingDispatch{
+		create:     createdWorktree(),
+		start:      startedAgent(),
+		promptErrs: []error{notReady("tkb-25"), notReady("tkb-25")},
+	}
+	sl := &recordingSleep{}
+
+	res, _ := runSequence(t, f, testPlan(), PreflightResult{}, sl.sleep)
+	if !res.Prompted || res.Err != nil {
+		t.Fatalf("result = %+v, want a prompted agent", res)
+	}
+	want := []string{"worktree.create", "agent.start", "agent.prompt", "agent.prompt", "agent.prompt"}
+	if !slices.Equal(f.methods(), want) {
+		t.Fatalf("method sequence = %v, want %v", f.methods(), want)
+	}
+	if res.Prompt.Attempts != 3 || res.Prompt.NotReady != 2 {
+		t.Errorf("prompt stats = %+v", res.Prompt)
+	}
+	if want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}; !slices.Equal(sl.waits, want) {
+		t.Errorf("waits = %v, want %v", sl.waits, want)
+	}
+}
+
+// The live failure, replayed end to end: the prompt never becomes acceptable.
+// The agent IS dispatched — that is what makes this the one failure that still
+// moves the lane — and the result says exactly how hard we tried.
+func TestSequencePromptExhaustedLeavesADispatchedAgent(t *testing.T) {
+	errs := make([]error, 10)
+	for i := range errs {
+		errs[i] = notReady("tkb-25")
+	}
+	f := &recordingDispatch{create: createdWorktree(), start: startedAgent(), promptErrs: errs}
+
+	res, stages := runSequence(t, f, testPlan(), PreflightResult{}, (&recordingSleep{}).sleep)
+	if res.Prompted {
+		t.Fatal("the prompt did not land, so nothing may say it did")
+	}
+	if !res.Started || res.Failed != StagePrompt {
+		t.Fatalf("result = %+v", res)
+	}
+	if code := ErrorCode(res.Err); code != CodeAgentNotReady {
+		t.Errorf("error code = %q", code)
+	}
+	if res.Prompt.Attempts != 7 {
+		t.Errorf("prompt stats = %+v, want the whole budget spent", res.Prompt)
+	}
+	if !slices.Equal(stages, []Stage{StageWorktree, StageAgent, StagePrompt}) {
+		t.Errorf("stages = %v", stages)
+	}
+	assertNothingDestroyed(t, f)
+}
+
+// A retried prompt on the wire: the same params on every attempt, pinned over a
+// real socket. The retry is the new code path, and a retry that resent altered
+// params would be the worst possible bug here — half a prompt, twice.
+func TestSequenceRetriedPromptRequestJSONOverARealSocket(t *testing.T) {
+	src, recorded := pinSequence(t, []string{
+		`{"id":"a","result":{"type":"worktree_created",` +
+			`"workspace":{"workspace_id":"wE","label":"TKB-25","number":5},` +
+			`"tab":{"tab_id":"wE:t1","workspace_id":"wE","label":"TKB-25"},` +
+			`"root_pane":{"pane_id":"wE:p1","workspace_id":"wE","tab_id":"wE:t1",` +
+			`"terminal_id":"term_1","cwd":"/wt/tkb-25","focused":false},` +
+			`"worktree":{"path":"/wt/tkb-25","branch":"feature/tkb-25-dispatch-a-ticket",` +
+			`"label":"TKB-25","open_workspace_id":"wE","is_bare":false,"is_detached":false,` +
+			`"is_linked_worktree":true,"is_prunable":false}}}`,
+		`{"id":"b","result":{"type":"agent_started","argv":["claude"],` +
+			`"agent":{"pane_id":"wE:p1","agent":"claude","name":"tkb-25",` +
+			`"agent_status":"idle","workspace_id":"wE","tab_id":"wE:t1",` +
+			`"terminal_id":"term_1","focused":false,"revision":2}}}`,
+		// The live failure, verbatim.
+		`{"id":"c","error":{"code":"agent_not_ready",` +
+			`"message":"agent tkb-25 is not an active named agent"}}`,
+		`{"id":"d","error":{"code":"agent_not_ready",` +
+			`"message":"agent tkb-25 is not an active named agent"}}`,
+		`{"id":"e","result":{"type":"ok"}}`,
+	})
+
+	sl := &recordingSleep{}
+	res, _ := runSequence(t, src, testPlan(), PreflightResult{RepoRoot: "/src/tktban"}, sl.sleep)
+	if res.Err != nil || !res.Prompted {
+		t.Fatalf("result = %+v, want the retried prompt to have landed", res)
+	}
+	if res.Prompt.Attempts != 3 || res.Prompt.NotReady != 2 {
+		t.Errorf("prompt stats = %+v", res.Prompt)
+	}
+
+	got := recorded()
+	if len(got) != 5 {
+		t.Fatalf("recorded %d requests, want 5: %v", len(got), got)
+	}
+	wantPrompt := map[string]any{"target": "tkb-25", "text": testPlan().Prompt}
+	for i, line := range got[2:] {
+		method, p := params(t, []byte(line))
+		if method != "agent.prompt" {
+			t.Errorf("request %d method = %q, want agent.prompt", i+2, method)
+		}
+		if !reflect.DeepEqual(p, wantPrompt) {
+			t.Errorf("prompt attempt %d params = %v, want exactly %v", i+1, p, wantPrompt)
+		}
+		// Still no wait, on a retry as on a first attempt.
+		if _, present := p["wait"]; present {
+			t.Errorf("prompt attempt %d sent wait", i+1)
+		}
 	}
 }

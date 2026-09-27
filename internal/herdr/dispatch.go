@@ -386,7 +386,7 @@ func Preflight(ctx context.Context, c WorktreeLister, p Plan) (PreflightResult, 
 //
 // "Inside the stage's budget" has to account for the retries, not just one
 // attempt: the last attempt of a run that spent the whole backoff must still
-// have its full 20s. AgentStartBackoffTotal is exported so a caller sizing that
+// have its full 20s. AgentRetryBackoffTotal is exported so a caller sizing that
 // budget can add the two together rather than guess, and a test asserts the
 // relation holds.
 const AgentStartTimeoutMS = 20000
@@ -396,35 +396,50 @@ const AgentStartTimeoutMS = 20000
 // one, and the tests record the delays instead of serving them.
 type Sleeper func(ctx context.Context, d time.Duration) error
 
-// agentStartBackoff is the wait before each agent.start retry — five retries,
-// six attempts in all, about 3.1s of waiting at worst.
+// agentRetryBackoff is the wait before each retry of agent.start AND of
+// agent.prompt — six retries, seven attempts in all, 6.3s of waiting at worst.
 //
-// The reason it exists at all: herdr's worktree.create opens the pane at a
-// login shell and returns as soon as the pane is there, while agent.start
-// needs that shell to have reached an interactive prompt and answers
-// agent_pane_busy until it has. A plain shell is ready almost at once; a shell
-// with a prompt framework, a version manager and a plugin loader in its rc
-// files takes about half a second, and the tail is long. So the first retries
-// are quick (a fast shell costs 100ms, not a fixed second) and the last ones
-// are patient. Five doublings from 100ms covers the slow shell with room to
-// spare, and giving up is safe: the pane and the worktree are already there,
-// and the person can start the agent in them by hand.
-var agentStartBackoff = []time.Duration{
+// One schedule for both, because both are the same problem seen twice: herdr
+// says "not yet", and the only useful answer is to ask again shortly.
+// worktree.create returns as soon as the pane exists, while agent.start needs
+// that pane's login shell to have reached an interactive prompt
+// (agent_pane_busy until it has); agent.start in turn returns as soon as herdr
+// has detected the agent, while agent.prompt needs it registered as an active
+// named agent and accepting input (agent_not_ready until it is).
+//
+// The shape: a fast shell and a prompt-ready agent both cost 100ms, not a flat
+// second, so the early retries are cheap; the tail is patient because the
+// slow end is very slow. Geometric, so each added step buys the most headroom
+// per unit of worst-case latency.
+//
+// The length comes from measurement, not taste. The first live dispatch
+// (TKB-27) needed 5 attempts and 1.5s of waiting for agent.start on a real
+// shell — the 4th, 800ms retry — leaving only one slot of the old five-retry
+// schedule spare. A 2x margin on an observed number is not a margin. The 3200ms
+// step doubles the budget for one extra attempt and puts the observed case at
+// about a quarter of it.
+//
+// Giving up stays safe at every length: the worktree, the pane and (for the
+// prompt) the agent are all already there, and the comment on the ticket says
+// so, so the person finishes by hand.
+var agentRetryBackoff = []time.Duration{
 	100 * time.Millisecond,
 	200 * time.Millisecond,
 	400 * time.Millisecond,
 	800 * time.Millisecond,
 	1600 * time.Millisecond,
+	3200 * time.Millisecond,
 }
 
-// AgentStartBackoffTotal is the whole time StartAgentWithRetry can spend
-// waiting between attempts. A caller bounding the stage has to add it to
-// AgentStartTimeoutMS, or its own deadline cuts the last attempt short and
-// turns a herdr timeout — which says what broke — into a closed socket, which
-// says nothing and leaves the agent's state unknown.
-func AgentStartBackoffTotal() time.Duration {
+// AgentRetryBackoffTotal is the whole time one retry loop can spend waiting.
+//
+// A caller bounding a stage has to add it to that stage's own per-call budget
+// (AgentStartTimeoutMS for the start), or its deadline cuts the last attempt
+// short and turns a herdr answer — which says what broke — into a closed
+// socket, which says nothing and leaves the agent's state unknown.
+func AgentRetryBackoffTotal() time.Duration {
 	var total time.Duration
-	for _, d := range agentStartBackoff {
+	for _, d := range agentRetryBackoff {
 		total += d
 	}
 	return total
@@ -451,7 +466,7 @@ type AgentStartStats struct {
 //
 // agent_pane_busy means "the pane's shell is not at a prompt yet", which is
 // the expected answer immediately after a worktree is created — see
-// agentStartBackoff. agent_name_taken means a live agent already holds the
+// agentRetryBackoff. agent_name_taken means a live agent already holds the
 // name, which happens when an earlier agent on this ticket is still running in
 // another pane; the next candidate from AgentNameN is tried exactly once, and
 // it spends a slot of the same budget rather than getting one of its own. Two
@@ -502,15 +517,91 @@ func StartAgentWithRetry(ctx context.Context, c AgentStarter, p Plan, paneID str
 		default:
 			return AgentStartResult{}, stats, err
 		}
-		if attempt >= len(agentStartBackoff) {
+		if attempt >= len(agentRetryBackoff) {
 			return AgentStartResult{}, stats, err // the budget is spent
 		}
-		wait := agentStartBackoff[attempt]
+		wait := agentRetryBackoff[attempt]
 		if serr := sleep(ctx, wait); serr != nil {
 			// The context ended mid-backoff. Both facts matter — the deadline
 			// is why we stopped, the herdr code is what we had last seen — so
 			// both are wrapped and errors.Is finds either.
 			return AgentStartResult{}, stats, fmt.Errorf("%w (last herdr reply: %w)", serr, err)
+		}
+		stats.Waited += wait
+	}
+}
+
+// AgentPrompter is the slice of the client PromptAgentWithRetry needs.
+type AgentPrompter interface {
+	AgentPrompt(ctx context.Context, p AgentPromptParams) error
+}
+
+// AgentPromptStats is what the prompt's retry loop did, so a comment on the
+// ticket can say "it took three tries" rather than leaving the next person to
+// wonder why a dispatch paused.
+type AgentPromptStats struct {
+	Attempts int           // agent.prompt calls made, including the one that worked
+	NotReady int           // agent_not_ready replies
+	Busy     int           // agent_pane_busy replies
+	Waited   time.Duration // total time spent in the backoff
+}
+
+// PromptAgentWithRetry hands a started agent its first prompt, retrying the
+// codes that mean "not yet" and nothing else.
+//
+// This is the sibling of StartAgentWithRetry, and it exists because a
+// successful agent.start does NOT mean the agent can be prompted. herdr's own
+// documentation is explicit that agent.start returns once herdr has detected
+// the expected agent in the pane, and that a prompt to an agent which is not
+// accepting interactive input yet is refused with agent_not_ready — "wait until
+// the agent becomes idle before prompting it". The registry of active named
+// agents lags the detection, and on a real machine it lagged past the single
+// attempt this used to make: the first live dispatch created its worktree,
+// started its agent and then dropped the prompt on the floor, leaving the agent
+// sitting idle waiting to be told something.
+//
+// Retried: agent_not_ready (the observed one) and agent_pane_busy (the same
+// "the pane is not there yet" as the start).
+//
+// Not retried, on purpose:
+//   - agent_blocked. herdr rejects the submission before sending any input
+//     because the agent is sitting at an approval or question dialog. Asking
+//     again cannot help while the dialog is up, and once a human dismisses it
+//     the prompt would be typed into whatever replaced it.
+//   - CodeAgentPromptFailed. herdr writes the text and the encoded Enter as one
+//     ordered submission and reports success only once both are through, so a
+//     failure may have left part of the prompt in the pane. Sending it again
+//     could append to a half-delivered one.
+//   - agent_not_found and the invalid_* refusals. A target herdr does not know,
+//     or an argument it will never accept, does not come right by being asked
+//     again.
+func PromptAgentWithRetry(ctx context.Context, c AgentPrompter, target, text string, sleep Sleeper) (AgentPromptStats, error) {
+	if sleep == nil {
+		sleep = SleepCtx
+	}
+	var stats AgentPromptStats
+	for attempt := 0; ; attempt++ {
+		err := c.AgentPrompt(ctx, AgentPromptParams{Target: target, Text: text})
+		stats.Attempts = attempt + 1
+		if err == nil {
+			return stats, nil
+		}
+		switch ErrorCode(err) {
+		case CodeAgentNotReady:
+			stats.NotReady++
+		case CodeAgentPaneBusy:
+			stats.Busy++
+		default:
+			return stats, err
+		}
+		if attempt >= len(agentRetryBackoff) {
+			return stats, err // the budget is spent
+		}
+		wait := agentRetryBackoff[attempt]
+		if serr := sleep(ctx, wait); serr != nil {
+			// Both facts matter, as in StartAgentWithRetry: the deadline is why
+			// we stopped, the herdr code is what we last saw.
+			return stats, fmt.Errorf("%w (last herdr reply: %w)", serr, err)
 		}
 		stats.Waited += wait
 	}
@@ -569,7 +660,7 @@ type DispatchClient interface {
 	WorktreeCreate(ctx context.Context, p WorktreeCreateParams) (WorktreeResult, error)
 	WorktreeOpen(ctx context.Context, p WorktreeOpenParams) (WorktreeResult, error)
 	AgentStarter
-	AgentPrompt(ctx context.Context, p AgentPromptParams) error
+	AgentPrompter
 }
 
 // DispatchResult is how far a dispatch got and what each step produced.
@@ -600,9 +691,7 @@ type DispatchResult struct {
 
 	// The prompt step.
 	Prompted bool
-	// Prompt is what the agent.prompt retry loop did, filled in on success
-	// and failure alike.
-	Prompt PromptStats
+	Prompt   AgentPromptStats
 
 	// Failed is the stage that failed; StageDone (the zero value) when none
 	// did. Err is that stage's error, and ErrorCode(Err) names it when herdr
@@ -747,78 +836,25 @@ func (s Sequence) agent(ctx context.Context, c DispatchClient, sleep Sleeper) Se
 	return s
 }
 
-// PromptStats is what the prompt retry loop did, for the same reason
-// AgentStartStats exists: a prompt that landed on its third try, or never,
-// should say so.
-type PromptStats struct {
-	Attempts int           // agent.prompt calls made, including the one that worked
-	NotReady int           // agent_not_ready replies
-	Waited   time.Duration // total time spent in the backoff
-}
-
-// promptBackoff is the wait before each agent.prompt retry. It is the
-// agent.start schedule for the same shape of reason: agent.start can return
-// before herdr has finished registering the agent's name, and agent.prompt
-// answers agent_not_ready ("not an active named agent") until it has. That
-// is usually a matter of milliseconds, so the first retries are quick — but
-// the registration has been seen to lag by seconds, so the schedule runs one
-// doubling past agent.start's, about 6.3s of waiting at worst.
-var promptBackoff = []time.Duration{
-	100 * time.Millisecond,
-	200 * time.Millisecond,
-	400 * time.Millisecond,
-	800 * time.Millisecond,
-	1600 * time.Millisecond,
-	3200 * time.Millisecond,
-}
-
-// PromptBackoffTotal is the whole time the prompt stage can spend waiting
-// between attempts. A caller bounding the stage has to allow for it on top of
-// the round trips themselves.
-func PromptBackoffTotal() time.Duration {
-	var total time.Duration
-	for _, d := range promptBackoff {
-		total += d
-	}
-	return total
-}
-
-// prompt hands the started agent its first prompt.
+// prompt hands the started agent its first prompt, with the retry budget
+// PromptAgentWithRetry documents — because a successful agent.start does not
+// mean herdr will accept a prompt yet.
 //
 // The target is Res.AgentName — the name herdr registered, not the one the plan
 // asked for. There is no fallback: this stage only runs after a successful
 // agent.start, which always leaves a name behind.
-//
-// agent_not_ready is retried on promptBackoff and nothing else is. herdr
-// refuses it before any input reaches the pane, so asking again cannot type
-// the prompt twice. agent_blocked is not retried: the agent is sitting at a
-// dialog a person has to answer.
 //
 // No wait: herdr's agent.prompt accepts a wait object that blocks until the
 // agent reaches a status, and a board must never block on an agent. It is
 // fire-and-forget by design — and if it does fail, the agent is already
 // dispatched, which is why this is the one failure that still moves the lane.
 func (s Sequence) prompt(ctx context.Context, c DispatchClient, sleep Sleeper) Sequence {
-	if sleep == nil {
-		sleep = SleepCtx
+	stats, err := PromptAgentWithRetry(ctx, c, s.Res.AgentName, s.Plan.Prompt, sleep)
+	s.Res.Prompt = stats
+	if err != nil {
+		s.Res.Failed, s.Res.Err = StagePrompt, err
+		return s
 	}
-	for attempt := 0; ; attempt++ {
-		err := c.AgentPrompt(ctx, AgentPromptParams{Target: s.Res.AgentName, Text: s.Plan.Prompt})
-		s.Res.Prompt.Attempts = attempt + 1
-		if err == nil {
-			s.Res.Prompted = true
-			return s
-		}
-		if ErrorCode(err) != CodeAgentNotReady || attempt >= len(promptBackoff) {
-			s.Res.Failed, s.Res.Err = StagePrompt, err
-			return s
-		}
-		s.Res.Prompt.NotReady++
-		wait := promptBackoff[attempt]
-		if serr := sleep(ctx, wait); serr != nil {
-			s.Res.Failed, s.Res.Err = StagePrompt, fmt.Errorf("%w (last herdr reply: %w)", serr, err)
-			return s
-		}
-		s.Res.Prompt.Waited += wait
-	}
+	s.Res.Prompted = true
+	return s
 }
