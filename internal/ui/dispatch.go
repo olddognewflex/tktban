@@ -640,7 +640,7 @@ func (m Model) onDispatchDone(msg dispatchDoneMsg) (tea.Model, tea.Cmd) {
 	m.dispatchRep = dispatchReport{}
 	text, kind := dispatchStatusText(rep)
 	// The lane may have moved, so the board is out of date either way.
-	return m, tea.Batch(m.setStatus(text, kind), refreshCmd(m.tkt, m.filter))
+	return m, tea.Batch(m.setStatus(text, kind), m.refreshCmd())
 }
 
 // progressModal re-renders the confirm dialog with the step now running. A

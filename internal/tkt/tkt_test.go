@@ -254,8 +254,41 @@ func TestDoctorAllGreen(t *testing.T) {
 			t.Fatalf("check %q failed: %s", c.Name, c.Detail)
 		}
 	}
-	if len(checks) != 3 {
-		t.Fatalf("want 3 checks, got %d", len(checks))
+	if len(checks) != 4 {
+		t.Fatalf("want 4 checks, got %d", len(checks))
+	}
+}
+
+// archiveCheck finds the auto-archive doctor check.
+func archiveCheck(t *testing.T, checks []Check) Check {
+	t.Helper()
+	for _, c := range checks {
+		if c.Name == "archive lane" {
+			return c
+		}
+	}
+	t.Fatalf("archive lane check missing: %+v", checks)
+	return Check{}
+}
+
+// TKB-27: no archived role leaves auto-archive off. The board works without
+// it, so doctor passes and says how to turn it on.
+func TestDoctorHintsWhenNoArchivedRole(t *testing.T) {
+	f := &fake{responses: []resp{{stdout: `{"todo": "To Do", "done": "Done"}`}, {stdout: "[]"}}}
+	c := archiveCheck(t, New("", "sh").WithRunner(f.run).Doctor())
+	if !c.OK || !c.Hint {
+		t.Fatalf("archive check = %+v, want OK hint", c)
+	}
+	if !strings.Contains(c.Detail, `archived = "Archived"`) || !strings.Contains(c.Detail, "[board.roles]") {
+		t.Fatalf("hint detail = %q", c.Detail)
+	}
+}
+
+func TestDoctorArchivedRoleConfigured(t *testing.T) {
+	f := &fake{responses: []resp{{stdout: `{"todo": "To Do", "done": "Done", "archived": "Archived"}`}, {stdout: "[]"}}}
+	c := archiveCheck(t, New("", "sh").WithRunner(f.run).Doctor())
+	if !c.OK || c.Hint || c.Detail != "archived role configured" {
+		t.Fatalf("archive check = %+v, want OK, no hint", c)
 	}
 }
 

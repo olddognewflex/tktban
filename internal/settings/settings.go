@@ -37,14 +37,22 @@ import (
 // is the herdr agent kind to start, dispatch_args extra argv for it (split on
 // spaces), and dispatch_prompt the first prompt; empty dispatch_prompt takes
 // the built-in default (herdr.DefaultPrompt).
+//
+// archive_after_days is hand-edited too: the days a ticket sits in done before
+// the board moves it to the archived lane, 0 to turn that off. hidden_roles
+// hides the archived lane by default, so what the sweep moves leaves the board
+// rather than piling up in a column of its own. That default only reaches a
+// board with no settings file yet; one that already saved hidden_roles keeps
+// what it saved.
 var Defaults = map[string]any{
-	"theme":           "textual-dark",
-	"hidden_roles":    "",
-	"notify":          true,
-	"dispatch":        false,
-	"dispatch_agent":  "claude",
-	"dispatch_args":   "",
-	"dispatch_prompt": "",
+	"theme":              "textual-dark",
+	"hidden_roles":       "archived",
+	"notify":             true,
+	"dispatch":           false,
+	"dispatch_agent":     "claude",
+	"dispatch_args":      "",
+	"dispatch_prompt":    "",
+	"archive_after_days": 7,
 }
 
 // DefaultPath is $XDG_CONFIG_HOME/tktban/settings.toml, falling back to

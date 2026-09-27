@@ -539,13 +539,17 @@ func (t *Tkt) Edit(key string, opts EditOpts) (model.Ticket, error) {
 // ---- diagnostics ----
 
 // Check is one doctor result: a named check, whether it passed, and detail.
+// Hint marks a passing check that points at something optional left off — it
+// is advice, never a failure.
 type Check struct {
 	Name   string
 	OK     bool
 	Detail string
+	Hint   bool
 }
 
-// Doctor runs setup checks: binary on PATH, config readable, `all` query.
+// Doctor runs setup checks: binary on PATH, config readable, `all` query, and
+// whether an archived lane is configured for auto-archive (a hint when not).
 func (t *Tkt) Doctor() []Check {
 	var checks []Check
 
@@ -554,27 +558,36 @@ func (t *Tkt) Doctor() []Check {
 	if !found {
 		detail = fmt.Sprintf("%q not found; set TKT_BIN", t.Binary)
 	}
-	checks = append(checks, Check{"tkt binary", found, detail})
+	checks = append(checks, Check{Name: "tkt binary", OK: found, Detail: detail})
 	if !found {
 		return checks
 	}
 
 	roles, err := t.Roles()
 	if err != nil {
-		checks = append(checks, Check{"board.roles readable", false, err.Error()})
+		checks = append(checks, Check{Name: "board.roles readable", OK: false, Detail: err.Error()})
 		return checks
 	}
 	rdetail := "no roles configured"
 	if len(roles) > 0 {
 		rdetail = fmt.Sprintf("%d roles", len(roles))
 	}
-	checks = append(checks, Check{"board.roles readable", len(roles) > 0, rdetail})
+	checks = append(checks, Check{Name: "board.roles readable", OK: len(roles) > 0, Detail: rdetail})
 
 	if _, err := t.ListAll(); err != nil {
-		checks = append(checks, Check{"'all' query present", false,
-			"add to [queries]:  all = 'ORDER BY key ASC'"})
+		checks = append(checks, Check{Name: "'all' query present", OK: false,
+			Detail: "add to [queries]:  all = 'ORDER BY key ASC'"})
 	} else {
-		checks = append(checks, Check{"'all' query present", true, "tkt list --query all OK"})
+		checks = append(checks, Check{Name: "'all' query present", OK: true, Detail: "tkt list --query all OK"})
+	}
+
+	// Auto-archive needs somewhere to archive to. A board without the role
+	// works fine, it just never sweeps, so this is a hint rather than a fail.
+	if model.HasRole(roles, model.RoleArchived) {
+		checks = append(checks, Check{Name: "archive lane", OK: true, Detail: "archived role configured"})
+	} else {
+		checks = append(checks, Check{Name: "archive lane", OK: true, Hint: true,
+			Detail: `auto-archive off: add archived = "Archived" under [board.roles]`})
 	}
 	return checks
 }

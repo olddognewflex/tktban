@@ -159,5 +159,5 @@ func (m Model) onApplyDone(msg applyDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.isNew {
 		verb = "Created "
 	}
-	return m, tea.Batch(m.setStatus(verb+msg.key, ""), refreshCmd(m.tkt, m.filter))
+	return m, tea.Batch(m.setStatus(verb+msg.key, ""), m.refreshCmd())
 }
