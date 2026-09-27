@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -16,56 +17,136 @@ import (
 	"github.com/olddognewflex/tktban/internal/tkt"
 )
 
-// fakeDispatch is a live source that can also prepare a dispatch. It carries
-// every herdr call a full dispatch will ever make, not just the one the
-// Dispatcher interface asks for today, and every one of them but worktree.list
-// fails the test on sight.
+// fakeDispatch is a live source that can also dispatch. It records every herdr
+// call in order, with the params it was given, and serves canned replies.
 //
-// That is how "the dry run creates nothing" is asserted as an observable
-// fact rather than by reading the code: whatever the board does with this
-// source, the only thing it is allowed to have done is list.
+// The recording is what the assertions are made of. A dispatch is up to five
+// herdr calls whose order matters when one of them fails, so the tests assert
+// the ordered method sequence and the params of each call — including, on every
+// recorded sequence, that nothing was ever removed or closed.
 type fakeDispatch struct {
 	fakeLive
 	t *testing.T
 
+	// calls is the ordered method sequence, in herdr's own spelling.
+	calls []string
+
 	listed  []string // one entry per worktree.list, with the cwd asked about
 	list    herdr.WorktreeListResult
 	listErr error
+
+	create       herdr.WorktreeResult
+	createErr    error
+	createParams []herdr.WorktreeCreateParams
+
+	open       herdr.WorktreeResult
+	openErr    error
+	openParams []herdr.WorktreeOpenParams
+
+	// startErrs is served one per agent.start, oldest first; a short slice
+	// means every later call succeeds.
+	start       herdr.AgentStartResult
+	startErrs   []error
+	startParams []herdr.AgentStartParams
+
+	promptErr    error
+	promptParams []herdr.AgentPromptParams
+
+	focused []string
 }
 
 func (f *fakeDispatch) WorktreeList(_ context.Context, cwd string) (herdr.WorktreeListResult, error) {
+	f.calls = append(f.calls, "worktree.list")
 	f.listed = append(f.listed, cwd)
 	return f.list, f.listErr
 }
 
-func (f *fakeDispatch) WorktreeCreate(context.Context, herdr.WorktreeCreateParams) (herdr.WorktreeResult, error) {
-	f.t.Helper()
-	f.t.Error("the dry run created a worktree")
-	return herdr.WorktreeResult{}, nil
+func (f *fakeDispatch) WorktreeCreate(_ context.Context, p herdr.WorktreeCreateParams) (herdr.WorktreeResult, error) {
+	f.calls = append(f.calls, "worktree.create")
+	f.createParams = append(f.createParams, p)
+	return f.create, f.createErr
 }
 
-func (f *fakeDispatch) WorktreeOpen(context.Context, herdr.WorktreeOpenParams) (herdr.WorktreeResult, error) {
-	f.t.Helper()
-	f.t.Error("the dry run opened a worktree")
-	return herdr.WorktreeResult{}, nil
+func (f *fakeDispatch) WorktreeOpen(_ context.Context, p herdr.WorktreeOpenParams) (herdr.WorktreeResult, error) {
+	f.calls = append(f.calls, "worktree.open")
+	f.openParams = append(f.openParams, p)
+	return f.open, f.openErr
 }
 
-func (f *fakeDispatch) AgentStart(context.Context, herdr.AgentStartParams) (herdr.AgentStartResult, error) {
-	f.t.Helper()
-	f.t.Error("the dry run started an agent")
-	return herdr.AgentStartResult{}, nil
+func (f *fakeDispatch) AgentStart(_ context.Context, p herdr.AgentStartParams) (herdr.AgentStartResult, error) {
+	n := len(f.startParams)
+	f.calls = append(f.calls, "agent.start")
+	f.startParams = append(f.startParams, p)
+	if n < len(f.startErrs) && f.startErrs[n] != nil {
+		return herdr.AgentStartResult{}, f.startErrs[n]
+	}
+	return f.start, nil
 }
 
-func (f *fakeDispatch) AgentPrompt(context.Context, herdr.AgentPromptParams) error {
-	f.t.Helper()
-	f.t.Error("the dry run prompted an agent")
+func (f *fakeDispatch) AgentPrompt(_ context.Context, p herdr.AgentPromptParams) error {
+	f.calls = append(f.calls, "agent.prompt")
+	f.promptParams = append(f.promptParams, p)
+	return f.promptErr
+}
+
+func (f *fakeDispatch) FocusPane(_ context.Context, paneID string) error {
+	f.calls = append(f.calls, "pane.focus")
+	f.focused = append(f.focused, paneID)
 	return nil
 }
 
-func (f *fakeDispatch) FocusPane(context.Context, string) error {
-	f.t.Helper()
-	f.t.Error("the dry run focused a pane")
-	return nil
+// dispatchHerdrCalls are the only herdr calls the D key may ever make. An
+// allowlist rather than a denylist: a method nobody thought to forbid is caught
+// too, and that is exactly when it matters. In particular there is no
+// worktree.remove, no pane.close and no workspace.close, and nor is pane.focus
+// on it — a dispatch does not steal the screen, the person follows with o.
+var dispatchHerdrCalls = map[string]bool{
+	"worktree.list":   true,
+	"worktree.create": true,
+	"worktree.open":   true,
+	"agent.start":     true,
+	"agent.prompt":    true,
+}
+
+// forbiddenHerdrCall returns the first recorded herdr call a dispatch must
+// never have made, or "".
+func forbiddenHerdrCall(calls []string) string {
+	for _, c := range calls {
+		if !dispatchHerdrCalls[c] {
+			return c
+		}
+	}
+	return ""
+}
+
+// assertHerdrCalls pins the exact ordered herdr method sequence, and runs the
+// standing policy over it: whatever the sequence did, it undid nothing.
+func assertHerdrCalls(t *testing.T, src *fakeDispatch, want ...string) {
+	t.Helper()
+	if bad := forbiddenHerdrCall(src.calls); bad != "" {
+		t.Fatalf("the board called %s (sequence %v); a dispatch must never undo its own work",
+			bad, src.calls)
+	}
+	if !slices.Equal(src.calls, want) {
+		t.Fatalf("herdr calls = %v, want %v", src.calls, want)
+	}
+}
+
+// The allowlist has to be able to fail, or it is checking nothing.
+func TestForbiddenHerdrCallCatchesEveryUndoMethod(t *testing.T) {
+	for _, method := range []string{
+		"worktree.remove", "worktree.prune", "pane.close", "workspace.close",
+		"tab.close", "agent.stop", "agent.release", "pane.focus",
+		"pane.report_metadata", "notification.show",
+	} {
+		if got := forbiddenHerdrCall([]string{"worktree.create", method}); got != method {
+			t.Errorf("%s was not caught (got %q)", method, got)
+		}
+	}
+	clean := []string{"worktree.list", "worktree.open", "worktree.create", "agent.start", "agent.prompt"}
+	if got := forbiddenHerdrCall(clean); got != "" {
+		t.Errorf("a clean sequence was reported as forbidden: %q", got)
+	}
 }
 
 // okList is a repo with nothing dispatched in it yet.
@@ -664,7 +745,7 @@ func TestDispatchModalShowsTheWholePlan(t *testing.T) {
 		"herdr chooses the path",    // worktree placement
 		"claude as tkt-1",           // agent kind and name
 		"Work ticket TKT-1",         // the prompt
-		"Dry run: nothing is created yet",
+		"enter dispatch · esc cancel",
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("the confirm modal is missing %q:\n%s", want, view)
@@ -756,20 +837,22 @@ func TestDispatchModalSaysWhenAWorktreeWouldBeReused(t *testing.T) {
 	}
 }
 
-// The whole promise of this change: enter creates nothing.
-func TestDispatchEnterCreatesNothing(t *testing.T) {
-	m, src, cr := dispatchBoard(t)
+// enter hands the plan the dialog rendered to the create sequence, unchanged,
+// and the dialog stays open as the progress display.
+//
+// Driven the way the program drives it: enter goes to the open modal, the modal
+// answers with a command, and that command's message comes back to the board.
+// Feeding dispatchResultMsg by hand would skip the modal's own key mapping,
+// which is half of what is under test.
+func TestDispatchEnterStartsTheCreateSequenceWithTheRenderedPlan(t *testing.T) {
+	m, src, _ := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
 	m = pressD(t, m)
 	dm, ok := m.modal.(dispatchModal)
 	if !ok {
 		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
 	}
-	before := len(cr.calls)
 
-	// Driven the way the program drives it: enter goes to the open modal, the
-	// modal answers with a command, and that command's message comes back to
-	// the board. Feeding dispatchResultMsg by hand would skip the modal's own
-	// key mapping, which is the thing under test.
 	m, cmd := update(m, key("enter"))
 	if cmd == nil {
 		t.Fatal("enter produced no result from the confirm modal")
@@ -782,35 +865,35 @@ func TestDispatchEnterCreatesNothing(t *testing.T) {
 		t.Fatalf("enter produced %+v, want a confirmation for TKT-1", res)
 	}
 	// The whole plan comes back, not just the key: this is what the create
-	// sequence will act on, and it must be the one that was rendered.
-	if res.plan.Branch != dm.plan.Branch || res.plan.AgentName != dm.plan.AgentName ||
-		res.plan.Base != dm.plan.Base || res.plan.TargetRole != dm.plan.TargetRole {
+	// sequence acts on, and it must be the one that was rendered.
+	if !reflect.DeepEqual(res.plan, dm.plan) {
 		t.Fatalf("enter returned a different plan:\n got %+v\nwant %+v", res.plan, dm.plan)
 	}
 	if res.pre != dm.pre {
 		t.Fatalf("enter returned preflight %+v, want %+v", res.pre, dm.pre)
 	}
-	m, _ = update(m, res)
 
-	if m.modal != nil {
-		t.Errorf("enter left a %T open", m.modal)
+	m, cmd = update(m, res)
+	// The dialog is still there, now saying what it is doing. That is what
+	// swallows every further keystroke.
+	prog, ok := m.modal.(dispatchModal)
+	if !ok {
+		t.Fatalf("the confirm answered and closed the dialog (modal = %T)", m.modal)
 	}
-	if !strings.HasPrefix(m.status, "Dry run") || !strings.Contains(m.status, "TKT-1") {
-		t.Errorf("status = %q, want the dry-run wording", m.status)
+	if !prog.running() {
+		t.Fatal("the dialog stayed open but is not showing progress")
 	}
-	if m.statusKind != "" {
-		t.Errorf("status kind = %q, want a plain status", m.statusKind)
+	if !strings.Contains(prog.progress, "feature/tkt-1-first-thing") {
+		t.Errorf("progress = %q, want the branch being cut", prog.progress)
 	}
-	// Exactly one herdr call for the whole flow, and it was the preflight
-	// read. Every other herdr call on the fake fails the test on sight.
-	if len(src.listed) != 1 {
-		t.Errorf("herdr worktree.list calls = %v, want exactly one", src.listed)
+	if cmd == nil {
+		t.Fatal("the confirm started no work")
 	}
-	if call := nonReadCall(cr); call != nil {
-		t.Errorf("the dry run ran tkt %v, which is not a read", call)
-	}
-	for _, call := range cr.calls[before:] {
-		t.Errorf("enter ran tkt %v", call)
+	// And the sequence it started acts on the plan, not on the board.
+	m = runDispatch(t, m, cmd)
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if got := src.createParams[0].Branch; got != dm.plan.Branch {
+		t.Fatalf("the sequence cut %q, want the branch the dialog rendered (%q)", got, dm.plan.Branch)
 	}
 }
 
@@ -886,15 +969,20 @@ func TestDispatchPlanSurvivesARefreshMidPreflight(t *testing.T) {
 // not on the one being dispatched.
 //
 // A re-check that read the selection would refuse here, naming the wrong
-// ticket; one that reads the plan's own key ignores TKT-7's agent entirely
-// and confirms TKT-1. It is the guard for that exact line.
+// ticket; one that reads the plan's own key ignores TKT-7's agent entirely and
+// dispatches TKT-1. It is the guard for that exact line, and now that enter
+// creates things it is also what decides whether a worktree gets cut at all.
 func TestDispatchRecheckUsesThePlanNotTheSelection(t *testing.T) {
 	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
 	m = pressD(t, m)
 	if _, ok := m.modal.(dispatchModal); !ok {
 		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
 	}
 
+	// The board is filtered, so TKT-1 dropping out of the refresh below means
+	// hidden rather than moved, and the plan's own transition still runs.
+	m.filter = filterState{assignee: "bob"}
 	// An auto-refresh re-points the selection at a different ticket.
 	m, _ = update(m, boardMsg{
 		roles: []model.RolePair{{Role: "todo", Lane: "To Do"}, {Role: "done", Lane: "Done"}},
@@ -922,21 +1010,18 @@ func TestDispatchRecheckUsesThePlanNotTheSelection(t *testing.T) {
 	if res.plan.Key != "TKT-1" {
 		t.Fatalf("the confirm answered for %s, want TKT-1", res.plan.Key)
 	}
-	m, _ = update(m, res)
+	m, cmd = update(m, res)
+	m = runDispatch(t, m, cmd)
 
-	want := "Dry run — dispatch lands in the next change; nothing was created for TKT-1"
-	if m.status != want {
-		t.Fatalf("status = %q (%s), want %q — TKT-7's agent is not TKT-1's",
-			m.status, m.statusKind, want)
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if got := src.createParams[0].Branch; got != "feature/tkt-1-first-thing" {
+		t.Fatalf("cut %q — TKT-7's agent is not TKT-1's", got)
 	}
-	if m.statusKind != "" {
-		t.Errorf("status kind = %q, want a plain status", m.statusKind)
+	if call := cr.last("transition"); call == nil || call[1] != "TKT-1" {
+		t.Fatalf("tkt transition = %v, want TKT-1", call)
 	}
-	if len(src.listed) != 1 {
-		t.Errorf("worktree.list calls = %v, want exactly one", src.listed)
-	}
-	if call := nonReadCall(cr); call != nil {
-		t.Errorf("the dry run ran tkt %v, which is not a read", call)
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
 	}
 }
 

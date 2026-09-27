@@ -156,14 +156,20 @@ func (c *Client) Ping(ctx context.Context) (Pong, error) {
 // panes that run an agent, and a closed pane simply drops out of the list.
 // Unknown fields are ignored; nullable strings decode to "".
 type Agent struct {
-	PaneID        string  `json:"pane_id"`
-	WorkspaceID   string  `json:"workspace_id"`
-	TabID         string  `json:"tab_id"`
-	Agent         *string `json:"agent"` // nil once the agent is released
-	Status        Status  `json:"agent_status"`
-	Cwd           string  `json:"cwd"`
-	ForegroundCwd string  `json:"foreground_cwd"` // where the agent actually runs
-	Focused       bool    `json:"focused"`
+	PaneID      string  `json:"pane_id"`
+	WorkspaceID string  `json:"workspace_id"`
+	TabID       string  `json:"tab_id"`
+	Agent       *string `json:"agent"` // nil once the agent is released
+	// Name is the name herdr registered this agent under, which is NOT the
+	// same field as Agent: `agent` is the kind ("claude"), `name` is the
+	// identity agent.prompt and agent.get take as a target. herdr may hand
+	// back a name other than the one asked for, so a dispatch prompts the one
+	// in the reply and never the one it sent.
+	Name          string `json:"name"`
+	Status        Status `json:"agent_status"`
+	Cwd           string `json:"cwd"`
+	ForegroundCwd string `json:"foreground_cwd"` // where the agent actually runs
+	Focused       bool   `json:"focused"`
 	// StateChangeSeq is herdr's state-change counter for this pane as of
 	// this reply. Two hook processes that re-read the same transition see
 	// the same number, which is what the notify hook dedupes on. It is
@@ -312,6 +318,11 @@ const (
 	CodeStaleWorktreeOperation      = "stale_worktree_operation"
 	CodeAmbiguousWorktreeBranch     = "ambiguous_worktree_branch"
 	CodeWorktreeNotFound            = "worktree_not_found"
+	// CodeWorkspaceTrustBlocked is herdr refusing to act on a repository the
+	// person has not trusted. It is surfaced as the refusal it is: trusting a
+	// repository is a write, so tktban never sends trust_repository to work
+	// around it.
+	CodeWorkspaceTrustBlocked = "workspace_trust_blocked"
 
 	// Agent failures. agent_pane_busy is the expected one right after a
 	// worktree is created: the pane exists but its shell is not at a prompt
@@ -449,20 +460,19 @@ type WorktreeResult struct {
 	AlreadyOpen bool          `json:"already_open"`
 }
 
-// WorktreeCreate cuts a branch and opens a worktree for it.
-//
-// Nothing in tktban calls it yet: the D key is a dry run that shows what this
-// call would be given and then makes no call at all. It exists now so the wire
-// shape is pinned against herdr protocol 22 by a test rather than written from
-// memory later.
+// WorktreeCreate cuts a branch and opens a worktree for it. This is the first
+// step of a dispatch (see Sequence); the wire shape is pinned against herdr
+// protocol 22 by a test rather than written from memory.
 func (c *Client) WorktreeCreate(ctx context.Context, p WorktreeCreateParams) (WorktreeResult, error) {
 	var r WorktreeResult
 	err := c.Call(ctx, "worktree.create", p, &r)
 	return r, err
 }
 
-// WorktreeOpen opens the worktree of a branch that already has one. Same
-// standing as WorktreeCreate: typed now, called later.
+// WorktreeOpen opens the worktree of a branch that already has one. A dispatch
+// takes this path when the preflight already saw the branch checked out, so a
+// second dispatch of one ticket rejoins the first rather than cutting a second
+// worktree.
 func (c *Client) WorktreeOpen(ctx context.Context, p WorktreeOpenParams) (WorktreeResult, error) {
 	var r WorktreeResult
 	err := c.Call(ctx, "worktree.open", p, &r)
@@ -495,7 +505,9 @@ type AgentStartResult struct {
 	Argv  []string `json:"argv"`
 }
 
-// AgentStart registers an agent in an existing pane. Typed now, called later.
+// AgentStart registers an agent in an existing pane. Callers go through
+// StartAgentWithRetry rather than calling this directly: herdr answers
+// agent_pane_busy until the pane's login shell reaches an interactive prompt.
 func (c *Client) AgentStart(ctx context.Context, p AgentStartParams) (AgentStartResult, error) {
 	var r AgentStartResult
 	err := c.Call(ctx, "agent.start", p, &r)
@@ -510,7 +522,7 @@ type AgentPromptParams struct {
 	Text   string `json:"text"`
 }
 
-// AgentPrompt types a prompt into a started agent. Typed now, called later.
+// AgentPrompt types a prompt into a started agent.
 func (c *Client) AgentPrompt(ctx context.Context, p AgentPromptParams) error {
 	return c.Call(ctx, "agent.prompt", p, nil)
 }

@@ -423,8 +423,9 @@ from the TKB-24 research against herdr 0.9.0 and are not re-measured here.
 ## Verified in TKB-25
 
 Read out of `herdr api schema --json` (protocol 22), `herdr --default-config`
-and the herdr binary's own error-code strings, while building the dispatch dry
-run. Everything below was checked against the running herdr, not remembered.
+and the herdr binary's own error-code strings, while building the dispatch —
+first the dry run, then the create sequence. Everything below was checked
+against the running herdr, not remembered.
 
 ### No creation method takes a command
 
@@ -470,6 +471,7 @@ must refuse outright rather than retry are marked.
 | Code | Meaning |
 |------|---------|
 | `not_git_worktree` | **refuse** — the directory is not a checkout |
+| `workspace_trust_blocked` | **refuse** — the repository is not trusted (see below) |
 | `linked_worktree_source` | **refuse** — the source checkout is itself a linked worktree |
 | `worktree_operation_in_progress` | another worktree operation is running |
 | `worktree_create_failed` | the create itself failed |
@@ -486,6 +488,14 @@ must refuse outright rather than retry are marked.
 whose `source.source_checkout_path` appears in `worktrees[]` with
 `is_linked_worktree: true` is herdr saying "you are inside a worktree
 already", and tktban refuses on that too.
+
+`workspace_trust_blocked` is the one there is a tempting way around: every
+worktree method takes a `trust_repository` boolean that would clear it.
+Recording a repository as trusted is a write, and one whose whole point is to
+be a deliberate human decision, so tktban never sends it — on `worktree.list`,
+`worktree.create` or `worktree.open`. The refusal is surfaced as a refusal, and
+a pinned request-JSON test asserts the parameter is not on the wire for any of
+the three.
 
 ### Agent names
 
@@ -520,6 +530,82 @@ worktree lands exactly where the ones a person makes by hand do.
   (`tkt.WithContext` → `exec.CommandContext`), so a wedged `tkt` is killed
   rather than waited on. That matters because the board latches the `D` key
   while a preparation is in flight.
+
+### The create sequence, as built
+
+Three calls, in this order, each with its own budget on our side:
+
+| Stage | Call | Our budget | Note |
+|-------|------|-----------|------|
+| 1 | `worktree.create`, or `worktree.open` when the preflight already saw the branch checked out | 15 s | params exactly `{cwd, branch, base, label, focus:false}` — `worktree.open` the same minus `base` and minus `label` (it is joining a workspace that already has one). No `path`: herdr owns placement. No `trust_repository`: that is a write. |
+| 2 | `agent.start` into `root_pane.pane_id` | 30 s | `timeout_ms: 20000`, deliberately inside our own budget so **herdr's** timer fires first and the failure arrives as a typed error naming what broke, rather than as a closed socket and a bare deadline. The budget bounds the whole retry loop, so it has to be 20 s **plus** the 3.1 s of backoff (`herdr.AgentStartBackoffTotal`) plus margin — 25 s would leave the last attempt 1.9 s and invert the relation. |
+| 3 | `agent.prompt` | 5 s | `{target, text}` only. herdr accepts a `wait` object; it is never sent, because a board must not block on an agent reaching a status. |
+
+Then two `tkt` writes, 5 s each: `transition` (only when the agent really
+started, and only when the ticket is still in the lane the plan was built for)
+and `comment` (always).
+
+- **`root_pane` is required by the schema but checked anyway.** herdr answering
+  `worktree_created` without a pane id would otherwise turn into a confusing
+  `invalid_agent_argument` three seconds later; it is reported at the stage
+  that actually went wrong.
+- **`AgentInfo` carries `name` as a field of its own, distinct from `agent`.**
+  `agent` is the *kind* (`"claude"`); `name` is the identity `agent.prompt` and
+  `agent.get` take as a `target`. tktban decodes it and prompts **the name in
+  herdr's reply**, falling back to the name it sent only if herdr answers
+  without one. Prompting the sent name is how a prompt lands in another agent's
+  pane — which is reachable, because an `agent_name_taken` retry changes the
+  name to `tkb-25-2`, and herdr is free to normalise or disambiguate one of its
+  own accord. The result therefore carries herdr's name, while the name that
+  was *sent* stays on the start stats, so a refusal can still say which name it
+  tried.
+- **A call we did not get an answer to is not a failed call.** herdr answering
+  with a code means herdr decided not to; a closed socket or an expired deadline
+  means we do not know, and herdr may have gone on to do it. Every sentence
+  built from such a failure admits that — "the agent may or may not be running,
+  check the pane", "a worktree may or may not exist, check
+  `herdr worktree list`" — because the alternative sends someone to create a
+  second one. The worktree case additionally has to write a comment line with no
+  path in it, since a possible orphan under `[worktrees] directory` is otherwise
+  recorded nowhere.
+- **A deadline that lands mid-retry wraps the last herdr reply too**, so a bare
+  `errors.As(err, &*APIError)` finds `agent_pane_busy` on it and reads "we
+  stopped asking" as "herdr said no". The predicate that decides the wording
+  therefore checks the context error first. The error's own text carries both
+  halves, which is what keeps the deadline from being dropped from the message.
+
+### The retry budget, and why it is shaped like that
+
+`agent_pane_busy` is not an error in the ordinary sense: `worktree.create`
+returns as soon as the pane exists, and `agent.start` needs that pane's login
+shell to have reached an *interactive prompt*. So the budget is 5 retries at
+100/200/400/800/1600 ms — about 3.1 s of waiting at worst.
+
+The shape is the decision. A plain `sh` is ready almost immediately, so the
+first retries are cheap; a shell with a prompt framework, a version manager and
+a plugin loader in its rc files takes roughly half a second, and the tail is
+long. Five doublings from 100 ms covers that with room to spare. `agent_name_taken`
+gets exactly one retry, spending a slot of the *same* budget — two name
+collisions in a row means something else is holding these names, and walking up
+the sequence would only make more of them. Every other code
+(`invalid_agent_name`, `invalid_agent_argument`, `agent_blocked`, a dial
+failure) returns at once: none of them comes right by being asked again.
+
+Giving up is never a rollback. The worktree and its pane stay.
+
+### No creation method takes an undo either
+
+Deliberately: the herdr interface a dispatch is given
+(`herdr.DispatchClient`) contains `worktree.list`, `worktree.create`,
+`worktree.open`, `agent.start` and `agent.prompt`, and **nothing else**. There
+is no `worktree.remove`, no `pane.close`, no `workspace.close` and no
+`pane.focus` in it, so no failure path can reach one, and a test walks the
+interface's own method set to keep it that way. A worktree left behind is
+recorded on the ticket and removed by hand.
+
+`pane.focus` is off the list for a different reason: a dispatch does not steal
+the screen (`focus: false` on the worktree call says the same thing). The
+person follows with `o`.
 
 ### Which herdr processes get refused a working directory
 

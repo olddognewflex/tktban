@@ -3,17 +3,22 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// Dispatch is the plan for handing one ticket to a herdr agent: a branch, a
-// worktree for it, an agent started in that worktree's pane, and a first
-// prompt. Everything here is pure or read-only — building a plan and checking
-// whether it could run creates nothing. The board's D key shows the plan and
-// stops; the calls that act on it are wired up separately.
+// Dispatch is handing one ticket to a herdr agent: a branch, a worktree for it,
+// an agent started in that worktree's pane, and a first prompt.
+//
+// The file is in two halves. Everything up to "the create sequence" is pure or
+// read-only: building a plan and preflighting it creates nothing, which is what
+// lets the confirm dialog show a whole dispatch before any of it happens.
+// Everything after it acts on a plan, and every herdr parameter, error code and
+// retry decision lives there rather than in the board.
 //
 // The plan is built once, off a card, and carried whole. Nothing downstream
 // re-reads the board selection, so an auto-refresh landing mid-flight cannot
@@ -154,8 +159,9 @@ const DefaultPrompt = "Work ticket {key}: {summary}\n\n" +
 	"Read it with `tkt view {key}` first. You are on branch {branch}; " +
 	"the ticket moves to {lane} when you start."
 
-// Plan is everything a dispatch would do, as data. It is what the confirm
-// modal renders, and what the create sequence will consume.
+// Plan is everything a dispatch does, as data. It is what the confirm modal
+// renders, and what the create sequence consumes — the same value, unchanged,
+// so nothing is created that nobody was shown.
 type Plan struct {
 	Key     string // the ticket, in the board's spelling (uppercase)
 	Summary string
@@ -350,4 +356,409 @@ func Preflight(ctx context.Context, c WorktreeLister, p Plan) (PreflightResult, 
 		return PreflightResult{}, ErrLinkedWorktreeSource
 	}
 	return out, nil
+}
+
+// ---- the create sequence ----
+//
+// Everything above builds a plan and reads. Everything below acts on one.
+//
+// The sequence lives here, and not in the board, for one reason: the board
+// must hold no protocol knowledge. Which parameters herdr wants, which of
+// worktree.create and worktree.open to call, which error codes are worth a
+// retry and which pane an agent is started into are all decisions about
+// herdr's API, and they belong next to the client that speaks it. The board
+// drives the sequence one step at a time and renders the typed result.
+//
+// What is deliberately NOT here: any way to undo a step. There is no
+// worktree.remove, no pane.close and no workspace.close anywhere in
+// DispatchClient, so no failure path can reach one. A worktree that survives a
+// failed agent start is left exactly where it is and recorded on the ticket;
+// a board is not allowed to delete a checkout that might hold work.
+
+// AgentStartTimeoutMS is the startup budget tktban gives herdr for
+// agent.start: 20s, comfortably inside herdr's own 3000 < t <= 300000 range.
+//
+// It is deliberately shorter than the context the board wraps the stage in, so
+// herdr's own timeout is the one that fires. A herdr timeout comes back as a
+// typed error reply naming what failed; our context expiring comes back as a
+// closed socket and a bare deadline, which tells nobody anything — and worse,
+// leaves us unable to say whether the agent started.
+//
+// "Inside the stage's budget" has to account for the retries, not just one
+// attempt: the last attempt of a run that spent the whole backoff must still
+// have its full 20s. AgentStartBackoffTotal is exported so a caller sizing that
+// budget can add the two together rather than guess, and a test asserts the
+// relation holds.
+const AgentStartTimeoutMS = 20000
+
+// Sleeper waits for d, or gives up early when ctx ends. It is injected so the
+// retry budget below can be tested without spending it: SleepCtx is the real
+// one, and the tests record the delays instead of serving them.
+type Sleeper func(ctx context.Context, d time.Duration) error
+
+// agentStartBackoff is the wait before each agent.start retry — five retries,
+// six attempts in all, about 3.1s of waiting at worst.
+//
+// The reason it exists at all: herdr's worktree.create opens the pane at a
+// login shell and returns as soon as the pane is there, while agent.start
+// needs that shell to have reached an interactive prompt and answers
+// agent_pane_busy until it has. A plain shell is ready almost at once; a shell
+// with a prompt framework, a version manager and a plugin loader in its rc
+// files takes about half a second, and the tail is long. So the first retries
+// are quick (a fast shell costs 100ms, not a fixed second) and the last ones
+// are patient. Five doublings from 100ms covers the slow shell with room to
+// spare, and giving up is safe: the pane and the worktree are already there,
+// and the person can start the agent in them by hand.
+var agentStartBackoff = []time.Duration{
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+	400 * time.Millisecond,
+	800 * time.Millisecond,
+	1600 * time.Millisecond,
+}
+
+// AgentStartBackoffTotal is the whole time StartAgentWithRetry can spend
+// waiting between attempts. A caller bounding the stage has to add it to
+// AgentStartTimeoutMS, or its own deadline cuts the last attempt short and
+// turns a herdr timeout — which says what broke — into a closed socket, which
+// says nothing and leaves the agent's state unknown.
+func AgentStartBackoffTotal() time.Duration {
+	var total time.Duration
+	for _, d := range agentStartBackoff {
+		total += d
+	}
+	return total
+}
+
+// AgentStarter is the slice of the client StartAgentWithRetry needs.
+type AgentStarter interface {
+	AgentStart(ctx context.Context, p AgentStartParams) (AgentStartResult, error)
+}
+
+// AgentStartStats is what the retry loop did, for a status line and a comment
+// that can say "it took four tries" rather than leaving a person wondering
+// why a dispatch sat there for three seconds.
+type AgentStartStats struct {
+	Name     string        // the name the agent was finally started under
+	Attempts int           // agent.start calls made, including the one that worked
+	Busy     int           // agent_pane_busy replies
+	Renamed  int           // agent_name_taken replies that produced a new name
+	Waited   time.Duration // total time spent in the backoff
+}
+
+// StartAgentWithRetry starts p's agent in paneID, retrying the two failures
+// that are worth retrying and nothing else.
+//
+// agent_pane_busy means "the pane's shell is not at a prompt yet", which is
+// the expected answer immediately after a worktree is created — see
+// agentStartBackoff. agent_name_taken means a live agent already holds the
+// name, which happens when an earlier agent on this ticket is still running in
+// another pane; the next candidate from AgentNameN is tried exactly once, and
+// it spends a slot of the same budget rather than getting one of its own. Two
+// name collisions in a row is a signal to stop, not to keep counting upwards.
+//
+// Every other code — invalid_agent_name, invalid_agent_argument,
+// agent_blocked, a dial failure — returns at once. They will not come right by
+// being asked again.
+//
+// Giving up is never a rollback. The worktree and its pane stay; the caller
+// records them and says the agent did not start.
+func StartAgentWithRetry(ctx context.Context, c AgentStarter, p Plan, paneID string, sleep Sleeper) (AgentStartResult, AgentStartStats, error) {
+	if sleep == nil {
+		sleep = SleepCtx
+	}
+	name := p.AgentName
+	if name == "" {
+		name = AgentName(p.Key)
+	}
+	stats := AgentStartStats{Name: name}
+	renamed := false
+	for attempt := 0; ; attempt++ {
+		res, err := c.AgentStart(ctx, AgentStartParams{
+			Name:      name,
+			Kind:      p.AgentKind,
+			PaneID:    paneID,
+			Args:      p.AgentArgs,
+			TimeoutMS: AgentStartTimeoutMS,
+		})
+		stats.Attempts = attempt + 1
+		stats.Name = name
+		if err == nil {
+			return res, stats, nil
+		}
+		switch ErrorCode(err) {
+		case CodeAgentPaneBusy:
+			stats.Busy++
+		case CodeAgentNameTaken:
+			if renamed {
+				// A second collision is not a counting problem. Something
+				// else is holding these names and walking up the sequence
+				// would just make more of them.
+				return AgentStartResult{}, stats, err
+			}
+			renamed = true
+			stats.Renamed++
+			name = AgentNameN(p.Key, 2)
+		default:
+			return AgentStartResult{}, stats, err
+		}
+		if attempt >= len(agentStartBackoff) {
+			return AgentStartResult{}, stats, err // the budget is spent
+		}
+		wait := agentStartBackoff[attempt]
+		if serr := sleep(ctx, wait); serr != nil {
+			// The context ended mid-backoff. Both facts matter — the deadline
+			// is why we stopped, the herdr code is what we had last seen — so
+			// both are wrapped and errors.Is finds either.
+			return AgentStartResult{}, stats, fmt.Errorf("%w (last herdr reply: %w)", serr, err)
+		}
+		stats.Waited += wait
+	}
+}
+
+// ---- the whole sequence ----
+
+// Stage is one step of a dispatch, in the order they run.
+type Stage int
+
+const (
+	// StageDone means there is nothing left to do — either every step ran, or
+	// one of them failed and the sequence stops where it stopped.
+	//
+	// It is first so that it is the zero value, which is what lets
+	// DispatchResult.Failed mean "nothing failed" without anyone having to
+	// remember to initialise it.
+	StageDone Stage = iota
+	// StageWorktree creates the worktree, or opens the one the branch has.
+	StageWorktree
+	// StageAgent starts the agent in the worktree's root pane.
+	StageAgent
+	// StagePrompt hands the started agent its first prompt.
+	StagePrompt
+)
+
+// String is the herdr method the stage calls, so a status line and a ticket
+// comment can name the step in herdr's own vocabulary rather than inventing a
+// second set of names for the same three calls. StageWorktree is the one that
+// is two methods, and which of them ran is on the result (Reused).
+func (s Stage) String() string {
+	switch s {
+	case StageWorktree:
+		return "worktree.create"
+	case StageAgent:
+		return "agent.start"
+	case StagePrompt:
+		return "agent.prompt"
+	case StageDone:
+		return "done"
+	}
+	return "unknown"
+}
+
+// DispatchClient is the herdr surface a create sequence has, and it is
+// exhaustive on purpose.
+//
+// There is no worktree.remove, no pane.close and no workspace.close in it. A
+// dispatch that fails half-way therefore cannot tidy up after itself even by
+// accident: a worktree may hold a checkout, a stash or an edited file, and a
+// board is not the thing that gets to decide those are disposable. The failure
+// path records what exists and says so; the person removes it if they want it
+// gone. A test walks this interface's own method set to keep it that way.
+type DispatchClient interface {
+	WorktreeLister
+	WorktreeCreate(ctx context.Context, p WorktreeCreateParams) (WorktreeResult, error)
+	WorktreeOpen(ctx context.Context, p WorktreeOpenParams) (WorktreeResult, error)
+	AgentStarter
+	AgentPrompt(ctx context.Context, p AgentPromptParams) error
+}
+
+// DispatchResult is how far a dispatch got and what each step produced.
+//
+// Every field is filled in as soon as it is known, not only on success, and
+// that is the point of the type: the ticket comment and the board's status
+// line are both built from it, and both of them are most needed when the
+// sequence stopped half-way. A failed agent start has to be able to say which
+// worktree, which workspace and which pane are now sitting there.
+type DispatchResult struct {
+	// The worktree step.
+	Created      bool   // a worktree is there (created or opened)
+	Reused       bool   // worktree.open was called, not worktree.create
+	AlreadyOpen  bool   // herdr already had that worktree open in a workspace
+	WorktreePath string // where herdr put it
+	WorkspaceID  string
+	TabID        string
+	PaneID       string // root_pane: the pane the agent is started in
+
+	// The agent step.
+	Started bool // agent.start succeeded: the agent is dispatched
+	// AgentName is the name herdr registered, which may be neither the plan's
+	// nor the last one sent. It is empty until an agent exists; a failed start
+	// leaves the name it tried on Start instead.
+	AgentName string
+	Argv      []string // the argv herdr actually ran
+	Start     AgentStartStats
+
+	// The prompt step.
+	Prompted bool
+
+	// Failed is the stage that failed; StageDone (the zero value) when none
+	// did. Err is that stage's error, and ErrorCode(Err) names it when herdr
+	// did.
+	//
+	// Failed and Created are independent, which matters: herdr can create a
+	// worktree and then answer with no root pane to start an agent in, so a
+	// StageWorktree failure does not mean nothing was created. Callers word
+	// "nothing was created" off Created, never off the stage.
+	Failed Stage
+	Err    error
+}
+
+// Sequence is a dispatch in progress: the plan, what the preflight found, and
+// the result so far. It is a value — Next returns the next one rather than
+// mutating this one — so the board can carry it on a message without two
+// updates ever sharing state.
+type Sequence struct {
+	Plan Plan
+	Pre  PreflightResult
+	Res  DispatchResult
+}
+
+// NewSequence starts a dispatch of plan. Nothing has happened yet.
+func NewSequence(plan Plan, pre PreflightResult) Sequence {
+	return Sequence{Plan: plan, Pre: pre}
+}
+
+// Stage reports the step Next would run: StageDone once the prompt has landed
+// or any step has failed. Nothing retries a step that failed, and in
+// particular nothing re-runs the worktree step — a retry there could leave a
+// second worktree behind, which is the one mistake in this sequence that is
+// expensive to undo.
+func (s Sequence) Stage() Stage {
+	switch {
+	case s.Res.Err != nil:
+		return StageDone
+	case !s.Res.Created:
+		return StageWorktree
+	case !s.Res.Started:
+		return StageAgent
+	case !s.Res.Prompted:
+		return StagePrompt
+	}
+	return StageDone
+}
+
+// Next runs exactly one step against c under ctx and returns the sequence that
+// follows it. One step per call is what lets the caller give each step its own
+// budget — 15s to cut a worktree is not 5s to type a prompt — and lets the
+// confirm dialog say which one is running. Calling Next on a finished or failed
+// sequence returns it unchanged.
+func (s Sequence) Next(ctx context.Context, c DispatchClient, sleep Sleeper) Sequence {
+	switch s.Stage() {
+	case StageWorktree:
+		return s.worktree(ctx, c)
+	case StageAgent:
+		return s.agent(ctx, c, sleep)
+	case StagePrompt:
+		return s.prompt(ctx, c)
+	}
+	return s
+}
+
+// worktree creates the worktree, or opens the one the branch already has.
+//
+// No path is sent: herdr owns worktree placement ([worktrees] directory,
+// default ~/.herdr/worktrees), so a dispatched worktree lands beside the ones
+// a person makes by hand. No trust_repository either — recording a repository
+// as trusted is a write, and a workspace_trust_blocked refusal is a refusal to
+// report, not an obstacle to route around. focus is sent as false because
+// false is a decision: a dispatch does not steal the screen.
+func (s Sequence) worktree(ctx context.Context, c DispatchClient) Sequence {
+	var res WorktreeResult
+	var err error
+	if s.Pre.ExistingWorktreePath != "" {
+		// The branch is already checked out somewhere. Opening it is how a
+		// second dispatch of one ticket rejoins the first instead of asking
+		// git for a branch it already has. No base: there is nothing to cut.
+		s.Res.Reused = true
+		res, err = c.WorktreeOpen(ctx, WorktreeOpenParams{
+			Cwd:    s.Plan.Dir,
+			Branch: s.Plan.Branch,
+			Focus:  false,
+		})
+	} else {
+		res, err = c.WorktreeCreate(ctx, WorktreeCreateParams{
+			Cwd:    s.Plan.Dir,
+			Branch: s.Plan.Branch,
+			Base:   s.Plan.Base,
+			// The label herdr gives the workspace and its tab. The ticket key
+			// is what makes the workspace findable in herdr's own switcher,
+			// and it is the same string the sidebar's $ticket token carries.
+			Label: s.Plan.Key,
+			Focus: false,
+		})
+	}
+	if err != nil {
+		s.Res.Failed, s.Res.Err = StageWorktree, err
+		return s
+	}
+	s.Res.Created = true
+	s.Res.AlreadyOpen = res.AlreadyOpen
+	s.Res.WorktreePath = res.Worktree.Path
+	s.Res.WorkspaceID = res.Workspace.WorkspaceID
+	s.Res.TabID = res.Tab.TabID
+	s.Res.PaneID = res.RootPane.PaneID
+	if s.Res.PaneID == "" {
+		// herdr's schema makes root_pane required, so this is herdr breaking
+		// its own contract — but agent.start requires a pane_id, and sending
+		// "" would be a confusing invalid_agent_argument three seconds later.
+		// Say what is actually wrong, once, here.
+		s.Res.Failed, s.Res.Err = StageWorktree, errors.New("herdr: worktree reply carried no root pane to start an agent in")
+	}
+	return s
+}
+
+// agent starts the agent in the worktree's root pane, with the retry budget
+// StartAgentWithRetry documents.
+func (s Sequence) agent(ctx context.Context, c DispatchClient, sleep Sleeper) Sequence {
+	res, stats, err := StartAgentWithRetry(ctx, c, s.Plan, s.Res.PaneID, sleep)
+	// Start carries the name that was last *sent*, which is what a failure has
+	// to report — "tkt-25-2 was refused" is the useful sentence. AgentName is
+	// the name of an agent that exists, so it stays empty until one does.
+	s.Res.Start = stats
+	if err != nil {
+		s.Res.Failed, s.Res.Err = StageAgent, err
+		return s
+	}
+	s.Res.Started = true
+	s.Res.Argv = res.Argv
+	// The name herdr registered, in preference to the one we asked for. They
+	// are not guaranteed to match — herdr may normalise or disambiguate — and
+	// agent.prompt takes this name as its target, so prompting the name we
+	// sent rather than the name that exists is how a prompt ends up in
+	// somebody else's pane. The sent name is the fallback only for a herdr
+	// that answers without one.
+	s.Res.AgentName = res.Agent.Name
+	if s.Res.AgentName == "" {
+		s.Res.AgentName = stats.Name
+	}
+	return s
+}
+
+// prompt hands the started agent its first prompt.
+//
+// The target is Res.AgentName — the name herdr registered, not the one the plan
+// asked for. There is no fallback: this stage only runs after a successful
+// agent.start, which always leaves a name behind.
+//
+// No wait: herdr's agent.prompt accepts a wait object that blocks until the
+// agent reaches a status, and a board must never block on an agent. It is
+// fire-and-forget by design — and if it does fail, the agent is already
+// dispatched, which is why this is the one failure that still moves the lane.
+func (s Sequence) prompt(ctx context.Context, c DispatchClient) Sequence {
+	if err := c.AgentPrompt(ctx, AgentPromptParams{Target: s.Res.AgentName, Text: s.Plan.Prompt}); err != nil {
+		s.Res.Failed, s.Res.Err = StagePrompt, err
+		return s
+	}
+	s.Res.Prompted = true
+	return s
 }
