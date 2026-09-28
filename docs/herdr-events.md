@@ -482,7 +482,7 @@ must refuse outright rather than retry are marked.
 | `agent_not_ready` | the agent is there but not accepting interactive input yet — retry (see below) |
 | `agent_prompt_failed` | the submission failed part-way — do **not** retry |
 | `agent_name_taken` | pick the next candidate name |
-| `agent_blocked` | herdr refused to start this agent |
+| `agent_blocked` | herdr refused to start or prompt this agent (it is at a dialog) — never retried |
 | `invalid_agent_name` | the name breaks the rule below |
 | `invalid_agent_argument` | a bad entry in `args` |
 

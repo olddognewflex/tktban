@@ -384,7 +384,8 @@ func dispatchStageBudget(stage herdr.Stage) time.Duration {
 }
 
 // dispatchStageContext / dispatchWriteContext mint those budgets, and
-// dispatchSleep is the wait between agent.start retries. All three are
+// dispatchSleep is the wait between agent.start and agent.prompt retries.
+// All three are
 // variables for the same reason dispatchPrepContext is: a test has to be able
 // to see what the code does when a budget runs out, and to read the retry
 // schedule without spending three real seconds on it.
