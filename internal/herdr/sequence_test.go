@@ -39,7 +39,10 @@ type recordingDispatch struct {
 	startErrs []error
 	start     AgentStartResult
 
-	promptErr error
+	// promptErrs is served one per agent.prompt call, like startErrs; once
+	// it runs out, promptErr answers every later call.
+	promptErrs []error
+	promptErr  error
 }
 
 // recordedCall is one herdr call: the method name as it goes on the wire, and
@@ -79,7 +82,16 @@ func (f *recordingDispatch) AgentStart(_ context.Context, p AgentStartParams) (A
 }
 
 func (f *recordingDispatch) AgentPrompt(_ context.Context, p AgentPromptParams) error {
+	n := 0
+	for _, c := range f.calls {
+		if c.method == "agent.prompt" {
+			n++
+		}
+	}
 	f.calls = append(f.calls, recordedCall{"agent.prompt", p})
+	if n < len(f.promptErrs) {
+		return f.promptErrs[n]
+	}
 	return f.promptErr
 }
 
@@ -1132,5 +1144,96 @@ func TestSequenceRealSocketErrorReplyStopsTheSequence(t *testing.T) {
 	}
 	if got := recorded(); len(got) != 1 || !strings.Contains(got[0], `"worktree.create"`) {
 		t.Errorf("requests = %v, want exactly the one create", got)
+	}
+}
+
+// ---- the prompt retry ----
+
+// promptReady is a sequence whose agent has just started, so Next runs the
+// prompt stage.
+func promptReady() Sequence {
+	s := NewSequence(testPlan(), PreflightResult{})
+	s.Res.Created, s.Res.Started = true, true
+	s.Res.PaneID, s.Res.AgentName = "wE:p1", "tkb-25"
+	return s
+}
+
+// agent.start can return before herdr has registered the name it gave, so
+// the first prompt meets agent_not_ready. That is retried on the backoff and
+// the same text goes to the same target each time.
+func TestPromptRetriesOnNotReady(t *testing.T) {
+	notReady := &APIError{Code: CodeAgentNotReady, Message: "agent tkb-25 is not an active named agent"}
+	f := &recordingDispatch{promptErrs: []error{notReady, notReady}}
+	sl := &recordingSleep{}
+
+	got := promptReady().Next(context.Background(), f, sl.sleep)
+	if !got.Res.Prompted || got.Res.Err != nil {
+		t.Fatalf("two not-readies then a success must land the prompt: %+v", got.Res)
+	}
+	if got.Stage() != StageDone {
+		t.Errorf("stage = %v, want done", got.Stage())
+	}
+	if want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}; !slices.Equal(sl.waits, want) {
+		t.Fatalf("waits = %v, want %v", sl.waits, want)
+	}
+	if p := got.Res.Prompt; p.Attempts != 3 || p.NotReady != 2 || p.Waited != 300*time.Millisecond {
+		t.Errorf("prompt stats = %+v", p)
+	}
+	for i, c := range f.calls {
+		p := c.params.(AgentPromptParams)
+		if p.Target != "tkb-25" || p.Text != testPlan().Prompt {
+			t.Errorf("attempt %d = %+v", i, p)
+		}
+	}
+}
+
+// The budget is finite; running out leaves the prompt as the person's to
+// paste, exactly like any other prompt failure.
+func TestPromptGivesUpAfterTheBudget(t *testing.T) {
+	notReady := &APIError{Code: CodeAgentNotReady, Message: "not ready"}
+	f := &recordingDispatch{promptErr: notReady}
+	sl := &recordingSleep{}
+
+	got := promptReady().Next(context.Background(), f, sl.sleep)
+	if got.Res.Prompted || got.Res.Failed != StagePrompt || ErrorCode(got.Res.Err) != CodeAgentNotReady {
+		t.Fatalf("result = %+v, want a prompt failure carrying agent_not_ready", got.Res)
+	}
+	if len(f.calls) != len(promptBackoff)+1 {
+		t.Fatalf("agent.prompt calls = %d, want %d", len(f.calls), len(promptBackoff)+1)
+	}
+	if got.Res.Prompt.Waited != PromptBackoffTotal() {
+		t.Errorf("waited %v, want %v", got.Res.Prompt.Waited, PromptBackoffTotal())
+	}
+	assertNothingDestroyed(t, f)
+}
+
+// Nothing but agent_not_ready is retried. agent_blocked in particular is a
+// dialog a person has to answer, not a race.
+func TestPromptDoesNotRetryOtherCodes(t *testing.T) {
+	for _, code := range []string{CodeAgentBlocked, CodeAgentPaneBusy, "agent_prompt_failed"} {
+		f := &recordingDispatch{promptErr: &APIError{Code: code, Message: code}}
+		sl := &recordingSleep{}
+		got := promptReady().Next(context.Background(), f, sl.sleep)
+		if len(f.calls) != 1 || len(sl.waits) != 0 {
+			t.Errorf("%s: %d calls, waits %v — want one call, no wait", code, len(f.calls), sl.waits)
+		}
+		if got.Res.Failed != StagePrompt || ErrorCode(got.Res.Err) != code {
+			t.Errorf("%s: result = %+v", code, got.Res)
+		}
+	}
+}
+
+// A context that ends mid-backoff stops the loop and keeps both facts.
+func TestPromptStopsWhenTheContextEnds(t *testing.T) {
+	notReady := &APIError{Code: CodeAgentNotReady, Message: "not ready"}
+	f := &recordingDispatch{promptErr: notReady}
+	sleep := func(context.Context, time.Duration) error { return context.DeadlineExceeded }
+
+	got := promptReady().Next(context.Background(), f, sleep)
+	if got.Res.Prompted || got.Res.Failed != StagePrompt {
+		t.Fatalf("result = %+v", got.Res)
+	}
+	if !errors.Is(got.Res.Err, context.DeadlineExceeded) || ErrorCode(got.Res.Err) != CodeAgentNotReady {
+		t.Errorf("err = %v, want both the deadline and the herdr code", got.Res.Err)
 	}
 }

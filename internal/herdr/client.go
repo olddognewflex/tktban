@@ -327,9 +327,16 @@ const (
 	// Agent failures. agent_pane_busy is the expected one right after a
 	// worktree is created: the pane exists but its shell is not at a prompt
 	// yet, so the start is retried rather than failed.
-	CodeAgentPaneBusy        = "agent_pane_busy"
-	CodeAgentNameTaken       = "agent_name_taken"
-	CodeAgentBlocked         = "agent_blocked"
+	CodeAgentPaneBusy  = "agent_pane_busy"
+	CodeAgentNameTaken = "agent_name_taken"
+	CodeAgentBlocked   = "agent_blocked"
+	// agent_not_ready means the target is not yet an active named agent.
+	// agent.start can return before herdr has finished registering the name
+	// it just gave, so the first agent.prompt straight after a start can meet
+	// it, and the prompt stage retries it. (herdr's docs also say agent.start
+	// itself answers agent_not_ready for an agent blocked during startup;
+	// that path is not retried.)
+	CodeAgentNotReady        = "agent_not_ready"
 	CodeInvalidAgentName     = "invalid_agent_name"
 	CodeInvalidAgentArgument = "invalid_agent_argument"
 )

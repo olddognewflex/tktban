@@ -539,7 +539,7 @@ Three calls, in this order, each with its own budget on our side:
 |-------|------|-----------|------|
 | 1 | `worktree.create`, or `worktree.open` when the preflight already saw the branch checked out | 15 s | params exactly `{cwd, branch, base, label, focus:false}` — `worktree.open` the same minus `base` and minus `label` (it is joining a workspace that already has one). No `path`: herdr owns placement. No `trust_repository`: that is a write. |
 | 2 | `agent.start` into `root_pane.pane_id` | 30 s | `timeout_ms: 20000`, deliberately inside our own budget so **herdr's** timer fires first and the failure arrives as a typed error naming what broke, rather than as a closed socket and a bare deadline. The budget bounds the whole retry loop, so it has to be 20 s **plus** the 3.1 s of backoff (`herdr.AgentStartBackoffTotal`) plus margin — 25 s would leave the last attempt 1.9 s and invert the relation. |
-| 3 | `agent.prompt` | 5 s | `{target, text}` only. herdr accepts a `wait` object; it is never sent, because a board must not block on an agent reaching a status. |
+| 3 | `agent.prompt` | 10 s | `{target, text}` only. `agent_not_ready` (name not registered yet) is retried on a 100 ms…3.2 s backoff; nothing else is. herdr accepts a `wait` object; it is never sent, because a board must not block on an agent reaching a status. |
 
 Then two `tkt` writes, 5 s each: `transition` (only when the agent really
 started, and only when the ticket is still in the lane the plan was built for)

@@ -600,6 +600,9 @@ type DispatchResult struct {
 
 	// The prompt step.
 	Prompted bool
+	// Prompt is what the agent.prompt retry loop did, filled in on success
+	// and failure alike.
+	Prompt PromptStats
 
 	// Failed is the stage that failed; StageDone (the zero value) when none
 	// did. Err is that stage's error, and ErrorCode(Err) names it when herdr
@@ -659,7 +662,7 @@ func (s Sequence) Next(ctx context.Context, c DispatchClient, sleep Sleeper) Seq
 	case StageAgent:
 		return s.agent(ctx, c, sleep)
 	case StagePrompt:
-		return s.prompt(ctx, c)
+		return s.prompt(ctx, c, sleep)
 	}
 	return s
 }
@@ -744,21 +747,78 @@ func (s Sequence) agent(ctx context.Context, c DispatchClient, sleep Sleeper) Se
 	return s
 }
 
+// PromptStats is what the prompt retry loop did, for the same reason
+// AgentStartStats exists: a prompt that landed on its third try, or never,
+// should say so.
+type PromptStats struct {
+	Attempts int           // agent.prompt calls made, including the one that worked
+	NotReady int           // agent_not_ready replies
+	Waited   time.Duration // total time spent in the backoff
+}
+
+// promptBackoff is the wait before each agent.prompt retry. It is the
+// agent.start schedule for the same shape of reason: agent.start can return
+// before herdr has finished registering the agent's name, and agent.prompt
+// answers agent_not_ready ("not an active named agent") until it has. That
+// is usually a matter of milliseconds, so the first retries are quick — but
+// the registration has been seen to lag by seconds, so the schedule runs one
+// doubling past agent.start's, about 6.3s of waiting at worst.
+var promptBackoff = []time.Duration{
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+	400 * time.Millisecond,
+	800 * time.Millisecond,
+	1600 * time.Millisecond,
+	3200 * time.Millisecond,
+}
+
+// PromptBackoffTotal is the whole time the prompt stage can spend waiting
+// between attempts. A caller bounding the stage has to allow for it on top of
+// the round trips themselves.
+func PromptBackoffTotal() time.Duration {
+	var total time.Duration
+	for _, d := range promptBackoff {
+		total += d
+	}
+	return total
+}
+
 // prompt hands the started agent its first prompt.
 //
 // The target is Res.AgentName — the name herdr registered, not the one the plan
 // asked for. There is no fallback: this stage only runs after a successful
 // agent.start, which always leaves a name behind.
 //
+// agent_not_ready is retried on promptBackoff and nothing else is. herdr
+// refuses it before any input reaches the pane, so asking again cannot type
+// the prompt twice. agent_blocked is not retried: the agent is sitting at a
+// dialog a person has to answer.
+//
 // No wait: herdr's agent.prompt accepts a wait object that blocks until the
 // agent reaches a status, and a board must never block on an agent. It is
 // fire-and-forget by design — and if it does fail, the agent is already
 // dispatched, which is why this is the one failure that still moves the lane.
-func (s Sequence) prompt(ctx context.Context, c DispatchClient) Sequence {
-	if err := c.AgentPrompt(ctx, AgentPromptParams{Target: s.Res.AgentName, Text: s.Plan.Prompt}); err != nil {
-		s.Res.Failed, s.Res.Err = StagePrompt, err
-		return s
+func (s Sequence) prompt(ctx context.Context, c DispatchClient, sleep Sleeper) Sequence {
+	if sleep == nil {
+		sleep = SleepCtx
 	}
-	s.Res.Prompted = true
-	return s
+	for attempt := 0; ; attempt++ {
+		err := c.AgentPrompt(ctx, AgentPromptParams{Target: s.Res.AgentName, Text: s.Plan.Prompt})
+		s.Res.Prompt.Attempts = attempt + 1
+		if err == nil {
+			s.Res.Prompted = true
+			return s
+		}
+		if ErrorCode(err) != CodeAgentNotReady || attempt >= len(promptBackoff) {
+			s.Res.Failed, s.Res.Err = StagePrompt, err
+			return s
+		}
+		s.Res.Prompt.NotReady++
+		wait := promptBackoff[attempt]
+		if serr := sleep(ctx, wait); serr != nil {
+			s.Res.Failed, s.Res.Err = StagePrompt, fmt.Errorf("%w (last herdr reply: %w)", serr, err)
+			return s
+		}
+		s.Res.Prompt.Waited += wait
+	}
 }

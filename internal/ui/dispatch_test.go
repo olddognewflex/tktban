@@ -49,6 +49,9 @@ type fakeDispatch struct {
 	startErrs   []error
 	startParams []herdr.AgentStartParams
 
+	// promptErrs is served one per agent.prompt, like startErrs; once it
+	// runs out, promptErr answers every later call.
+	promptErrs   []error
 	promptErr    error
 	promptParams []herdr.AgentPromptParams
 
@@ -84,8 +87,12 @@ func (f *fakeDispatch) AgentStart(_ context.Context, p herdr.AgentStartParams) (
 }
 
 func (f *fakeDispatch) AgentPrompt(_ context.Context, p herdr.AgentPromptParams) error {
+	n := len(f.promptParams)
 	f.calls = append(f.calls, "agent.prompt")
 	f.promptParams = append(f.promptParams, p)
+	if n < len(f.promptErrs) {
+		return f.promptErrs[n]
+	}
 	return f.promptErr
 }
 
