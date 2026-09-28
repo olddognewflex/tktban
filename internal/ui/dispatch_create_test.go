@@ -314,11 +314,12 @@ func TestDispatchFailureMatrix(t *testing.T) {
 			name: "agent.start stays busy for the whole budget",
 			setup: func(m Model, src *fakeDispatch, _ *captureRunner) Model {
 				src.create = createdWorktree()
-				src.startErrs = []error{busy, busy, busy, busy, busy, busy}
+				src.startErrs = []error{busy, busy, busy, busy, busy, busy, busy, busy}
 				return m
 			},
 			wantCalls: []string{"worktree.list", "worktree.create",
-				"agent.start", "agent.start", "agent.start", "agent.start", "agent.start", "agent.start"},
+				"agent.start", "agent.start", "agent.start", "agent.start",
+				"agent.start", "agent.start", "agent.start"},
 			wantStatus:     []string{"worktree is ready", "agent_pane_busy", "Nothing was removed"},
 			wantKind:       "warn",
 			wantTransition: nil,
@@ -738,8 +739,8 @@ func TestDispatchSurvivesABoardRefreshMidSequence(t *testing.T) {
 func TestDispatchStageBudgets(t *testing.T) {
 	want := map[herdr.Stage]time.Duration{
 		herdr.StageWorktree: 15 * time.Second,
-		herdr.StageAgent:    30 * time.Second,
-		herdr.StagePrompt:   10 * time.Second,
+		herdr.StageAgent:    35 * time.Second,
+		herdr.StagePrompt:   15 * time.Second,
 	}
 	for stage, d := range want {
 		if got := dispatchStageBudget(stage); got != d {
@@ -752,16 +753,23 @@ func TestDispatchStageBudgets(t *testing.T) {
 	// backoff has been spent. Otherwise our deadline cuts it short and a herdr
 	// timeout — which names what failed — becomes a closed socket, which cannot
 	// even say whether the agent started.
-	// The prompt stage bounds its retry loop the same way. Its round trips
-	// are fast refusals, so the backoff taking up to two thirds of the stage
-	// still leaves the calls themselves seconds to spare.
-	if got := dispatchStageBudget(herdr.StagePrompt); herdr.PromptBackoffTotal() >= got*2/3 {
-		t.Fatalf("the prompt stage gets %v, too little room beside %v of backoff", got, herdr.PromptBackoffTotal())
-	}
-	needed := time.Duration(herdr.AgentStartTimeoutMS)*time.Millisecond + herdr.AgentStartBackoffTotal()
+	needed := time.Duration(herdr.AgentStartTimeoutMS)*time.Millisecond + herdr.AgentRetryBackoffTotal()
 	if got := dispatchStageBudget(herdr.StageAgent); needed >= got {
 		t.Fatalf("the agent stage gets %v, but herdr's %dms timeout plus %v of backoff needs %v",
-			got, herdr.AgentStartTimeoutMS, herdr.AgentStartBackoffTotal(), needed)
+			got, herdr.AgentStartTimeoutMS, herdr.AgentRetryBackoffTotal(), needed)
+	}
+	// The prompt is a retry loop too now, on the same schedule, so its stage
+	// needs the same kind of room: the whole backoff plus the submission that
+	// follows it. A budget that only covered one round trip — which is what 5s
+	// was — would kill the loop inside the backoff, turning a retryable
+	// agent_not_ready into a deadline nobody can act on.
+	if got := dispatchStageBudget(herdr.StagePrompt); herdr.AgentRetryBackoffTotal() >= got {
+		t.Fatalf("the prompt stage gets %v, less than the %v of backoff its retries can spend",
+			got, herdr.AgentRetryBackoffTotal())
+	}
+	if got, slack := dispatchStageBudget(herdr.StagePrompt), 5*time.Second; got-herdr.AgentRetryBackoffTotal() < slack {
+		t.Fatalf("the prompt stage leaves %v for the submission itself, want at least %v",
+			got-herdr.AgentRetryBackoffTotal(), slack)
 	}
 
 	// And the contexts really are bounded, per stage, as the board mints them.
@@ -786,7 +794,7 @@ func TestDispatchStageBudgets(t *testing.T) {
 	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
 		t.Fatalf("status = %q", m.status)
 	}
-	wantSeen := []time.Duration{15 * time.Second, 30 * time.Second, 10 * time.Second}
+	wantSeen := []time.Duration{15 * time.Second, 35 * time.Second, 15 * time.Second}
 	if !slices.Equal(seen, wantSeen) {
 		t.Fatalf("stage budgets minted = %v, want %v", seen, wantSeen)
 	}
@@ -1609,39 +1617,6 @@ func TestDispatchRecordsTheAttemptsOnASuccessfulRetry(t *testing.T) {
 	_ = m
 }
 
-// A prompt that met agent_not_ready and then landed says how long it waited,
-// and a prompt that landed first time says nothing about it.
-func TestDispatchRecordsThePromptRetries(t *testing.T) {
-	notReady := &herdr.APIError{Code: herdr.CodeAgentNotReady, Message: "agent tkt-1 is not an active named agent"}
-	recordSleeps(t)
-	m, src, cr := dispatchBoard(t)
-	src.create, src.start = createdWorktree(), startedAgent()
-	src.promptErrs = []error{notReady, notReady}
-
-	m = dispatchOnce(t, m)
-
-	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
-		t.Fatalf("status = %q", m.status)
-	}
-	c := cr.last("comment")
-	if c == nil {
-		t.Fatal("no comment")
-	}
-	for _, want := range []string{"prompt retry: 3 attempts, 2 not ready, waited 300ms", "prompt: sent"} {
-		if !strings.Contains(c[2], want) {
-			t.Errorf("comment does not contain %q:\n%s", want, c[2])
-		}
-	}
-
-	m2, src2, cr2 := dispatchBoard(t)
-	src2.create, src2.start = createdWorktree(), startedAgent()
-	m2 = dispatchOnce(t, m2)
-	if c := cr2.last("comment"); c == nil || strings.Contains(c[2], "prompt retry:") {
-		t.Errorf("a clean prompt still reported retries:\n%v", c)
-	}
-	_ = m2
-}
-
 // ---- $EDITOR must not land on top of a dispatch ----
 
 // N and E are asynchronous like v and n, and this one does not open a modal at
@@ -1674,5 +1649,266 @@ func TestDispatchRefusesToLaunchTheEditorMidSequence(t *testing.T) {
 	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
 	if n := countCalls(cr, "apply"); n != 0 {
 		t.Fatalf("tkt apply ran %d times during a dispatch", n)
+	}
+}
+
+// ---- the prompt's retry budget, through the board ----
+//
+// The first live dispatch (TKB-27) created its worktree, started its agent, and
+// then dropped the prompt: `agent.prompt failed — agent_not_ready: agent tkb-27
+// is not an active named agent`. The agent sat idle waiting to be told
+// something until a human pasted the prompt in by hand. `herdr agent list`
+// afterwards showed tkb-27 registered and working — the name was right, herdr
+// just was not ready when we asked, once.
+
+// notReady is herdr's answer while the named-agent registry catches up.
+func notReady(name string) error {
+	return &herdr.APIError{
+		Code:    herdr.CodeAgentNotReady,
+		Message: "agent " + name + " is not an active named agent",
+	}
+}
+
+// Two not-ready replies then a success: three agent.prompt calls, the documented
+// delays, and a comment that says the prompt was sent — because it was.
+func TestDispatchRetriesAPromptHerdrIsNotReadyFor(t *testing.T) {
+	waits := recordSleeps(t)
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.promptErrs = []error{notReady("tkt-1"), notReady("tkt-1")}
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start",
+		"agent.prompt", "agent.prompt", "agent.prompt")
+	want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}
+	if !slices.Equal(*waits, want) {
+		t.Fatalf("waits = %v, want %v", *waits, want)
+	}
+	// Every attempt asks for the same thing. A retry that resent altered params
+	// would be the worst bug available here: half a prompt, twice.
+	for i, p := range src.promptParams {
+		if p.Target != "tkt-1" || p.Text != src.promptParams[0].Text {
+			t.Errorf("prompt attempt %d = %+v", i, p)
+		}
+	}
+
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment")
+	}
+	if !strings.Contains(comment[2], "prompt: sent") {
+		t.Errorf("the comment does not record the prompt as sent:\n%s", comment[2])
+	}
+	if strings.Contains(comment[2], "NOT sent") {
+		t.Errorf("the comment says NOT sent for a prompt that landed:\n%s", comment[2])
+	}
+	if !strings.Contains(comment[2], "prompt attempts: 3 attempts, 2 not ready, 0 busy, waited 300ms") {
+		t.Errorf("the comment does not account for the retries:\n%s", comment[2])
+	}
+	// The lane still moves, and the status says the prompt needed a nudge.
+	if call := cr.last("transition"); !slices.Equal(call, []string{"transition", "TKT-1", "done"}) {
+		t.Errorf("tkt transition = %v", call)
+	}
+	if !strings.Contains(m.status, "prompt sent on attempt 3") {
+		t.Errorf("status = %q, want it to account for the retries", m.status)
+	}
+	if m.statusKind != "" {
+		t.Errorf("status kind = %q, want a plain status: the dispatch worked", m.statusKind)
+	}
+}
+
+// A clean first prompt says nothing about attempts, rather than "1 attempt".
+func TestDispatchSaysNothingAboutAPromptThatLandedFirstTime(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m = dispatchOnce(t, m)
+	if c := cr.last("comment"); c == nil || strings.Contains(c[2], "prompt attempts:") {
+		t.Fatalf("comment = %v", c)
+	}
+	if strings.Contains(m.status, "prompt sent on attempt") {
+		t.Errorf("status = %q", m.status)
+	}
+	_ = src
+}
+
+// The live failure as it would happen now: the budget is spent and the prompt
+// still is not accepted. The agent IS dispatched, so the lane moves and the
+// ticket is annotated; only the prompt is the person's to paste.
+func TestDispatchPromptExhaustsItsBudget(t *testing.T) {
+	waits := recordSleeps(t)
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.promptErr = notReady("tkt-1") // every attempt
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start",
+		"agent.prompt", "agent.prompt", "agent.prompt", "agent.prompt",
+		"agent.prompt", "agent.prompt", "agent.prompt")
+	wantWaits := []time.Duration{
+		100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond,
+		800 * time.Millisecond, 1600 * time.Millisecond, 3200 * time.Millisecond,
+	}
+	if !slices.Equal(*waits, wantWaits) {
+		t.Fatalf("waits = %v, want %v", *waits, wantWaits)
+	}
+
+	// The outcome the matrix already promises for a failed prompt, unchanged.
+	for _, want := range []string{
+		"Dispatched TKT-1 to tkt-1",
+		"the first prompt did not land",
+		"agent_not_ready",
+		"is not an active named agent",
+		"tried 7 times",
+		"o focuses the pane so you can paste it",
+		"moved to Done",
+	} {
+		if !strings.Contains(m.status, want) {
+			t.Errorf("status = %q, want it to contain %q", m.status, want)
+		}
+	}
+	if m.statusKind != "warn" {
+		t.Errorf("status kind = %q", m.statusKind)
+	}
+	if call := cr.last("transition"); !slices.Equal(call, []string{"transition", "TKT-1", "done"}) {
+		t.Fatalf("tkt transition = %v, want the lane to move: the agent is dispatched", call)
+	}
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment: a dropped prompt has to be diagnosable from the ticket")
+	}
+	for _, want := range []string{
+		"prompt: NOT sent — paste it into the pane by hand",
+		"prompt attempts: 7 attempts, 7 not ready, 0 busy, waited 6.3s",
+		"agent_not_ready",
+	} {
+		if !strings.Contains(comment[2], want) {
+			t.Errorf("the comment is missing %q:\n%s", want, comment[2])
+		}
+	}
+	if strings.Contains(comment[2], "prompt: sent") {
+		t.Errorf("the comment claims a prompt that never landed:\n%s", comment[2])
+	}
+}
+
+// agent_blocked is not retried. herdr rejects the submission before sending any
+// input because the agent is at an approval or question dialog: asking again
+// cannot help while it is up, and once a human dismisses it the prompt would go
+// into whatever replaced it.
+func TestDispatchDoesNotRetryABlockedPrompt(t *testing.T) {
+	waits := recordSleeps(t)
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.promptErr = &herdr.APIError{Code: herdr.CodeAgentBlocked, Message: "agent is blocked"}
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if len(*waits) != 0 {
+		t.Fatalf("a blocked agent was retried after waiting %v", *waits)
+	}
+	if !strings.Contains(m.status, "agent_blocked") {
+		t.Errorf("status = %q, want agent_blocked by name", m.status)
+	}
+	if strings.Contains(m.status, "tried") && !strings.Contains(m.status, "tried once") {
+		t.Errorf("status = %q implies more than one attempt", m.status)
+	}
+	// One attempt, so no attempts line: it would only add noise.
+	if c := cr.last("comment"); c == nil || strings.Contains(c[2], "prompt attempts:") {
+		t.Errorf("comment = %v", c)
+	}
+	// agent_prompt_failed is not retried either, for a different reason: herdr
+	// may have written part of the submission already.
+	m2, src2, _ := dispatchBoard(t)
+	src2.create, src2.start = createdWorktree(), startedAgent()
+	src2.promptErr = &herdr.APIError{Code: herdr.CodeAgentPromptFailed, Message: "write failed"}
+	m2 = dispatchOnce(t, m2)
+	assertHerdrCalls(t, src2, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if !strings.Contains(m2.status, "agent_prompt_failed") {
+		t.Errorf("status = %q", m2.status)
+	}
+}
+
+// A prompt our own deadline cut short must not claim it did not land — the text
+// may have gone in, and "paste it again" on a prompt that arrived gives the
+// agent the same instruction twice.
+func TestDispatchPromptWithNoAnswerAdmitsItMayHaveLanded(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.promptErr = context.DeadlineExceeded
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	for _, want := range []string{
+		"Dispatched TKT-1 to tkt-1",
+		"agent.prompt did not answer",
+		"may or may not have landed",
+		"check the pane (o) before pasting it again",
+	} {
+		if !strings.Contains(m.status, want) {
+			t.Errorf("status = %q, want it to contain %q", m.status, want)
+		}
+	}
+	if strings.Contains(m.status, "the first prompt did not land") {
+		t.Errorf("status = %q asserts something a deadline cannot tell us", m.status)
+	}
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment")
+	}
+	if !strings.Contains(comment[2], "prompt: may or may not have been sent") {
+		t.Errorf("the comment does not admit the uncertainty:\n%s", comment[2])
+	}
+	if strings.Contains(comment[2], "NOT sent — paste it") {
+		t.Errorf("the comment contradicts its own header:\n%s", comment[2])
+	}
+	// The agent is dispatched either way, so the lane still moves.
+	if call := cr.last("transition"); !slices.Equal(call, []string{"transition", "TKT-1", "done"}) {
+		t.Errorf("tkt transition = %v", call)
+	}
+}
+
+// The whole live scenario end to end: a slow shell AND a lagging registry, which
+// is what one machine actually did. Both budgets absorb it and the dispatch
+// comes out clean.
+func TestDispatchSurvivesASlowShellAndALaggingRegistry(t *testing.T) {
+	busy := &herdr.APIError{Code: herdr.CodeAgentPaneBusy, Message: "pane is not at a shell prompt"}
+	waits := recordSleeps(t)
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.startErrs = []error{busy, busy, busy, busy}                // the observed 4
+	src.promptErrs = []error{notReady("tkt-1"), notReady("tkt-1")} // then the registry lag
+
+	m = dispatchOnce(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create",
+		"agent.start", "agent.start", "agent.start", "agent.start", "agent.start",
+		"agent.prompt", "agent.prompt", "agent.prompt")
+	// The start's four, then the prompt's two — each loop starts its schedule
+	// afresh, because each is waiting on a different thing.
+	wantWaits := []time.Duration{
+		100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond,
+		100 * time.Millisecond, 200 * time.Millisecond,
+	}
+	if !slices.Equal(*waits, wantWaits) {
+		t.Fatalf("waits = %v, want %v", *waits, wantWaits)
+	}
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") || m.statusKind != "" {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+	comment := cr.last("comment")
+	if comment == nil {
+		t.Fatal("no comment")
+	}
+	for _, want := range []string{
+		"agent start: 5 attempts, 4 busy, 0 renamed, waited 1.5s",
+		"prompt attempts: 3 attempts, 2 not ready, 0 busy, waited 300ms",
+		"prompt: sent",
+	} {
+		if !strings.Contains(comment[2], want) {
+			t.Errorf("the comment is missing %q:\n%s", want, comment[2])
+		}
 	}
 }

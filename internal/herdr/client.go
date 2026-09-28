@@ -329,14 +329,18 @@ const (
 	// yet, so the start is retried rather than failed.
 	CodeAgentPaneBusy  = "agent_pane_busy"
 	CodeAgentNameTaken = "agent_name_taken"
-	CodeAgentBlocked   = "agent_blocked"
-	// agent_not_ready means the target is not yet an active named agent.
-	// agent.start can return before herdr has finished registering the name
-	// it just gave, so the first agent.prompt straight after a start can meet
-	// it, and the prompt stage retries it. (herdr's docs also say agent.start
-	// itself answers agent_not_ready for an agent blocked during startup;
-	// that path is not retried.)
-	CodeAgentNotReady        = "agent_not_ready"
+	// CodeAgentNotReady is "the agent is there but not accepting interactive
+	// input yet". herdr's own guidance is "wait until the agent becomes idle
+	// before prompting it", so it is retried rather than failed — see
+	// PromptAgentWithRetry, and docs/herdr-events.md for the live evidence.
+	CodeAgentNotReady = "agent_not_ready"
+	// CodeAgentPromptFailed is a submission that failed part-way. herdr writes
+	// the text and the encoded Enter as one ordered submission and reports
+	// success only once both are through, so a failure may have left some of
+	// the prompt in the pane. It is therefore NOT retried: typing it again
+	// could append to a half-delivered prompt.
+	CodeAgentPromptFailed    = "agent_prompt_failed"
+	CodeAgentBlocked         = "agent_blocked"
 	CodeInvalidAgentName     = "invalid_agent_name"
 	CodeInvalidAgentArgument = "invalid_agent_argument"
 )
@@ -524,6 +528,9 @@ func (c *Client) AgentStart(ctx context.Context, p AgentStartParams) (AgentStart
 // AgentPromptParams sends text to a started agent. Target is a pane id or an
 // agent name. herdr also accepts a `wait` object ({until, timeout_ms}); it is
 // left off, because a board must not block on an agent reaching a status.
+//
+// Leaving `wait` off also means agent_prompt_stalled and timeout — the two
+// codes herdr documents for a waited submission — cannot arrive here at all.
 type AgentPromptParams struct {
 	Target string `json:"target"`
 	Text   string `json:"text"`

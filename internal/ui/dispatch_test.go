@@ -49,7 +49,7 @@ type fakeDispatch struct {
 	startErrs   []error
 	startParams []herdr.AgentStartParams
 
-	// promptErrs is served one per agent.prompt, like startErrs; once it
+	// promptErrs is served one per agent.prompt call, oldest first; once it
 	// runs out, promptErr answers every later call.
 	promptErrs   []error
 	promptErr    error

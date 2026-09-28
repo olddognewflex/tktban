@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -344,26 +345,28 @@ func dispatchRefusalText(plan herdr.Plan, err error) string {
 // dispatchAgentTimeout bounds the agent stage, and the stage is the whole retry
 // loop rather than one call — so it has to cover herdr's own
 // AgentStartTimeoutMS (20s) PLUS the backoff the loop may have spent getting to
-// its last attempt (herdr.AgentStartBackoffTotal, 3.1s), with margin. 25s would
-// have left the final attempt 1.9s, which is the wrong way round: herdr's timer
-// must fire first, because a herdr timeout is a typed error naming what failed,
-// while ours is a closed socket that cannot even say whether the agent started.
+// its last attempt (herdr.AgentRetryBackoffTotal, 6.3s), with margin. Too small
+// and herdr's timer is no longer the one that fires, which is the wrong way
+// round: a herdr timeout is a typed error naming what failed, while ours is a
+// closed socket that cannot even say whether the agent started.
 //
 // What it deliberately does not cover is every attempt burning a full 20s in
 // turn. That cannot happen: agent_pane_busy is herdr answering immediately, so
 // a run that retries is a run of fast replies, and the only attempt that can
 // take 20s is one herdr is actually working on.
 //
-// A test asserts the relation rather than the number, so changing the schedule
-// cannot quietly invert it again.
+// dispatchPromptTimeout has the same shape for the same reason. It used to be
+// 5s because the prompt was one socket round trip; it is now a retry loop of its
+// own (a successful agent.start does not mean herdr will accept a prompt yet),
+// so 5s would have killed it inside the backoff. It covers the 6.3s schedule
+// plus room for the submission itself, which herdr notes grows with prompt size.
 //
-// dispatchPromptTimeout is the same shape: agent.prompt is retried while
-// herdr says the just-started agent is not ready yet, so the stage covers
-// herdr.PromptBackoffTotal (3.1s) plus the round trips, with margin.
+// Tests assert the relations rather than the numbers, so changing the schedule
+// cannot quietly invert either of them.
 const (
 	dispatchWorktreeTimeout = 15 * time.Second
-	dispatchAgentTimeout    = 30 * time.Second
-	dispatchPromptTimeout   = 10 * time.Second
+	dispatchAgentTimeout    = 35 * time.Second
+	dispatchPromptTimeout   = 15 * time.Second
 	dispatchWriteTimeout    = 5 * time.Second
 )
 
@@ -689,6 +692,15 @@ func dispatchStageLabel(seq herdr.Sequence) string {
 	return "Finishing up…"
 }
 
+// attemptCount words a try count, so a status line reads "tried 7 times"
+// rather than "tried 7".
+func attemptCount(n int) string {
+	if n == 1 {
+		return "once"
+	}
+	return strconv.Itoa(n) + " times"
+}
+
 // dispatchLaneName is the plan's target lane, falling back to the role key so
 // a message never comes out blank.
 func dispatchLaneName(plan herdr.Plan) string {
@@ -802,12 +814,20 @@ func dispatchStatusText(rep dispatchReport) (string, string) {
 			" but the agent did not start — " + dispatchFailureText(res) +
 			". Nothing was removed and " + plan.Key + " did not move")
 
+	case res.Failed == herdr.StagePrompt && !herdrRefused(res.Err):
+		// herdr never settled it, so we do not know whether the text went in.
+		// That matters more here than anywhere else: "paste it again" on a
+		// prompt that did arrive gives the agent the same instruction twice.
+		b.WriteString("Dispatched " + plan.Key + " to " + res.AgentName +
+			", but " + dispatchFailureText(res) +
+			" — the first prompt may or may not have landed, so check the pane (o) before pasting it again")
+
 	case res.Failed == herdr.StagePrompt:
 		// The agent IS dispatched, so this is a partial success: the lane
 		// moves and the prompt is the person's to paste.
 		b.WriteString("Dispatched " + plan.Key + " to " + res.AgentName +
 			", but the first prompt did not land — " + dispatchFailureText(res) +
-			". o focuses the pane so you can paste it")
+			" (tried " + attemptCount(res.Prompt.Attempts) + "). o focuses the pane so you can paste it")
 
 	default:
 		kind = ""
@@ -823,6 +843,11 @@ func dispatchStatusText(rep dispatchReport) (string, string) {
 		}
 		if res.Start.Renamed > 0 {
 			b.WriteString(" (the name " + herdr.AgentName(plan.Key) + " was taken)")
+		}
+		if res.Prompt.Attempts > 1 {
+			// The prompt is the step that silently did nothing before it had a
+			// retry budget, so a dispatch that needed one says so.
+			b.WriteString(", prompt sent on attempt " + strconv.Itoa(res.Prompt.Attempts))
 		}
 	}
 
@@ -932,14 +957,21 @@ func dispatchCommentBody(rep dispatchReport) string {
 		line("agent start", fmt.Sprintf("%d attempts, %d busy, %d renamed, waited %s",
 			res.Start.Attempts, res.Start.Busy, res.Start.Renamed, res.Start.Waited))
 	}
-	if res.Prompt.Attempts > 1 {
-		line("prompt retry", fmt.Sprintf("%d attempts, %d not ready, waited %s",
-			res.Prompt.Attempts, res.Prompt.NotReady, res.Prompt.Waited))
-	}
-	if res.Prompted {
+	switch {
+	case res.Prompted:
 		line("prompt", "sent")
-	} else if res.Started {
+	case res.Started && res.Failed == herdr.StagePrompt && !herdrRefused(res.Err):
+		line("prompt", "may or may not have been sent: herdr did not answer. "+
+			"Check the pane before pasting it again, in case it arrived")
+	case res.Started:
 		line("prompt", "NOT sent — paste it into the pane by hand")
+	}
+	// Same reasoning as the start's line, and the same both-paths rule: this is
+	// the number that would have made the first live failure diagnosable from
+	// the ticket alone.
+	if res.Prompt.Attempts > 1 {
+		line("prompt attempts", fmt.Sprintf("%d attempts, %d not ready, %d busy, waited %s",
+			res.Prompt.Attempts, res.Prompt.NotReady, res.Prompt.Busy, res.Prompt.Waited))
 	}
 	switch {
 	case rep.laneMoved:

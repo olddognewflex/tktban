@@ -336,8 +336,8 @@ goes ahead.
 | Stage | Call | What it does |
 |-------|------|--------------|
 | 1 | `worktree.create` (or `worktree.open`) | cuts the branch from the base and opens a worktree for it, in a new herdr workspace with a tab and a pane at a shell. **herdr chooses the path** — tktban sends none, so a dispatched worktree lands under `[worktrees] directory` (default `~/.herdr/worktrees`) beside the ones you make by hand. If the preflight already saw the branch checked out, this is `worktree.open` instead and the existing worktree is rejoined rather than a second one cut. |
-| 2 | `agent.start` | starts the agent in that pane, named after the ticket (`TKB-25` → `tkb-25`), which is what makes it recognisable in herdr's own agent list. No herdr method opens a pane *at* a command, so this is necessarily a second step — and the pane exists before its login shell reaches a prompt, so herdr answers `agent_pane_busy` until it does. tktban retries five times at 100/200/400/800/1600 ms (about 3.1 s in all); a shell with a prompt framework and a version manager takes about half a second. A name already held by a live agent (`agent_name_taken`) gets one retry as `tkb-25-2`, out of the same budget. |
-| 3 | `agent.prompt` | types the first prompt in. `agent.start` can return before herdr has registered the agent's name, and until it has `agent.prompt` answers `agent_not_ready` — refused before anything is typed — so that one code is retried on a 100 ms…3.2 s schedule (about 6.3 s at worst). No `wait` is sent: a board must never block on an agent's status. |
+| 2 | `agent.start` | starts the agent in that pane, named after the ticket (`TKB-25` → `tkb-25`), which is what makes it recognisable in herdr's own agent list. No herdr method opens a pane *at* a command, so this is necessarily a second step — and the pane exists before its login shell reaches a prompt, so herdr answers `agent_pane_busy` until it does. tktban retries six times at 100/200/400/800/1600/3200 ms (6.3 s in all); the first real dispatch needed five attempts and 1.5 s on a shell with a prompt framework and a version manager in its rc files. A name already held by a live agent (`agent_name_taken`) gets one retry as `tkb-25-2`, out of the same budget. |
+| 3 | `agent.prompt` | types the first prompt in. No `wait` is sent: a board must never block on an agent's status. **This retries too.** A successful `agent.start` means herdr detected the agent, not that it will accept a prompt - the active-named-agent registry lags, and herdr answers `agent_not_ready` until it catches up. Same schedule as the start. `agent_blocked` is never retried (herdr refuses before sending anything, so a retry would type into whatever dialog is up), and nor is a submission that failed part-way, which may have left half the prompt in the pane. |
 | 4 | `tkt transition` | moves the ticket to the target lane — only when the agent actually started, and only when the ticket is still in the lane the plan was built for. |
 | 5 | `tkt comment` | records the whole thing on the ticket: branch, worktree path, workspace, tab and pane ids, agent name and the argv herdr ran, whether the prompt landed, and what happened to the lane. |
 
@@ -376,19 +376,19 @@ dispatch may be incomplete.
 | the worktree was made but herdr's reply carried no pane | The worktree **does** exist, so nothing says otherwise: the status names the path it is still at and the comment records it, while the agent bullet says the dispatch stopped before `agent.start`. No transition, nothing removed. |
 | `agent.start` refused by herdr, after the worktree exists | No rollback: the worktree, workspace and pane stay. The lane does not move. The comment records the branch, the worktree path, the workspace id, the pane id, the name it tried and the error; the status says the worktree is ready but the agent did not start. |
 | `agent.start` never answered (closed socket, deadline) | The same, except that nothing claims the agent did not start — we cannot know. The status and the comment both say it **may or may not** be running and to check the pane with `o` before dispatching again. |
-| `agent.prompt` | The agent **is** dispatched, so the transition and the comment still run. The status says the prompt did not land and that `o` focuses the pane so you can paste it yourself; `agent_blocked` is reported by name. |
+| `agent.prompt` refused for the whole budget | The agent **is** dispatched, so the transition and the comment still run. The status says the prompt did not land, how many times it was tried, and that `o` focuses the pane so you can paste it yourself; `agent_not_ready` and `agent_blocked` are reported by name. |
+| `agent.prompt` never answered | The same, except that nothing claims the prompt did not land - the text may have gone in. The status and the comment both say it **may or may not** have arrived and to check the pane before pasting it again, because pasting a prompt that did arrive gives the agent the same instruction twice. |
 | `tkt transition` | Still comments. The status says dispatched but the lane did not move. |
 | `tkt comment` | A warning on the status line only. It never blocks and never undoes anything. |
 | herdr unreachable, or a deadline mid-sequence | The comment says the dispatch may be incomplete. The worktree step is **not** retried. |
 | the ticket left the dispatch source lane meanwhile | It is dispatched, and the lane is left alone — moving it from wherever it is now to the plan's target is not the move you agreed to. The status and the comment both say which lane it is in now. A card that has merely been *filtered* out of sight is not treated as having moved; one that has vanished from an unfiltered board is. |
 
-Each stage has its own budget: 15 s for the worktree, 30 s for `agent.start`,
-10 s for the prompt (its retry loop
-included) and 5 s for each `tkt` call. The agent budget covers the
-whole retry loop, so it is herdr's own 20 s startup timeout *plus* the 3.1 s of
-backoff the loop may have spent getting to its last attempt, with margin —
-herdr's timer has to be the one that fires, because a herdr timeout is a typed
-error naming what broke, while ours is a closed socket that cannot even say
+Each stage has its own budget: 15 s for the worktree, 35 s for `agent.start`,
+15 s for the prompt and 5 s for each `tkt` call. Both agent budgets cover a whole
+retry loop rather than one call: the start's is herdr's own 20 s startup timeout
+*plus* the 6.3 s of backoff the loop may spend getting to its last attempt, with
+margin - herdr's timer has to be the one that fires, because a herdr timeout is a
+typed error naming what broke, while ours is a closed socket that cannot even say
 whether the agent started.
 
 **Only one dispatch runs at a time.** `D` and the confirm both refuse while one
@@ -400,11 +400,14 @@ swallowing keys is not relied on as the only lock — it can be displaced, and a
 second dispatch of one ticket would `worktree.open` into the same pane and start
 a second agent on one branch.
 
-**When the retries took a while, the comment says so.** A dispatch that spent
-three seconds being told the shell was not ready records
-`agent start: 4 attempts, 3 busy, 0 renamed, waited 700ms` (and a prompt that
-had to wait, `prompt retry: 3 attempts, 2 not ready, waited 300ms`), on the failure path
-as well as the successful one — one attempt and six are very different stories.
+**When the retries took a while, the comment says so.** A dispatch that spent a
+second and a half being told the shell was not ready records
+`agent start: 5 attempts, 4 busy, 0 renamed, waited 1.5s`, and one whose prompt
+had to wait for the agent registry records
+`prompt attempts: 3 attempts, 2 not ready, 0 busy, waited 300ms`. Both lines
+appear on the failure path as well as the successful one - one attempt and seven
+are very different stories, and the first live failure was not diagnosable from
+the ticket without them.
 
 **It is off by default.** `dispatch` in tktban's settings file defaults to
 `false` and the board never writes it — like `notify`, it is a hand edit:
