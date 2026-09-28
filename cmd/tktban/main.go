@@ -98,9 +98,14 @@ func run(argv []string) int {
 var doctor = func(tk *tkt.Tkt) int {
 	okAll := true
 	for _, c := range tk.Doctor() {
+		// A hint is advice about something optional; it passes, so it never
+		// changes the exit status.
 		mark := "ok  "
-		if !c.OK {
+		switch {
+		case !c.OK:
 			mark = "FAIL"
+		case c.Hint:
+			mark = "hint"
 		}
 		line := fmt.Sprintf("[%s] %s", mark, c.Name)
 		if c.Detail != "" {

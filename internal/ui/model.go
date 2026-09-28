@@ -8,6 +8,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -97,6 +98,23 @@ type Model struct {
 	// dispatches into one nonsensical report.
 	dispatchRun int
 
+	// archiveDays is the auto-archive threshold: a ticket in done this many
+	// days is swept to the archived lane after a refresh. <= 0 is off.
+	// archiving is true while a sweep is in flight, so a refresh landing
+	// meanwhile cannot start a second one over the same tickets. swept is
+	// every key a sweep has been started for and settled — moved, or failed
+	// to move — kept for the life of the board: a transition that failed is
+	// not retried until restart, which is what stops a broken transition from
+	// being retried on every refresh. release is the keys the last sweep did
+	// not settle (skipped, or not re-read); they stay swept through the
+	// sweep's own follow-up refresh and are let go on the load after it, so
+	// that refresh cannot start the same sweep again — which is what makes it
+	// terminate — while a later one still can.
+	archiveDays float64
+	archiving   bool
+	swept       map[string]bool
+	release     []string
+
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person
 	// typed it (--select) rather than it being read off a git branch
@@ -145,8 +163,15 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 	// map, so the first Save (a theme cycle or a hide/show toggle) persists it
 	// rather than clobbering it with an empty value; from then on the persisted
 	// value is authoritative and the config default is ignored.
+	//
+	// The archived role is hidden by default (settings.Defaults), and a config
+	// default that does not name it is widened to include it, so a board that
+	// hides some lanes of its own still keeps the archive out of the way.
 	if !fileExists(settingsPath) {
 		if def := tk.BoardHiddenRoles(); len(def) > 0 {
+			if !slices.Contains(def, model.RoleArchived) {
+				def = append(def, model.RoleArchived)
+			}
 			s["hidden_roles"] = strings.Join(def, ",")
 		}
 	}
@@ -165,7 +190,35 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 		styles:       newStyles(th),
 		refreshSecs:  secs,
 		autoOn:       autoRefresh && refreshInterval > 0,
+		archiveDays:  archiveThreshold(s["archive_after_days"]),
+		swept:        map[string]bool{},
 	}
+}
+
+// defaultArchiveDays is the threshold a board uses when archive_after_days is
+// not a number.
+const defaultArchiveDays = 7
+
+// archiveThreshold reads the archive_after_days setting. Settings loaded from
+// disk hold an int64 (or a float64 for "7.5"), Defaults an int; anything that
+// is not a number falls back to the default rather than switching the sweep
+// off, since off is something to ask for with 0, not to arrive at by typo. A
+// negative value is off, like 0.
+func archiveThreshold(v any) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case float64:
+		return n
+	}
+	return defaultArchiveDays
+}
+
+// refreshCmd is the board's refresh, carrying its auto-archive threshold.
+func (m Model) refreshCmd() tea.Cmd {
+	return refreshCmd(m.tkt, m.filter, m.archiveDays)
 }
 
 // fileExists reports whether path is an existing file (used to detect a board's
@@ -177,7 +230,7 @@ func fileExists(path string) bool {
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
-		refreshCmd(m.tkt, m.filter),
+		m.refreshCmd(),
 		tickCmd(secondsToDuration(m.refreshSecs)),
 		m.liveInit(),
 		m.selectInit(),
@@ -201,12 +254,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case boardMsg:
 		return m.onBoard(msg)
 
+	case archiveMsg:
+		return m.onArchive(msg)
+
 	case writeMsg:
 		if msg.err != nil {
 			return m.fail(msg.err)
 		}
 		cmd := m.setStatus(msg.success, "")
-		return m, tea.Batch(cmd, refreshCmd(m.tkt, m.filter))
+		return m, tea.Batch(cmd, m.refreshCmd())
 
 	case ticketMsg:
 		if msg.err != nil {
@@ -282,7 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.filter = filterState{assignee: msg.assignee, prefix: msg.prefix}
-		return m, refreshCmd(m.tkt, m.filter)
+		return m, m.refreshCmd()
 
 	case editResultMsg:
 		m.modal = nil
@@ -304,7 +360,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		var cmd tea.Cmd
 		if m.autoOn && m.modal == nil {
-			cmd = refreshCmd(m.tkt, m.filter)
+			cmd = m.refreshCmd()
 		}
 		return m, tea.Batch(cmd, tickCmd(secondsToDuration(m.refreshSecs)))
 
@@ -387,7 +443,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "r":
-		return m, refreshCmd(m.tkt, m.filter)
+		return m, m.refreshCmd()
 	case "a":
 		m.autoOn = !m.autoOn
 		label := "Auto-refresh off"
@@ -541,10 +597,87 @@ func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
 	// so it is what stays on screen when both happen; the selection itself
 	// still moved, and both status timers are armed.
 	sel := m.applySelectKey()
-	if msg.warn != "" {
-		return m, tea.Batch(sel, m.setStatus(msg.warn, "warn"))
+	archive := m.startArchive(msg.archive)
+	for _, k := range m.release {
+		delete(m.swept, k)
 	}
-	return m, sel
+	m.release = nil
+	if msg.warn != "" {
+		return m, tea.Batch(sel, m.setStatus(msg.warn, "warn"), archive)
+	}
+	return m, tea.Batch(sel, archive)
+}
+
+// startArchive starts a sweep over the candidates a refresh found, less any
+// already swept. It is started after the board is rendered, never instead of
+// it. Keys are marked swept when the sweep starts, not when it finishes, so a
+// refresh that lands while it is in flight does not queue them again.
+func (m *Model) startArchive(candidates []string) tea.Cmd {
+	if m.archiving {
+		return nil
+	}
+	var pending []string
+	for _, k := range candidates {
+		if !m.swept[k] {
+			pending = append(pending, k)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	for _, k := range pending {
+		m.swept[k] = true
+	}
+	m.archiving = true
+	return archiveCmd(m.tkt, pending, m.archiveDays)
+}
+
+// onArchive reports a finished sweep on the status line and refreshes once
+// more — so archived cards leave the Done column, and so candidates a refresh
+// found while this sweep was in flight (and could not start) are picked up.
+// That refresh ends: every key this sweep took is still swept when it lands.
+// A failure is a warning: the board is already rendered, and a ticket that
+// could not be archived is still a ticket on the board.
+func (m Model) onArchive(msg archiveMsg) (tea.Model, tea.Cmd) {
+	m.archiving = false
+	m.release = append(m.release, msg.release...)
+	n := len(msg.archived)
+	if n == 0 && len(msg.failed) == 0 && len(msg.commentFailed) == 0 {
+		return m, m.refreshCmd() // every candidate had already moved on
+	}
+	text := "archived " + plural(n, "ticket")
+	kind := ""
+	if len(msg.failed) > 0 {
+		text += fmt.Sprintf("; %d failed: %s", len(msg.failed), joinErrors(msg.failed))
+		kind = "warn"
+	}
+	if len(msg.commentFailed) > 0 {
+		text += "; comment failed on " + joinErrors(msg.commentFailed)
+		kind = "warn"
+	}
+	return m, tea.Batch(m.setStatus(text, kind), m.refreshCmd())
+}
+
+// plural is "1 ticket" or "3 tickets".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// joinErrors renders a key→error map as "KEY: err; KEY: err", in key order.
+func joinErrors(errs map[string]string) string {
+	keys := make([]string, 0, len(errs))
+	for k := range errs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + ": " + errs[k]
+	}
+	return strings.Join(parts, "; ")
 }
 
 // selectKeyMsg carries a ticket key that was derived off the UI loop.
@@ -631,10 +764,10 @@ func (m Model) onCreate(msg createMsg) (tea.Model, tea.Cmd) {
 	if msg.labelErr != "" {
 		label += ", but labels not applied: " + msg.labelErr
 		cmd := m.setStatus(label, "warn")
-		return m, tea.Batch(cmd, refreshCmd(m.tkt, m.filter))
+		return m, tea.Batch(cmd, m.refreshCmd())
 	}
 	cmd := m.setStatus(label, "")
-	return m, tea.Batch(cmd, refreshCmd(m.tkt, m.filter))
+	return m, tea.Batch(cmd, m.refreshCmd())
 }
 
 func (m Model) fail(err error) (tea.Model, tea.Cmd) {
@@ -734,14 +867,40 @@ func (m Model) hideFocusedColumn() (tea.Model, tea.Cmd) {
 	return m, m.persistHidden("Hid " + lane + " (X shows all)")
 }
 
-// showAllColumns clears the hidden set and persists it.
+// showAllColumns shows every column on this board and persists the hidden set.
+// Roles this board does not have stay hidden — the default archived role on a
+// board without one — so they still apply if the role is added later. Before
+// the first load there is no board to compare against, so any hidden role
+// counts and all of them are cleared.
 func (m Model) showAllColumns() (tea.Model, tea.Cmd) {
-	if len(m.hidden) == 0 {
+	if (!m.loaded && len(m.hidden) == 0) || (m.loaded && !m.hidesAny()) {
 		return m, m.setStatus("No hidden columns", "")
 	}
-	m.hidden = map[string]bool{}
+	keep := map[string]bool{}
+	if m.loaded {
+		onBoard := make(map[string]bool, len(m.allColumns))
+		for _, c := range m.allColumns {
+			onBoard[c.Role] = true
+		}
+		for r := range m.hidden {
+			if !onBoard[r] {
+				keep[r] = true
+			}
+		}
+	}
+	m.hidden = keep
 	m.applyHidden()
 	return m, m.persistHidden("Showing all columns")
+}
+
+// hidesAny reports whether the hidden set hides a column this board has.
+func (m Model) hidesAny() bool {
+	for _, c := range m.allColumns {
+		if m.hidden[c.Role] {
+			return true
+		}
+	}
+	return false
 }
 
 // settingsFile is the settings file this board actually reads and writes,

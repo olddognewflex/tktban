@@ -309,3 +309,25 @@ func TestDispatchDefaults(t *testing.T) {
 		t.Fatalf("dispatch settings did not round-trip: %v", got)
 	}
 }
+
+// TKB-27: auto-archive is on at seven days, and the archived lane it fills is
+// hidden by default. The threshold round-trips as a number, 0 included, since
+// 0 is how it is turned off.
+func TestArchiveDefaults(t *testing.T) {
+	if got := Defaults["archive_after_days"]; got != 7 {
+		t.Fatalf("Defaults[archive_after_days] = %v, want 7", got)
+	}
+	if got := Defaults["hidden_roles"]; got != "archived" {
+		t.Fatalf("Defaults[hidden_roles] = %q, want \"archived\"", got)
+	}
+	path := filepath.Join(t.TempDir(), "settings.toml")
+	if got := Load(path)["archive_after_days"]; got != 7 {
+		t.Fatalf("missing file: archive_after_days = %v, want 7", got)
+	}
+	if err := Save(path, map[string]any{"archive_after_days": 0}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(path)["archive_after_days"]; got != int64(0) {
+		t.Fatalf("archive_after_days did not round-trip: %v (%T)", got, got)
+	}
+}

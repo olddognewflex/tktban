@@ -32,6 +32,7 @@ Run `tktban doctor` to check your setup:
 
 ```sh
 tktban doctor              # verifies: tkt on PATH, board.roles readable, `all` query present
+                           # and hints when there is no archived role for auto-archive
 ```
 
 ## Usage
@@ -59,6 +60,65 @@ Columns come from `[board.roles]` (in config order); cards are grouped by their
 canonical `status_role` and sorted by priority then key. A `⛔N` badge shows
 unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 `(unmapped)` column rather than being dropped.
+
+### Auto-archive
+
+Tickets that have sat in Done for seven days move to an Archive lane on their
+own. Give the board somewhere to put them — an `archived` role:
+
+```toml
+[board.roles]
+# ...your other roles...
+done     = "Done"
+archived = "Archived"
+```
+
+Without that role the board never archives anything, and `tktban doctor`
+prints a `[hint]` saying how to turn it on (a hint, not a failure: the exit
+status is unaffected).
+
+With it, after every refresh the board looks at every ticket from
+`tkt list --query all` — the whole board, whatever the filter is showing (lane
+time is read for the filtered cards plus every Done ticket) — and takes each one whose `status_role` is `done` and whose time in that lane is at
+least `archive_after_days`. For each, it re-reads the ticket (`tkt view`) and
+skips it if it has already left Done, so two boards open on one tkt board do
+not both archive it; then runs `tkt transition KEY archived` and comments
+`Auto-archived after 7 days in Done.` (with your threshold in place of 7). The
+status line reports `archived 3 tickets`, and the board refreshes once more.
+Each tkt call a sweep makes is killed after 15 s, so a hung tkt cannot stall
+auto-archive for the session.
+
+- **The threshold** is `archive_after_days` in the settings file (default `7`;
+  `0` turns auto-archive off). It is hand-edited, like the dispatch keys; the
+  board never writes it. It is **per settings file**: herdr's own board reads
+  its plugin settings file, not `~/.config/tktban/settings.toml`, and the
+  one-time seed into it does not copy this key. So `archive_after_days = 0` in
+  the standalone file does not stop herdr's board archiving — set it in both
+  (paths below).
+- **Time in lane** is tkt's read-only `lane-time`: time since the ticket last
+  entered Done. A backend that reports no lane time (no history, or `0`
+  seconds) never archives anything.
+- **A failure never blocks the board.** A transition that fails is a warning on
+  the status line (`archived 2 tickets; 1 failed: TKB-9: …`) and gets no
+  comment. A ticket whose transition was tried is not tried again this board
+  session, whether it moved or failed: a failed one waits for a restart. A
+  ticket that was skipped — it had already left Done, or re-reading it failed
+  (also a warning) — was not touched, so a later refresh may take it again.
+- **The Archive column is hidden by default** (`hidden_roles = "archived"`).
+  `X` shows it, like any hidden column; a `[ui.board] hidden_roles` config
+  default is widened to include `archived`. On a board without an `archived`
+  role, `X` shows every column the board has and leaves `archived` in the
+  hidden set, so the lane is hidden once you add it.
+- **Upgrading: add `archived` to `hidden_roles` yourself.** That default only
+  reaches a board with no settings file yet. A settings file a board has
+  already saved carries its own `hidden_roles` (often `hidden_roles = ""`),
+  which wins, so the Archive column shows until you add it — in
+  `~/.config/tktban/settings.toml` and, if you use herdr's board, in
+  `~/.local/state/herdr/plugins/odnf.tktban/settings.toml` too:
+
+  ```toml
+  hidden_roles = "archived"   # or e.g. "archived,blocked" to keep others hidden
+  ```
 
 ## Run inside herdr
 
@@ -501,6 +561,7 @@ herdr plugin link .
 | dispatch: branch convention | `tkt cfg vcs --json` |
 | dispatch: which lane an agent owns | `tkt cfg board.ownership --json` |
 | comment | `tkt comment KEY BODY` |
+| auto-archive | `tkt view KEY --json`, `tkt transition KEY archived`, `tkt comment KEY BODY` |
 | create | `tkt create --type T --summary S [...] --json` |
 
 Config is passed via the `TKT_CONFIG` env var (tkt's global `--config` placed

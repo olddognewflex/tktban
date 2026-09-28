@@ -46,11 +46,14 @@ func TestBoardSaveKeepsHandEditedSettings(t *testing.T) {
 // TKB-24. A board that saves its own preferences must not start writing them,
 // because a board that writes `dispatch = false` into a file someone had set
 // to true has silently turned the D key off.
+//
+// TKB-27: archive_after_days is the same kind of key. A save that wrote the
+// default 7 back over a hand-set 0 would turn auto-archive back on.
 func TestBoardNeverWritesTheDispatchSettings(t *testing.T) {
 	m, _ := testModel(t)
 	path := m.settingsPath
 	m = loadBoard(m)
-	if err := os.WriteFile(path, []byte("dispatch = true\ndispatch_agent = \"codex\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("archive_after_days = 0\ndispatch = true\ndispatch_agent = \"codex\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, press := range []string{"t", "x", "b"} { // theme, hide a column, notify
@@ -65,6 +68,9 @@ func TestBoardNeverWritesTheDispatchSettings(t *testing.T) {
 		}
 		if got["dispatch_agent"] != "codex" {
 			t.Fatalf("%q: dispatch_agent after a board save = %v; file:\n%s", press, got["dispatch_agent"], raw)
+		}
+		if got["archive_after_days"] != int64(0) {
+			t.Fatalf("%q: archive_after_days after a board save = %v; file:\n%s", press, got["archive_after_days"], raw)
 		}
 	}
 }

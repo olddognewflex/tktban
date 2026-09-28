@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,15 @@ type captureRunner struct {
 	// needs it in both directions: a transition that fails must still leave a
 	// comment, and a comment that fails must not block or undo anything.
 	failVerbs map[string]bool
+	// roles overrides the board.roles reply. laneSeconds adds a seconds field
+	// to a key's lane-time entry. viewRole sets the status_role a `tkt view`
+	// of that key reports (default "todo"). failOn makes one "verb KEY" exit
+	// non-zero. list overrides the `tkt list` reply.
+	roles       string
+	laneSeconds map[string]float64
+	viewRole    map[string]string
+	failOn      map[string]bool
+	list        string
 }
 
 // ctxCall is one observed invocation: whether it was bounded, how long the
@@ -64,18 +74,27 @@ func (c *captureRunner) run(ctx context.Context, bin string, args, env []string)
 	if len(args) > 0 && c.failVerbs[args[0]] {
 		return nil, []byte(args[0] + " exploded"), 1, nil
 	}
+	if len(args) > 1 && c.failOn[args[0]+" "+args[1]] {
+		return nil, []byte(args[0] + " refused"), 3, nil
+	}
 	switch {
 	case eq(args, "cfg", "board.roles", "--json"):
-		return []byte(`{"todo": "To Do", "done": "Done"}`), nil, 0, nil
+		return cfgReply(c.roles, `{"todo": "To Do", "done": "Done"}`)
+	case len(args) >= 2 && args[0] == "list" && c.list != "":
+		return []byte(c.list), nil, 0, nil
 	case len(args) >= 2 && args[0] == "list":
 		return []byte(`[
 			{"key":"TKT-1","summary":"first thing","status_role":"todo","priority":"High","assignee":"alice","blocked_by":[]},
 			{"key":"TKT-2","summary":"second thing","status_role":"done","priority":"Low","assignee":"","blocked_by":[]}
 		]`), nil, 0, nil
 	case len(args) >= 1 && args[0] == "lane-time":
-		return laneTimeReply(args), nil, 0, nil
+		return laneTimeReply(args, c.laneSeconds), nil, 0, nil
 	case len(args) >= 1 && args[0] == "view":
-		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"todo","description":"d","labels":[],"blocked_by":[]}`), nil, 0, nil
+		role := "todo"
+		if r, ok := c.viewRole[args[1]]; ok {
+			role = r
+		}
+		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"` + role + `","description":"d","labels":[],"blocked_by":[]}`), nil, 0, nil
 	case eq(args, "cfg", "issue_types", "--json"):
 		return []byte(`{"full_sdlc":["Story","Bug"],"deliverable":["Task"]}`), nil, 0, nil
 	case eq(args, "cfg", "vcs", "--json"):
@@ -128,8 +147,9 @@ func eq(args []string, want ...string) bool {
 	return true
 }
 
-// laneTimeReply echoes one worklog entry per requested key so the count matches.
-func laneTimeReply(args []string) []byte {
+// laneTimeReply echoes one worklog entry per requested key so the count matches,
+// with seconds for any key that has them.
+func laneTimeReply(args []string, seconds map[string]float64) []byte {
 	keys := ""
 	for i, a := range args {
 		if a == "--keys" && i+1 < len(args) {
@@ -139,7 +159,11 @@ func laneTimeReply(args []string) []byte {
 	var entries []string
 	for pair := range strings.SplitSeq(keys, ",") {
 		k := strings.SplitN(pair, ":", 2)[0]
-		entries = append(entries, `{"key":"`+k+`","human":"1h 2m"}`)
+		secs := ""
+		if v, ok := seconds[k]; ok {
+			secs = `,"seconds":` + strconv.FormatFloat(v, 'f', -1, 64)
+		}
+		entries = append(entries, `{"key":"`+k+`","human":"1h 2m"`+secs+`}`)
 	}
 	return []byte("[" + strings.Join(entries, ",") + "]")
 }
@@ -160,7 +184,7 @@ func step(m Model, msg tea.Msg) Model {
 
 // loadBoard runs a refresh synchronously and feeds the result into the model.
 func loadBoard(m Model) Model {
-	msg := refreshCmd(m.tkt, m.filter)()
+	msg := m.refreshCmd()()
 	return step(m, msg)
 }
 
