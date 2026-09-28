@@ -356,10 +356,14 @@ func dispatchRefusalText(plan herdr.Plan, err error) string {
 //
 // A test asserts the relation rather than the number, so changing the schedule
 // cannot quietly invert it again.
+//
+// dispatchPromptTimeout is the same shape: agent.prompt is retried while
+// herdr says the just-started agent is not ready yet, so the stage covers
+// herdr.PromptBackoffTotal (3.1s) plus the round trips, with margin.
 const (
 	dispatchWorktreeTimeout = 15 * time.Second
 	dispatchAgentTimeout    = 30 * time.Second
-	dispatchPromptTimeout   = 5 * time.Second
+	dispatchPromptTimeout   = 10 * time.Second
 	dispatchWriteTimeout    = 5 * time.Second
 )
 
@@ -377,7 +381,8 @@ func dispatchStageBudget(stage herdr.Stage) time.Duration {
 }
 
 // dispatchStageContext / dispatchWriteContext mint those budgets, and
-// dispatchSleep is the wait between agent.start retries. All three are
+// dispatchSleep is the wait between agent.start and agent.prompt retries.
+// All three are
 // variables for the same reason dispatchPrepContext is: a test has to be able
 // to see what the code does when a budget runs out, and to read the retry
 // schedule without spending three real seconds on it.
@@ -926,6 +931,10 @@ func dispatchCommentBody(rep dispatchReport) string {
 	if res.Start.Attempts > 1 {
 		line("agent start", fmt.Sprintf("%d attempts, %d busy, %d renamed, waited %s",
 			res.Start.Attempts, res.Start.Busy, res.Start.Renamed, res.Start.Waited))
+	}
+	if res.Prompt.Attempts > 1 {
+		line("prompt retry", fmt.Sprintf("%d attempts, %d not ready, waited %s",
+			res.Prompt.Attempts, res.Prompt.NotReady, res.Prompt.Waited))
 	}
 	if res.Prompted {
 		line("prompt", "sent")

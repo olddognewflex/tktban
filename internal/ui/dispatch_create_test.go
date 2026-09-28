@@ -739,7 +739,7 @@ func TestDispatchStageBudgets(t *testing.T) {
 	want := map[herdr.Stage]time.Duration{
 		herdr.StageWorktree: 15 * time.Second,
 		herdr.StageAgent:    30 * time.Second,
-		herdr.StagePrompt:   5 * time.Second,
+		herdr.StagePrompt:   10 * time.Second,
 	}
 	for stage, d := range want {
 		if got := dispatchStageBudget(stage); got != d {
@@ -752,6 +752,12 @@ func TestDispatchStageBudgets(t *testing.T) {
 	// backoff has been spent. Otherwise our deadline cuts it short and a herdr
 	// timeout — which names what failed — becomes a closed socket, which cannot
 	// even say whether the agent started.
+	// The prompt stage bounds its retry loop the same way. Its round trips
+	// are fast refusals, so the backoff taking up to two thirds of the stage
+	// still leaves the calls themselves seconds to spare.
+	if got := dispatchStageBudget(herdr.StagePrompt); herdr.PromptBackoffTotal() >= got*2/3 {
+		t.Fatalf("the prompt stage gets %v, too little room beside %v of backoff", got, herdr.PromptBackoffTotal())
+	}
 	needed := time.Duration(herdr.AgentStartTimeoutMS)*time.Millisecond + herdr.AgentStartBackoffTotal()
 	if got := dispatchStageBudget(herdr.StageAgent); needed >= got {
 		t.Fatalf("the agent stage gets %v, but herdr's %dms timeout plus %v of backoff needs %v",
@@ -780,7 +786,7 @@ func TestDispatchStageBudgets(t *testing.T) {
 	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
 		t.Fatalf("status = %q", m.status)
 	}
-	wantSeen := []time.Duration{15 * time.Second, 30 * time.Second, 5 * time.Second}
+	wantSeen := []time.Duration{15 * time.Second, 30 * time.Second, 10 * time.Second}
 	if !slices.Equal(seen, wantSeen) {
 		t.Fatalf("stage budgets minted = %v, want %v", seen, wantSeen)
 	}
@@ -1601,6 +1607,39 @@ func TestDispatchRecordsTheAttemptsOnASuccessfulRetry(t *testing.T) {
 	}
 	_ = m2
 	_ = m
+}
+
+// A prompt that met agent_not_ready and then landed says how long it waited,
+// and a prompt that landed first time says nothing about it.
+func TestDispatchRecordsThePromptRetries(t *testing.T) {
+	notReady := &herdr.APIError{Code: herdr.CodeAgentNotReady, Message: "agent tkt-1 is not an active named agent"}
+	recordSleeps(t)
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	src.promptErrs = []error{notReady, notReady}
+
+	m = dispatchOnce(t, m)
+
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+		t.Fatalf("status = %q", m.status)
+	}
+	c := cr.last("comment")
+	if c == nil {
+		t.Fatal("no comment")
+	}
+	for _, want := range []string{"prompt retry: 3 attempts, 2 not ready, waited 300ms", "prompt: sent"} {
+		if !strings.Contains(c[2], want) {
+			t.Errorf("comment does not contain %q:\n%s", want, c[2])
+		}
+	}
+
+	m2, src2, cr2 := dispatchBoard(t)
+	src2.create, src2.start = createdWorktree(), startedAgent()
+	m2 = dispatchOnce(t, m2)
+	if c := cr2.last("comment"); c == nil || strings.Contains(c[2], "prompt retry:") {
+		t.Errorf("a clean prompt still reported retries:\n%v", c)
+	}
+	_ = m2
 }
 
 // ---- $EDITOR must not land on top of a dispatch ----
