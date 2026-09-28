@@ -186,22 +186,41 @@ with no refresh key needed. The subtitle shows `herdr live` while this is on.
 
 | Badge | Meaning | Source |
 |-------|---------|--------|
-| ⚙ | agent working | herdr (or frontmatter `processing` when live is off) |
-| 🙋 | agent waiting on you: a permission prompt or question | herdr |
-| ⏳ | waiting | frontmatter `agent_status` |
-| 🚫 | blocked | frontmatter `agent_status` |
+| ⚙ | agent working | herdr `working`, a `tkt agents` run `running`/`stalled`, or frontmatter `processing` |
+| 🙋 | agent waiting on you: a permission prompt or question | herdr `blocked` |
+| ⏳ | waiting | a `tkt agents` run `halted`, or frontmatter `waiting` |
+| 🚫 | blocked | a `tkt agents` run `blocked`, or frontmatter `blocked` |
 | ✓ | done | frontmatter `agent_status` |
 
-herdr `idle` and `done` show no badge. While live is on, herdr's 🙋 / ⚙ win
-over the ticket's frontmatter; otherwise the frontmatter badge shows, except
-`processing`, which is hidden because herdr says no agent is working (a killed
-pane clears its badge on the next poll even though the file still says
-`processing`). Outside herdr, with `--no-herdr-live`, or while herdr is not
-answering, badges come from frontmatter alone, exactly as without herdr. If
-herdr speaks an unsupported socket protocol, live status stays off for the
-run. Any other failure (herdr not answering at startup, or 3 failed polls
-later) shows one warning, retries every 2 s, and goes live again on its own
-once herdr is back.
+Each card merges three signals, most live first, and the first that has
+something to say wins:
+
+1. **herdr live status**: `working` → ⚙, `blocked` → 🙋.
+2. **`tkt agents` run state**, read once per refresh: `running`/`stalled` →
+   ⚙, `blocked` → 🚫, `halted` → ⏳. An idle herdr pane does not beat a live
+   run. tkt keeps run dirs forever, so a `halted` or `blocked` run yields to a
+   frontmatter status written strictly after it (`agent_status_at` newer than
+   the run's `updated`): a ticket finished by hand after its run stopped at a
+   gate shows the newer status, not ⏳ forever.
+3. **frontmatter `agent_status`**, except `processing` is hidden when a live
+   source says nothing is working: herdr is on and reports anything other than
+   `working`/`blocked` for the ticket (no pane, idle, done, unknown), or the
+   ticket's run is `dead`. A killed pane clears its badge on the next poll even
+   though the file still says `processing`. `idle` and empty show no badge.
+
+A stored badge also shows its age on the card's meta line, next to the lane
+time (`⏱ 6h 10m  agent 3h`): from `agent_status_at` for a frontmatter badge,
+from the run's `updated` for a `tkt agents` badge, so a stale status reads as
+stale either way. A herdr badge is current and carries no age, and neither
+does a timestamp in the future.
+
+herdr `idle` and `done` show no badge. Outside herdr, with `--no-herdr-live`,
+or while herdr is not answering, the herdr step is skipped; with a tkt that
+has no `agents` verb the run step is skipped too, silently, and badges come
+from frontmatter alone, exactly as before. If herdr speaks an unsupported
+socket protocol, live status stays off for the run. Any other herdr failure
+(not answering at startup, or 3 failed polls later) shows one warning,
+retries every 2 s, and goes live again on its own once herdr is back.
 
 Panes are matched to tickets by branch: the board reads the git branch checked
 out in each agent pane's directory (linked worktrees included) and takes the
@@ -456,9 +475,10 @@ agent with no further wiring: the card badges it and `o` jumps to its pane,
 found by reading the pane's branch back.
 
 tktban does not write `agent_status` into the ticket's frontmatter when it
-dispatches. The card's badge comes from herdr while live status is on, and
-`badgeFor` deliberately hides a frontmatter `processing` in that case — so a
-written-back status would be invisible on the board that wrote it.
+dispatches. The card's badge comes from herdr while live status is on, and the
+badge merge deliberately hides a frontmatter `processing` in that case — so a
+written-back status would be invisible on the board that wrote it. Writing the
+merged status back to the ticket is planned in TKB-29.
 
 ### Notifications
 

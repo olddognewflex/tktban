@@ -2,6 +2,8 @@ package model
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -238,4 +240,115 @@ func cards(tickets []Ticket) []Card {
 		out[i] = CardFromTicket(t)
 	}
 	return out
+}
+
+func TestCardFromTicketReadsAgentStatusAtAndRunState(t *testing.T) {
+	d := ticket("TKT-1", "todo")
+	d["agent_status_at"] = "2026-09-27T06:30:16Z"
+	d["run_state"] = "running"
+	d["run_updated"] = "2026-09-28T10:00:00Z"
+	c := CardFromTicket(d)
+	if c.AgentStatusAt != "2026-09-27T06:30:16Z" || c.RunState != "running" || c.RunUpdated != "2026-09-28T10:00:00Z" {
+		t.Fatalf("card = %+v", c)
+	}
+	d["agent_status_at"] = nil // tkt list --json sends null when unset
+	if c := CardFromTicket(d); c.AgentStatusAt != "" {
+		t.Fatalf("null agent_status_at = %q, want empty", c.AgentStatusAt)
+	}
+}
+
+// TKB-26: every combination of herdr × run × frontmatter. A row's field is a
+// "|"-separated set of values, or "*" for all of them; the rows must not
+// overlap, and together they must cover every combination, so each case is
+// pinned exactly once.
+func TestMergeAgent(t *testing.T) {
+	// herdr: off, no pane, and every status it reports, plus one it might.
+	lives := []string{"", LiveAbsent, "working", "blocked", "idle", "done", "unknown", "surprise"}
+	runs := []string{"", "running", "stalled", "dead", "blocked", "halted"}
+	fronts := []string{"", "processing", "waiting", "done", "blocked", "idle"}
+
+	const quiet = LiveAbsent + "|idle|done|unknown|surprise" // herdr on, nothing working
+	none := AgentView{}
+	front := func(s string) AgentView { return AgentView{s, SourceFrontmatter} }
+
+	rows := []struct {
+		live, run, front string
+		want             AgentView
+	}{
+		// 1. herdr working / blocked beat everything.
+		{"working", "*", "*", AgentView{"processing", SourceHerdr}},
+		{"blocked", "*", "*", AgentView{AgentNeedsYou, SourceHerdr}},
+
+		// 2. a run beats the frontmatter, and a quiet or absent pane.
+		{"|" + quiet, "running|stalled", "*", AgentView{"processing", SourceRun}},
+		{"|" + quiet, "blocked", "*", AgentView{"blocked", SourceRun}},
+		{"|" + quiet, "halted", "*", AgentView{"waiting", SourceRun}},
+
+		// 3. idle and empty frontmatter never badge.
+		{"|" + quiet, "|dead", "|idle", none},
+
+		// 4. live off, run alive or absent: processing shows (today's behaviour).
+		{"", "", "processing", front("processing")},
+		// ...but herdr quiet (TKB-22) or a dead run hides it.
+		{"", "dead", "processing", none},
+		{quiet, "|dead", "processing", none},
+
+		// 5. otherwise the frontmatter as-is.
+		{"|" + quiet, "|dead", "waiting", front("waiting")},
+		{"|" + quiet, "|dead", "done", front("done")},
+		{"|" + quiet, "|dead", "blocked", front("blocked")},
+	}
+
+	match := func(pat, v string) bool {
+		return pat == "*" || slices.Contains(strings.Split(pat, "|"), v)
+	}
+	for _, l := range lives {
+		for _, r := range runs {
+			for _, f := range fronts {
+				hits := 0
+				for _, row := range rows {
+					if !match(row.live, l) || !match(row.run, r) || !match(row.front, f) {
+						continue
+					}
+					hits++
+					if got := MergeAgent(l, r, f); got != row.want {
+						t.Errorf("MergeAgent(%q, %q, %q) = %+v, want %+v", l, r, f, got, row.want)
+					}
+				}
+				if hits != 1 {
+					t.Errorf("(%q, %q, %q) matched %d rows, want exactly 1", l, r, f, hits)
+				}
+			}
+		}
+	}
+}
+
+// TKB-26: a lingering halted/blocked run yields to a strictly newer
+// frontmatter status; a live run, or any doubt about the timestamps, keeps it.
+func TestEffectiveRun(t *testing.T) {
+	const older, newer = "2026-09-28T09:00:00Z", "2026-09-28T10:00:00Z"
+	cases := []struct {
+		run, runAt, front, frontAt string
+		want                       string
+	}{
+		{"halted", older, "done", newer, ""},
+		{"blocked", older, "waiting", newer, ""},
+		{"halted", newer, "done", older, "halted"},       // run is newer
+		{"halted", older, "done", older, "halted"},       // a tie is not newer
+		{"blocked", older, "", newer, "blocked"},         // no frontmatter status
+		{"halted", "", "done", newer, "halted"},          // run time missing
+		{"halted", older, "done", "", "halted"},          // front time missing
+		{"blocked", "garbage", "done", newer, "blocked"}, // unparseable run
+		{"blocked", older, "done", "garbage", "blocked"}, // unparseable front
+		{"running", older, "done", newer, "running"},     // live runs are kept
+		{"stalled", older, "done", newer, "stalled"},
+		{"dead", older, "done", newer, "dead"},
+		{"", "", "done", newer, ""},
+	}
+	for _, c := range cases {
+		card := Card{RunState: c.run, RunUpdated: c.runAt, AgentStatus: c.front, AgentStatusAt: c.frontAt}
+		if got := EffectiveRun(card); got != c.want {
+			t.Errorf("EffectiveRun(%+v) = %q, want %q", c, got, c.want)
+		}
+	}
 }

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -180,6 +181,9 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	if c.LaneHuman != "" {
 		meta = append(meta, "⏱ "+c.LaneHuman)
 	}
+	if age := agentAge(m.agentView(c), c); age != "" {
+		meta = append(meta, "agent "+age)
+	}
 	if len(meta) > 0 {
 		lines += "\n" + m.styles.cardMeta.Render(strings.Join(meta, "  "))
 	}
@@ -196,6 +200,50 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	// border outside the set width, so the card box is width-4 — otherwise the
 	// card's right border is clipped by the column and the outline fragments.
 	return style.Width(width - 4).Render(lines)
+}
+
+// now is the clock the card meta reads; tests pin it.
+var now = time.Now
+
+// agentAge is how long ago a stored agent status was written, e.g. "3h": the
+// frontmatter's agent_status_at, or the run's last update for a badge from
+// `tkt agents`. A herdr badge is current by definition; the age is there so a
+// stale stored status reads as stale. "" when there is no badge, no parseable
+// timestamp, or the timestamp is in the future (clock skew).
+func agentAge(v model.AgentView, c model.Card) string {
+	var at string
+	switch v.Source {
+	case model.SourceFrontmatter:
+		at = c.AgentStatusAt
+	case model.SourceRun:
+		at = c.RunUpdated
+	}
+	if at == "" || viewBadge(v) == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		return ""
+	}
+	d := now().Sub(t)
+	if d < 0 {
+		return ""
+	}
+	return humanAge(d)
+}
+
+// humanAge is a duration at a card's resolution: minutes, hours or days.
+func humanAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "<1m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
 }
 
 // agentBadge maps a ticket's frontmatter agent_status to a card glyph

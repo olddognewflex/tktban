@@ -41,12 +41,14 @@ type captureRunner struct {
 	// roles overrides the board.roles reply. laneSeconds adds a seconds field
 	// to a key's lane-time entry. viewRole sets the status_role a `tkt view`
 	// of that key reports (default "todo"). failOn makes one "verb KEY" exit
-	// non-zero. list overrides the `tkt list` reply.
+	// non-zero. list overrides the `tkt list` reply. agents overrides the
+	// `tkt agents` reply (default: no runs); failReply is a tkt without it.
 	roles       string
 	laneSeconds map[string]float64
 	viewRole    map[string]string
 	failOn      map[string]bool
 	list        string
+	agents      string
 }
 
 // ctxCall is one observed invocation: whether it was bounded, how long the
@@ -87,6 +89,11 @@ func (c *captureRunner) run(ctx context.Context, bin string, args, env []string)
 			{"key":"TKT-1","summary":"first thing","status_role":"todo","priority":"High","assignee":"alice","blocked_by":[]},
 			{"key":"TKT-2","summary":"second thing","status_role":"done","priority":"Low","assignee":"","blocked_by":[]}
 		]`), nil, 0, nil
+	case eq(args, "agents", "--json"):
+		if c.agents == failReply {
+			return nil, []byte("invalid choice: 'agents'"), 64, nil
+		}
+		return cfgReply(c.agents, `{"generated":"2026-09-28T00:00:00Z","stale_after":45,"agents":[]}`)
 	case len(args) >= 1 && args[0] == "lane-time":
 		return laneTimeReply(args, c.laneSeconds), nil, 0, nil
 	case len(args) >= 1 && args[0] == "view":
