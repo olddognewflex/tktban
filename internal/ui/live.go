@@ -162,44 +162,51 @@ func (m Model) onLiveTick() (tea.Model, tea.Cmd) {
 	return m, livePollCmd(m.live.src)
 }
 
-// liveBadge maps herdr's agent_status to a card glyph. Only an agent that is
-// busy (⚙) or waiting on a human (🙋, a permission prompt or question) gets a
-// badge; idle, done and unknown are silent.
-func liveBadge(s herdr.Status) string {
-	switch s {
-	case herdr.StatusWorking:
-		return "⚙"
-	case herdr.StatusBlocked:
-		return "🙋"
-	default:
+// liveArg is herdr's side of model.MergeAgent: "" while live status is off,
+// model.LiveAbsent when herdr is on but has no pane for the ticket.
+func liveArg(st herdr.Status, liveOn bool) string {
+	switch {
+	case !liveOn:
 		return ""
+	case st == "":
+		return model.LiveAbsent
+	default:
+		return string(st)
 	}
 }
 
-// badgeFor picks a card's agent badge. With live status off it is exactly the
-// frontmatter badge. With it on, herdr's working/blocked win; otherwise the
-// frontmatter badge shows, except "processing", because herdr is the truth for
-// that and has no agent working the ticket.
-func badgeFor(front string, live herdr.Status, liveOn bool) string {
-	if !liveOn {
-		return agentBadge(front)
+// viewBadge is the glyph for a merged agent view: 🙋 for an agent waiting on
+// you (herdr saw a permission prompt or question), otherwise the frontmatter
+// glyph for its status. herdr idle, done and unknown merge to no badge.
+func viewBadge(v model.AgentView) string {
+	if v.Status == model.AgentNeedsYou {
+		return "🙋"
 	}
-	if b := liveBadge(live); b != "" {
-		return b
-	}
-	if front == "processing" {
+	return agentBadge(v.Status)
+}
+
+// badgeFor picks a card's agent badge from its frontmatter, its `tkt agents`
+// run state and herdr's status; the precedence lives in model.MergeAgent.
+func badgeFor(front, run string, live herdr.Status, liveOn bool) string {
+	return viewBadge(model.MergeAgent(liveArg(live, liveOn), run, front))
+}
+
+// liveStatus is herdr's status for c, or "" while live status is off.
+func (m Model) liveStatus(c model.Card) herdr.Status {
+	if !m.live.on {
 		return ""
 	}
-	return agentBadge(front)
+	return m.live.byKey[strings.ToUpper(c.Key)].Status
+}
+
+// agentView is the merged agent state for a card on this board.
+func (m Model) agentView(c model.Card) model.AgentView {
+	return model.MergeAgent(liveArg(m.liveStatus(c), m.live.on), model.EffectiveRun(c), c.AgentStatus)
 }
 
 // cardBadge is the agent badge for a card on this board.
 func (m Model) cardBadge(c model.Card) string {
-	var st herdr.Status
-	if m.live.on {
-		st = m.live.byKey[strings.ToUpper(c.Key)].Status
-	}
-	return badgeFor(c.AgentStatus, st, m.live.on)
+	return badgeFor(c.AgentStatus, model.EffectiveRun(c), m.liveStatus(c), m.live.on)
 }
 
 // PaneFocuser is the optional half of a live source: it can also focus one of

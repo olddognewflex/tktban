@@ -440,6 +440,37 @@ func (t *Tkt) LaneTimeBatch(items [][2]string) (map[string]map[string]any, error
 	return out, nil
 }
 
+// AgentRun is one row of `tkt agents --json`: the run's state
+// (running|stalled|dead|blocked|halted) and when its marker was last written
+// (ISO "2006-01-02T15:04:05Z", or "").
+type AgentRun struct {
+	State   string `json:"state"`
+	Updated string `json:"updated"`
+}
+
+// Agents is the run of each ticket with an agent run, from `tkt agents
+// --json`, keyed by uppercase ticket key (idle runs are left out by tkt unless
+// --all). Unlike ListAll this is an overlay, so callers treat any error as
+// "no run state" — an older tkt without the verb exits 64.
+func (t *Tkt) Agents() (map[string]AgentRun, error) {
+	var out struct {
+		Agents []struct {
+			Key string `json:"key"`
+			AgentRun
+		} `json:"agents"`
+	}
+	if err := t.runJSON([]string{"agents", "--json"}, &out); err != nil {
+		return nil, err
+	}
+	runs := make(map[string]AgentRun, len(out.Agents))
+	for _, a := range out.Agents {
+		if a.Key != "" && a.State != "" {
+			runs[strings.ToUpper(a.Key)] = a.AgentRun
+		}
+	}
+	return runs, nil
+}
+
 // ---- write verbs (mutations go through tkt so history/worklog stay correct) ----
 
 // Transition moves key to role's lane.
@@ -496,6 +527,8 @@ type EditOpts struct {
 	Due       *string
 	Scheduled *string
 	Completed *string
+	// AgentStatus: nil = leave unchanged; a pointer to "" clears it.
+	AgentStatus *string
 }
 
 // Edit edits content/fields via `tkt edit`. Only set fields are sent.
@@ -527,6 +560,9 @@ func (t *Tkt) Edit(key string, opts EditOpts) (model.Ticket, error) {
 	}
 	if opts.Completed != nil {
 		args = append(args, "--completed", *opts.Completed)
+	}
+	if opts.AgentStatus != nil {
+		args = append(args, "--agent-status", *opts.AgentStatus)
 	}
 	args = append(args, "--json")
 	var out model.Ticket

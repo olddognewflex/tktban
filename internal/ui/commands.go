@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,6 +102,7 @@ func refreshCmd(tk *tkt.Tkt, filter filterState, archiveDays float64) tea.Cmd {
 		sweep := archiveDays > 0 && model.HasRole(roles, model.RoleArchived)
 		visible := model.FilterTickets(tickets, filter.assignee, filter.prefix)
 		lane, warn := attachLaneTime(tk, laneTickets(tickets, visible, sweep))
+		attachRunState(tk, visible)
 		var archive []string
 		if sweep && warn == "" {
 			archive = model.ArchiveCandidates(tickets, lane, archiveDays)
@@ -226,6 +228,23 @@ func attachLaneTime(tk *tkt.Tkt, tickets []model.Ticket) (map[string]map[string]
 		}
 	}
 	return batch, ""
+}
+
+// attachRunState stamps each ticket with its `tkt agents` run state and when
+// the run last wrote it, for the badge merge (model.MergeAgent). Best-effort and silent: run state is only an
+// overlay, and an older tkt without the verb would otherwise warn on every
+// refresh.
+func attachRunState(tk *tkt.Tkt, tickets []model.Ticket) {
+	runs, err := tk.Agents()
+	if err != nil || len(runs) == 0 {
+		return
+	}
+	for _, t := range tickets {
+		k, _ := t["key"].(string)
+		if r, ok := runs[strings.ToUpper(k)]; ok {
+			t["run_state"], t["run_updated"] = r.State, r.Updated
+		}
+	}
 }
 
 func viewCmd(tk *tkt.Tkt, key, purpose string) tea.Cmd {

@@ -146,6 +146,71 @@ func TestEditEmptyStringIsSentButNilIsOmitted(t *testing.T) {
 	}
 }
 
+// TKB-26: --agent-status is sent only when set, and "" (clear) is still sent.
+func TestEditArgvAgentStatus(t *testing.T) {
+	tk, f := newFake(resp{stdout: `{"key": "TKT-1"}`})
+	processing, empty := "processing", ""
+	if _, err := tk.Edit("TKT-1", EditOpts{AgentStatus: &processing}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"tkt", "edit", "TKT-1", "--agent-status", "processing", "--json"}
+	if got := f.lastArgv(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %v", got)
+	}
+	if _, err := tk.Edit("TKT-1", EditOpts{AgentStatus: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"tkt", "edit", "TKT-1", "--agent-status", "", "--json"}
+	if got := f.lastArgv(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("clear argv = %v", got)
+	}
+	if _, err := tk.Edit("TKT-1", EditOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if indexOf(f.lastArgv(), "--agent-status") >= 0 {
+		t.Fatalf("--agent-status must be omitted when nil, argv = %v", f.lastArgv())
+	}
+}
+
+func TestAgentsArgvAndParse(t *testing.T) {
+	tk, f := newFake(resp{stdout: `{"generated": "2026-09-28T15:58:33Z", "stale_after": 45, "agents": [
+		{"key": "TKB-1", "state": "halted", "updated": "2026-09-28T10:00:00Z", "stale_after": 45, "stop_requested": false},
+		{"key": "tkb-2", "state": "dead"},
+		{"key": "", "state": "halted"},
+		{"key": "TKB-3", "state": ""}
+	]}`})
+	got, err := tk.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]AgentRun{
+		"TKB-1": {State: "halted", Updated: "2026-09-28T10:00:00Z"},
+		"TKB-2": {State: "dead"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("agents = %v, want %v", got, want)
+	}
+	if argv := f.lastArgv(); !reflect.DeepEqual(argv, []string{"tkt", "agents", "--json"}) {
+		t.Fatalf("argv = %v", argv)
+	}
+}
+
+func TestAgentsEmptyAndErrors(t *testing.T) {
+	tk, _ := newFake(resp{stdout: `{"generated": "x", "stale_after": 45, "agents": []}`})
+	if got, err := tk.Agents(); err != nil || len(got) != 0 {
+		t.Fatalf("empty: agents = %v, err = %v", got, err)
+	}
+	// An older tkt without the verb is a usage error.
+	tk, _ = newFake(resp{stderr: "invalid choice: 'agents'", code: 64})
+	if _, err := tk.Agents(); err == nil {
+		t.Fatal("exit 64 must be an error")
+	}
+	tk, _ = newFake(resp{stdout: "not json"})
+	if _, err := tk.Agents(); err == nil {
+		t.Fatal("bad JSON must be an error")
+	}
+}
+
 func TestLaneTimeIsReadOnlyAndParses(t *testing.T) {
 	tk, f := newFake(resp{stdout: `[{"key": "TKT-1", "human": "6h 10m", "worklog_id": ""}]`})
 	out, err := tk.LaneTime("TKT-1", "todo")

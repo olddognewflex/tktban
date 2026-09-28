@@ -97,8 +97,8 @@ func TestLiveBadgeMapping(t *testing.T) {
 		"surprise":          "",
 	}
 	for st, want := range cases {
-		if got := liveBadge(st); got != want {
-			t.Errorf("liveBadge(%q) = %q, want %q", st, got, want)
+		if got := badgeFor("", "", st, true); got != want {
+			t.Errorf("badgeFor(\"\", \"\", %q, on) = %q, want %q", st, got, want)
 		}
 	}
 }
@@ -134,8 +134,41 @@ func TestBadgeForPrecedence(t *testing.T) {
 		{"", "", true, ""},
 	}
 	for _, c := range cases {
-		if got := badgeFor(c.front, c.live, c.liveOn); got != c.want {
+		if got := badgeFor(c.front, "", c.live, c.liveOn); got != c.want {
 			t.Errorf("badgeFor(%q, %q, on=%v) = %q, want %q", c.front, c.live, c.liveOn, got, c.want)
+		}
+	}
+}
+
+// TKB-26: a `tkt agents` run state sits between herdr and the frontmatter.
+func TestBadgeForRunState(t *testing.T) {
+	cases := []struct {
+		front  string
+		run    string
+		live   herdr.Status
+		liveOn bool
+		want   string
+	}{
+		// a live run shows even where the frontmatter is silent or stale
+		{"", "running", "", false, "⚙"},
+		{"done", "stalled", "", false, "⚙"},
+		{"", "blocked", "", false, "🚫"},
+		{"processing", "halted", "", false, "⏳"},
+		// an idle or absent herdr pane does not beat a live run
+		{"", "running", herdr.StatusIdle, true, "⚙"},
+		{"", "running", "", true, "⚙"},
+		// but herdr working / blocked still win over any run
+		{"", "halted", herdr.StatusWorking, true, "⚙"},
+		{"", "running", herdr.StatusBlocked, true, "🙋"},
+		// a dead run hides frontmatter processing, live off or on
+		{"processing", "dead", "", false, ""},
+		{"processing", "dead", herdr.StatusIdle, true, ""},
+		{"waiting", "dead", "", false, "⏳"},
+		{"done", "dead", "", true, "✓"},
+	}
+	for _, c := range cases {
+		if got := badgeFor(c.front, c.run, c.live, c.liveOn); got != c.want {
+			t.Errorf("badgeFor(%q, run=%q, %q, on=%v) = %q, want %q", c.front, c.run, c.live, c.liveOn, got, c.want)
 		}
 	}
 }

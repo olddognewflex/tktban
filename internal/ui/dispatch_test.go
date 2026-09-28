@@ -216,9 +216,10 @@ func pressD(t *testing.T, m Model) Model {
 // without the flag it records a worklog, so it is checked by isRead below
 // rather than blessed by name.
 var dispatchReadVerbs = map[string]bool{
-	"cfg":  true, // board.roles, priorities, vcs, board.ownership
-	"list": true,
-	"view": true,
+	"cfg":    true, // board.roles, priorities, vcs, board.ownership
+	"list":   true,
+	"view":   true,
+	"agents": true, // run state for the badges
 }
 
 // isRead reports whether one recorded tkt invocation changed nothing.

@@ -6,6 +6,7 @@ package model
 import (
 	"sort"
 	"strings"
+	"time"
 )
 
 // Ticket is a normalized ticket as decoded from tkt's --json output. It mirrors
@@ -43,34 +44,119 @@ type RolePair struct {
 
 // Card is a single ticket rendered on the board.
 type Card struct {
-	Key          string
-	Summary      string
-	Assignee     string
-	Priority     string
-	StatusRole   string
-	BlockerCount int
-	LaneHuman    string // human time-in-current-lane, e.g. "6h 10m" (empty = unknown)
-	Due          string // optional dates, "YYYY-MM-DD" or "" when unset
-	Scheduled    string
-	Completed    string
-	AgentStatus  string // agent execution state: ""|idle|processing|waiting|done|blocked
+	Key           string
+	Summary       string
+	Assignee      string
+	Priority      string
+	StatusRole    string
+	BlockerCount  int
+	LaneHuman     string // human time-in-current-lane, e.g. "6h 10m" (empty = unknown)
+	Due           string // optional dates, "YYYY-MM-DD" or "" when unset
+	Scheduled     string
+	Completed     string
+	AgentStatus   string // agent execution state: ""|idle|processing|waiting|done|blocked
+	AgentStatusAt string // when AgentStatus was written, ISO "2006-01-02T15:04:05Z" or ""
+	RunState      string // `tkt agents` run state: ""|running|stalled|dead|blocked|halted
+	RunUpdated    string // when the run last wrote RunState, ISO like AgentStatusAt, or ""
 }
 
 // CardFromTicket builds a Card from a normalized ticket dict.
 func CardFromTicket(t Ticket) Card {
 	return Card{
-		Key:          getStr(t, "key"),
-		Summary:      getStr(t, "summary"),
-		Assignee:     getStr(t, "assignee"),
-		Priority:     getStr(t, "priority"),
-		StatusRole:   getStr(t, "status_role"),
-		BlockerCount: unresolvedBlockers(t),
-		LaneHuman:    getStr(t, "lane_human"),
-		Due:          getStr(t, "due"),
-		Scheduled:    getStr(t, "scheduled"),
-		Completed:    getStr(t, "completed"),
-		AgentStatus:  getStr(t, "agent_status"),
+		Key:           getStr(t, "key"),
+		Summary:       getStr(t, "summary"),
+		Assignee:      getStr(t, "assignee"),
+		Priority:      getStr(t, "priority"),
+		StatusRole:    getStr(t, "status_role"),
+		BlockerCount:  unresolvedBlockers(t),
+		LaneHuman:     getStr(t, "lane_human"),
+		Due:           getStr(t, "due"),
+		Scheduled:     getStr(t, "scheduled"),
+		Completed:     getStr(t, "completed"),
+		AgentStatus:   getStr(t, "agent_status"),
+		AgentStatusAt: getStr(t, "agent_status_at"),
+		RunState:      getStr(t, "run_state"),
+		RunUpdated:    getStr(t, "run_updated"),
 	}
+}
+
+// AgentSource says which of a card's three agent signals its badge came from.
+type AgentSource int
+
+const (
+	SourceNone        AgentSource = iota // no badge
+	SourceHerdr                          // herdr's live pane status
+	SourceRun                            // `tkt agents` run state
+	SourceFrontmatter                    // the ticket's agent_status
+)
+
+// AgentNeedsYou is the merged status for an agent waiting on a human (herdr
+// saw a permission prompt or question). The frontmatter has no such state.
+const AgentNeedsYou = "needs_you"
+
+// LiveAbsent is MergeAgent's live argument when herdr is on but has no agent
+// pane for the ticket.
+const LiveAbsent = "absent"
+
+// AgentView is a card's merged agent state: a frontmatter-style status (plus
+// AgentNeedsYou) and where it came from.
+type AgentView struct {
+	Status string
+	Source AgentSource
+}
+
+// MergeAgent reconciles a card's agent signals, most live first; the first
+// rule that matches wins.
+//
+// live is herdr's pane status ("" = live off, LiveAbsent = on but no pane),
+// run is the `tkt agents` state ("" = none), front is the frontmatter
+// agent_status.
+//
+//  1. herdr working → processing; herdr blocked → needs you.
+//  2. run running/stalled → processing (an idle herdr pane does not beat a
+//     live run); run blocked → blocked; run halted → waiting.
+//  3. A frontmatter processing is hidden when a live source says nothing is
+//     working: herdr is on and quiet, or the run is dead.
+//  4. Otherwise the frontmatter as-is; idle and "" are no badge.
+func MergeAgent(live, run, front string) AgentView {
+	switch live {
+	case "working":
+		return AgentView{"processing", SourceHerdr}
+	case "blocked":
+		return AgentView{AgentNeedsYou, SourceHerdr}
+	}
+	switch run {
+	case "running", "stalled":
+		return AgentView{"processing", SourceRun}
+	case "blocked":
+		return AgentView{"blocked", SourceRun}
+	case "halted":
+		return AgentView{"waiting", SourceRun}
+	}
+	if front == "processing" && (live != "" || run == "dead") {
+		return AgentView{}
+	}
+	if front == "" || front == "idle" {
+		return AgentView{}
+	}
+	return AgentView{front, SourceFrontmatter}
+}
+
+// EffectiveRun is the run state MergeAgent should see for c. tkt never cleans
+// up run dirs, so a halted or blocked run lingers after a human has finished
+// the ticket by hand: when the frontmatter status was written strictly after
+// the run's (both timestamps parse), the newer signal wins and the run is
+// ignored. A running or stalled run is live and always kept.
+func EffectiveRun(c Card) string {
+	if (c.RunState != "halted" && c.RunState != "blocked") || c.AgentStatus == "" {
+		return c.RunState
+	}
+	front, ferr := time.Parse(time.RFC3339, c.AgentStatusAt)
+	run, rerr := time.Parse(time.RFC3339, c.RunUpdated)
+	if ferr == nil && rerr == nil && front.After(run) {
+		return ""
+	}
+	return c.RunState
 }
 
 // sortKey returns the ordering tuple: priority DESC (negated rank), then key ASC.
