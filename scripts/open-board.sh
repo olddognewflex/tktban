@@ -62,6 +62,60 @@ fi
 [ -n "$cwd" ] || cwd="$(ctx_field focused_pane_cwd)"
 [ -n "$cwd" ] || cwd="$(ctx_field workspace_cwd)"
 
+# Rebuild a stale board before opening it. herdr builds the plugin only at
+# install, so after a pull or a local edit ./bin/tktban keeps running old code
+# until someone rebuilds by hand. Stale means a Go source, go.mod or go.sum is
+# newer than the binary, which a checkout or merge also triggers. The build
+# goes to a temp file and is renamed in, so a failure leaves the old binary in
+# place: the board still opens and the error lands in `herdr plugin log list`.
+# A press that is about to close a running board skips the build: it would
+# only delay the close, and the next open builds anyway. Skipped quietly when
+# find is missing or with TKTBAN_NO_AUTOBUILD=1; a stale binary with no Go on
+# PATH says so, since that is exactly the case this exists to catch.
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# board_running succeeds when a board holds board.lock, i.e. this press will
+# close the popup rather than open one. Unknown (no python3 or no state dir)
+# counts as not running, so the build still happens.
+board_running() {
+  [ "$have_py" = 1 ] && [ -n "${HERDR_PLUGIN_STATE_DIR:-}" ] || return 1
+  python3 - <<'PY_LOCK' 2>/dev/null
+import errno, fcntl, os, sys
+try:
+    fd = os.open(os.path.join(os.environ["HERDR_PLUGIN_STATE_DIR"], "board.lock"), os.O_RDONLY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except OSError as e:
+    sys.exit(0 if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else 1)
+sys.exit(1)
+PY_LOCK
+}
+
+autobuild() {
+  [ "${TKTBAN_NO_AUTOBUILD:-}" = 1 ] && return 0
+  command -v find >/dev/null 2>&1 || return 0
+  local bin="$root/bin/tktban"
+  if [ -x "$bin" ] && [ -z "$(find "$root/cmd" "$root/internal" "$root/go.mod" "$root/go.sum" \
+      -newer "$bin" \( -name '*.go' -o -name go.mod -o -name go.sum \) -print -quit 2>/dev/null)" ]; then
+    return 0
+  fi
+  board_running && return 0
+  if ! command -v go >/dev/null 2>&1; then
+    echo "tktban: bin/tktban is out of date but go is not on PATH; opening it as is" >&2
+    return 0
+  fi
+  local tmp="$bin.build.$$"
+  if (cd "$root" && go build -o "$tmp" ./cmd/tktban) >&2; then
+    mv -f "$tmp" "$bin"
+  else
+    rm -f "$tmp"
+    echo "tktban: rebuild failed; opening the existing binary" >&2
+  fi
+}
+autobuild
+
 args=(plugin pane open --plugin "$plugin_id" --entrypoint board --focus)
 [ -n "$cwd" ] && args+=(--cwd "$cwd")
 [ -n "$ctx" ] && args+=(--env "HERDR_PLUGIN_CONTEXT_JSON=$ctx")

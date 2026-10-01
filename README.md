@@ -135,7 +135,15 @@ herdr plugin link .
 
 **A linked checkout is the live plugin.** `herdr plugin link .` registers the
 working tree itself, and herdr runs `bin/tktban` from it — the binary you
-built, not the code you have since edited. So **rebuild after every change**:
+built, not the code you have since edited. The board key rebuilds it for
+you: before opening, the launcher runs `go build` if any `.go` file, `go.mod`
+or `go.sum` is newer than `bin/tktban` (an edit, a pull or a branch switch).
+A failed build keeps the old binary, still opens the board, and logs the
+error to `herdr plugin log list`, as does a stale binary with no `go` on
+herdr's PATH. A press that closes an open board skips the check, so closing
+never waits on a build. Set `TKTBAN_NO_AUTOBUILD=1` in herdr's
+environment to turn it off. The hook (`herdr-hook`) is not rebuilt this way,
+so after a pull, open the board once or rebuild by hand:
 
 ```sh
 go build -o bin/tktban ./cmd/tktban
