@@ -44,6 +44,11 @@ import (
 // rather than piling up in a column of its own. That default only reaches a
 // board with no settings file yet; one that already saved hidden_roles keeps
 // what it saved.
+//
+// reconcile_agent_status is hand-edited and never set by the board. It
+// gates writing agent status back to tickets, and is false by default because
+// that mutates the ticket provider. It is deliberately not seeded into herdr's
+// plugin file (see herdr.seedKeys).
 var Defaults = map[string]any{
 	"theme":              "textual-dark",
 	"hidden_roles":       "archived",
@@ -53,6 +58,8 @@ var Defaults = map[string]any{
 	"dispatch_args":      "",
 	"dispatch_prompt":    "",
 	"archive_after_days": 7,
+
+	"reconcile_agent_status": false,
 }
 
 // DefaultPath is $XDG_CONFIG_HOME/tktban/settings.toml, falling back to

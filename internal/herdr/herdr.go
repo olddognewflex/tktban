@@ -181,6 +181,10 @@ func SafeSettingsPath(path string, lstat statFunc) string {
 //
 // It is an allowlist rather than a denylist, so a setting added later starts
 // fresh in the plugin file until someone adds it here on purpose.
+//
+// reconcile_agent_status is absent on purpose: it gates a write to the ticket
+// provider, and a flag that does that should be turned on where the plugin
+// runs, not inherited from a standalone file.
 var seedKeys = []string{"theme", "hidden_roles"}
 
 // SeedSettings copies the carried-over settings to the plugin path the first
