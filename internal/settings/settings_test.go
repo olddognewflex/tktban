@@ -331,3 +331,21 @@ func TestArchiveDefaults(t *testing.T) {
 		t.Fatalf("archive_after_days did not round-trip: %v (%T)", got, got)
 	}
 }
+
+// reconcile_agent_status writes to the ticket provider, so it is off until
+// someone turns it on by hand.
+func TestReconcileAgentStatusDefaults(t *testing.T) {
+	if got := Defaults["reconcile_agent_status"]; got != false {
+		t.Fatalf("Defaults[reconcile_agent_status] = %v, want false", got)
+	}
+	path := filepath.Join(t.TempDir(), "settings.toml")
+	if got := Load(path)["reconcile_agent_status"]; got != false {
+		t.Fatalf("missing file: reconcile_agent_status = %v, want false", got)
+	}
+	if err := Save(path, map[string]any{"reconcile_agent_status": true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(path)["reconcile_agent_status"]; got != true {
+		t.Fatalf("reconcile_agent_status did not round-trip: %v (%T)", got, got)
+	}
+}

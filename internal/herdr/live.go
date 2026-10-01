@@ -43,6 +43,12 @@ type PaneRef struct {
 	TabID       string
 	Status      Status
 	Focused     bool
+	// Dir is the directory the pane was resolved from (foreground cwd, else
+	// cwd).
+	Dir string
+	// Repo is "owner/name" from Dir's origin remote, or empty when Dir has
+	// none. Filled by Poll, not Resolve.
+	Repo string
 }
 
 // Live is the herdr view of one ticket: the most urgent status across its
@@ -82,6 +88,7 @@ func Resolve(agents []Agent, keysForDir func(string) []string) map[string]Live {
 			TabID:       a.TabID,
 			Status:      a.Status,
 			Focused:     a.Focused,
+			Dir:         dir,
 		}
 		for _, key := range keys {
 			l := out[key]
@@ -129,6 +136,9 @@ type SocketSource struct {
 	Client *Client
 	// KeysForDir maps a pane directory to ticket keys; nil means KeysForDir.
 	KeysForDir func(context.Context, string) []string
+	// RepoForDir maps a pane directory to its "owner/name"; nil means
+	// RepoForDir.
+	RepoForDir func(string) string
 	// Tokens publishes each resolved pane's ticket key back to herdr as a
 	// `ticket` pane-metadata token, so a herdr sidebar row configured with
 	// $ticket can show it. Off leaves herdr's metadata untouched.
@@ -182,8 +192,34 @@ func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	s.attachRepos(ctx, byKey)
 	s.publishTokens(ctx, agents, byKey)
 	return byKey, nil
+}
+
+// attachRepos fills each pane's Repo from its Dir, reading each distinct dir
+// once per poll. Like the branch reads, it stops touching the disk once ctx
+// ends.
+func (s *SocketSource) attachRepos(ctx context.Context, byKey map[string]Live) {
+	repoFor := s.RepoForDir
+	if repoFor == nil {
+		repoFor = RepoForDir
+	}
+	cache := map[string]string{}
+	for _, l := range byKey {
+		for i := range l.Panes {
+			dir := l.Panes[i].Dir
+			repo, seen := cache[dir]
+			if !seen {
+				if ctx.Err() != nil {
+					return
+				}
+				repo = repoFor(dir)
+				cache[dir] = repo
+			}
+			l.Panes[i].Repo = repo
+		}
+	}
 }
 
 // publishTokens tells herdr which ticket each agent pane is on, as a `ticket`

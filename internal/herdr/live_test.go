@@ -95,7 +95,7 @@ func TestResolveKeepsPaneRefs(t *testing.T) {
 	if len(got.Panes) != 2 {
 		t.Fatalf("panes = %+v", got.Panes)
 	}
-	want := PaneRef{PaneID: "wC:p1", WorkspaceID: "wC", TabID: "wC:t1", Status: StatusWorking, Focused: true}
+	want := PaneRef{PaneID: "wC:p1", WorkspaceID: "wC", TabID: "wC:t1", Status: StatusWorking, Focused: true, Dir: "/a"}
 	if got.Panes[0] != want || got.Panes[1].PaneID != "wD:p3" {
 		t.Fatalf("pane refs = %+v", got.Panes)
 	}
@@ -170,5 +170,72 @@ func TestPollFailsWhenResolveOutlivesContext(t *testing.T) {
 	}
 	if _, err := s.Poll(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+// Poll fills each pane's Repo, reading each distinct dir once.
+func TestPollFillsRepoOncePerDir(t *testing.T) {
+	calls := map[string]int{}
+	s := &SocketSource{
+		Client: pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
+		KeysForDir: func(context.Context, string) []string {
+			return []string{"TKB-22", "TKB-23"}
+		},
+		RepoForDir: func(dir string) string { calls[dir]++; return "o/n" },
+	}
+	got, err := s.Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("poll returned no tickets")
+	}
+	for key, l := range got {
+		for _, p := range l.Panes {
+			if p.Repo != "o/n" || p.Dir == "" {
+				t.Fatalf("%s pane = %+v, want Repo o/n and a Dir", key, p)
+			}
+		}
+	}
+	for dir, n := range calls {
+		if n != 1 {
+			t.Fatalf("RepoForDir(%q) called %d times in one poll", dir, n)
+		}
+	}
+}
+
+// Distinct dirs get their own lookups.
+func TestAttachReposLooksUpEachDir(t *testing.T) {
+	calls := map[string]int{}
+	s := &SocketSource{RepoForDir: func(dir string) string { calls[dir]++; return "r" + dir }}
+	byKey := map[string]Live{
+		"TKB-1": {Panes: []PaneRef{{Dir: "/a"}, {Dir: "/b"}}},
+		"TKB-2": {Panes: []PaneRef{{Dir: "/a"}}},
+	}
+	s.attachRepos(context.Background(), byKey)
+	if calls["/a"] != 1 || calls["/b"] != 1 || len(calls) != 2 {
+		t.Fatalf("calls = %v, want one per distinct dir", calls)
+	}
+	if byKey["TKB-1"].Panes[1].Repo != "r/b" || byKey["TKB-2"].Panes[0].Repo != "r/a" {
+		t.Fatalf("repos = %+v", byKey)
+	}
+}
+
+// A cancelled ctx stops attachRepos; panes left unfilled keep Repo "", which
+// never matches a board repo.
+func TestAttachReposStopsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	s := &SocketSource{RepoForDir: func(string) string { calls++; cancel(); return "o/n" }}
+	byKey := map[string]Live{
+		"TKB-1": {Panes: []PaneRef{{Dir: "/a"}, {Dir: "/b"}, {Dir: "/c"}}},
+	}
+	s.attachRepos(ctx, byKey)
+	if calls != 1 {
+		t.Fatalf("RepoForDir called %d times after cancel, want 1", calls)
+	}
+	p := byKey["TKB-1"].Panes
+	if p[0].Repo != "o/n" || p[1].Repo != "" || p[2].Repo != "" {
+		t.Fatalf("panes = %+v, want only the first filled", p)
 	}
 }

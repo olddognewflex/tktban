@@ -235,6 +235,27 @@ func TestSeedSettingsDropsNotify(t *testing.T) {
 	}
 }
 
+// TKB-29: reconcile_agent_status gates a write to the ticket provider, so a
+// standalone true must not travel to the plugin file.
+func TestSeedSettingsDropsReconcile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "standalone.toml")
+	dst := filepath.Join(dir, "state", "settings.toml")
+	body := "reconcile_agent_status = true\ntheme = \"catppuccin-mocha\"\n"
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedSettings(dst, src); err != nil {
+		t.Fatal(err)
+	}
+	if seeded := read(t, dst); strings.Contains(seeded, "reconcile_agent_status") {
+		t.Errorf("seeded file carries reconcile_agent_status:\n%s", seeded)
+	}
+	if got := settings.Load(dst)["reconcile_agent_status"]; got != false {
+		t.Errorf("reconcile_agent_status in the plugin file = %v, want off", got)
+	}
+}
+
 func read(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
