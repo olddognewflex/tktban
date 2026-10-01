@@ -83,6 +83,8 @@ func runOpenBoard(t *testing.T, ctxJSON string) string {
 		"PATH=" + noPythonPATH(t),
 		"HERDR_BIN_PATH=" + fakeHerdrBin(t),
 		"HERDR_PLUGIN_ID=test.tktban",
+		// The rebuild has its own tests; here it would build into the repo.
+		"TKTBAN_NO_AUTOBUILD=1",
 	}
 	if ctxJSON != "" {
 		env = append(env, "HERDR_PLUGIN_CONTEXT_JSON="+ctxJSON)
