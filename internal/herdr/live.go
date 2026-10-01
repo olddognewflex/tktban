@@ -123,6 +123,35 @@ func PickPane(l Live) (PaneRef, bool) {
 	return best, found
 }
 
+// Snapshot is one successful poll: the agent panes resolved to tickets, and
+// every pane herdr listed with an agent not yet released, whether or not its
+// directory named a ticket. AgentPanes is what tells "the pane closed" apart
+// from "the pane's branch stopped naming the ticket" (a detached HEAD
+// mid-rebase, a checkout inside the worktree, a cd out of it): only the first
+// takes the pane out of AgentPanes.
+//
+// A producer must set AgentPanes non-nil on success, empty when no pane has
+// an agent: the board reads a nil set as "unknown" and lets no ticket's pane
+// count as gone on that poll.
+type Snapshot struct {
+	ByKey      map[string]Live
+	AgentPanes map[string]bool // pane id -> true
+}
+
+// agentPanes is the set of pane ids herdr lists with an agent attached. An
+// agent herdr has released (Agent nil) is not one; an empty agent kind still
+// is, so a pane is only ever left out of the set for a reason that means it
+// is gone.
+func agentPanes(agents []Agent) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range agents {
+		if a.Agent != nil && a.PaneID != "" {
+			out[a.PaneID] = true
+		}
+	}
+	return out
+}
+
 // ErrProtocol means herdr speaks a socket protocol tktban was not built for.
 var ErrProtocol = errors.New("unsupported herdr protocol")
 
@@ -163,7 +192,8 @@ func (s *SocketSource) Probe(ctx context.Context) error {
 	return nil
 }
 
-// Poll lists herdr's agent panes and resolves them to tickets. Branches are
+// Poll lists herdr's agent panes and resolves them to tickets, and reports
+// which panes still have an agent at all (see Snapshot). Branches are
 // re-read every call, so a checkout inside a pane shows on the next poll. A
 // resolve that outlives ctx (a hung filesystem) counts as a failed poll.
 //
@@ -173,10 +203,10 @@ func (s *SocketSource) Probe(ctx context.Context) error {
 // statuses returned — but it does happen before Poll returns, so a poll that
 // has panes to correct costs those round trips. A poll where herdr already
 // holds the right token for every pane makes no extra calls at all.
-func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
+func (s *SocketSource) Poll(ctx context.Context) (Snapshot, error) {
 	agents, err := s.Client.AgentList(ctx)
 	if err != nil {
-		return nil, err
+		return Snapshot{}, err
 	}
 	keysFor := s.KeysForDir
 	if keysFor == nil {
@@ -190,11 +220,11 @@ func (s *SocketSource) Poll(ctx context.Context) (map[string]Live, error) {
 		return keysFor(ctx, dir)
 	})
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Snapshot{}, err
 	}
 	s.attachRepos(ctx, byKey)
 	s.publishTokens(ctx, agents, byKey)
-	return byKey, nil
+	return Snapshot{ByKey: byKey, AgentPanes: agentPanes(agents)}, nil
 }
 
 // attachRepos fills each pane's Repo from its Dir, reading each distinct dir

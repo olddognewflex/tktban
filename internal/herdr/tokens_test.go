@@ -237,7 +237,7 @@ func poll(t *testing.T, s *SocketSource) map[string]Live {
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	return got
+	return got.ByKey
 }
 
 func TestPublishTokensOnlyOnChange(t *testing.T) {
@@ -453,7 +453,7 @@ func TestPollAndFocusOverlap(t *testing.T) {
 				t.Errorf("poll during jumps: %v", err)
 				return
 			}
-			if got["TKB-1"].Status != StatusWorking {
+			if got.ByKey["TKB-1"].Status != StatusWorking {
 				t.Errorf("poll during jumps = %+v", got)
 				return
 			}

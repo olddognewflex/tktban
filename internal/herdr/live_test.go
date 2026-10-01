@@ -132,12 +132,32 @@ func TestPollResolvesAgentList(t *testing.T) {
 			return keysByDir(map[string]string{"/src/tktban-wt": "TKB-22"})(dir)
 		},
 	}
-	got, err := s.Poll(context.Background())
+	snap, err := s.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := snap.ByKey
 	if len(got) != 1 || got["TKB-22"].Status != StatusWorking {
 		t.Fatalf("poll = %+v", got)
+	}
+}
+
+// AgentPanes lists every pane with an agent, including one whose branch names
+// no ticket, and leaves out a pane whose agent herdr has released.
+func TestPollReportsAgentPanesWithoutKeys(t *testing.T) {
+	s := &SocketSource{
+		Client:     pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
+		KeysForDir: func(context.Context, string) []string { return nil }, // detached HEAD
+	}
+	snap, err := s.Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.ByKey) != 0 {
+		t.Fatalf("ByKey = %+v, want no tickets", snap.ByKey)
+	}
+	if !snap.AgentPanes["wC:p1"] || snap.AgentPanes["wD:p2"] || len(snap.AgentPanes) != 1 {
+		t.Fatalf("AgentPanes = %v, want only the live agent wC:p1", snap.AgentPanes)
 	}
 }
 
@@ -183,10 +203,11 @@ func TestPollFillsRepoOncePerDir(t *testing.T) {
 		},
 		RepoForDir: func(dir string) string { calls[dir]++; return "o/n" },
 	}
-	got, err := s.Poll(context.Background())
+	snap, err := s.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := snap.ByKey
 	if len(got) == 0 {
 		t.Fatal("poll returned no tickets")
 	}

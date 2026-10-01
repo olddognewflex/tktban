@@ -19,9 +19,15 @@ import (
 type fakeLive struct {
 	probeErr error
 	byKey    map[string]herdr.Live
-	pollErr  error
-	probes   int
-	polls    int
+	// agentPanes is herdr's set of live agent panes; nil derives it from the
+	// panes in byKey, so emptying byKey reads as every pane closing. Set it to
+	// keep a pane alive that resolves to no ticket.
+	agentPanes map[string]bool
+	pollErr    error
+	probes     int
+	polls      int
+	// during runs inside each Poll, as if herdr took that long to answer.
+	during func()
 }
 
 func (f *fakeLive) Probe(context.Context) error {
@@ -29,9 +35,24 @@ func (f *fakeLive) Probe(context.Context) error {
 	return f.probeErr
 }
 
-func (f *fakeLive) Poll(context.Context) (map[string]herdr.Live, error) {
+func (f *fakeLive) Poll(context.Context) (herdr.Snapshot, error) {
 	f.polls++
-	return f.byKey, f.pollErr
+	if f.during != nil {
+		f.during()
+	}
+	if f.pollErr != nil {
+		return herdr.Snapshot{}, f.pollErr
+	}
+	panes := f.agentPanes
+	if panes == nil {
+		panes = map[string]bool{}
+		for _, l := range f.byKey {
+			for _, p := range l.Panes {
+				panes[p.PaneID] = true
+			}
+		}
+	}
+	return herdr.Snapshot{ByKey: f.byKey, AgentPanes: panes}, nil
 }
 
 func live(pairs ...string) map[string]herdr.Live {

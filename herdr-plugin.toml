@@ -21,8 +21,10 @@
 # settings.toml, which is what the board's `b` key writes when the board runs
 # under --herdr, as this manifest's action starts it. A board without that flag
 # writes the standalone settings file, which this hook never reads.
-# Write-back hooks come later; see docs/herdr-events.md for which events a
-# manifest can hook.
+# Writing agent status back to tickets is not a hook: the open board does it
+# from its own live poll, and only with `reconcile_agent_status = true` in the
+# plugin settings.toml (README, "Write agent_status back"). See
+# docs/herdr-events.md for which events a manifest can hook.
 #
 # Each poll also reconciles the ticket key of every agent pane with herdr's
 # own `ticket` pane-metadata token (source "odnf.tktban"), reporting only the
