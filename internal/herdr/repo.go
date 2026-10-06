@@ -3,6 +3,7 @@ package herdr
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -14,18 +15,14 @@ import (
 //
 // A linked worktree keeps its config in the main repository: the per-worktree
 // gitdir names it in a commondir file, so that is followed. A config.worktree
-// in the gitdir itself overrides it when it sets an origin url. insteadOf
+// in the gitdir itself overrides it when it sets an origin url, but only when
+// the common config enables extensions.worktreeConfig, as in git. insteadOf
 // rewrites and includeIf are not handled; the result then fails to match
 // whatever it is compared with, which is the safe direction.
 func RepoForDir(dir string) string {
 	gitDir := findGitDir(dir)
 	if gitDir == "" {
 		return ""
-	}
-	if cfg, err := os.ReadFile(filepath.Join(gitDir, "config.worktree")); err == nil {
-		if u := originURL(string(cfg)); u != "" {
-			return normalizeRepo(u)
-		}
 	}
 	common := gitDir
 	if raw, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
@@ -40,7 +37,48 @@ func RepoForDir(dir string) string {
 	if err != nil {
 		return ""
 	}
+	if worktreeConfigEnabled(string(cfg)) {
+		if wcfg, err := os.ReadFile(filepath.Join(gitDir, "config.worktree")); err == nil {
+			if u := originURL(string(wcfg)); u != "" {
+				return normalizeRepo(u)
+			}
+		}
+	}
 	return normalizeRepo(originURL(string(cfg)))
+}
+
+// worktreeConfigEnabled reports whether the common config sets
+// extensions.worktreeConfig to a true value, the only case in which git reads
+// config.worktree. Section and key are case-insensitive, the last assignment
+// wins, and a bare key counts as true, as in git.
+func worktreeConfigEnabled(cfg string) bool {
+	inExt, on := false, false
+	for _, line := range strings.Split(cfg, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			name, _, _ := strings.Cut(strings.TrimPrefix(line, "["), "]")
+			inExt = strings.EqualFold(strings.TrimSpace(name), "extensions")
+			continue
+		}
+		if !inExt {
+			continue
+		}
+		k, v, hasVal := strings.Cut(line, "=")
+		if !strings.EqualFold(strings.TrimSpace(k), "worktreeConfig") {
+			continue
+		}
+		if !hasVal {
+			on = true
+			continue
+		}
+		switch strings.ToLower(configValue(v)) {
+		case "true", "yes", "on", "1":
+			on = true
+		default:
+			on = false
+		}
+	}
+	return on
 }
 
 // originURL returns the first url of the [remote "origin"] section. As in git,
@@ -122,7 +160,12 @@ func normalizeRepo(url string) string {
 		if i := strings.LastIndex(auth, "@"); i >= 0 {
 			auth = auth[i+1:]
 		}
-		host, _, _ = strings.Cut(auth, ":")
+		var port string
+		var hasPort bool
+		host, port, hasPort = strings.Cut(auth, ":")
+		if hasPort && !validPort(port) {
+			return ""
+		}
 		path = p
 	} else if h, p, ok := strings.Cut(url, ":"); ok && !strings.Contains(h, "/") {
 		// scp-like [user@]host:path
@@ -144,4 +187,12 @@ func normalizeRepo(url string) string {
 		return ""
 	}
 	return strings.ToLower(parts[0] + "/" + parts[1])
+}
+
+// validPort reports whether p is a decimal TCP port, 1 to 65535. An empty or
+// non-numeric port is how a lookalike authority such as github.com:evil.example
+// would otherwise slip past a split at the first colon.
+func validPort(p string) bool {
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535 && strings.Trim(p, "0123456789") == ""
 }

@@ -180,7 +180,9 @@ func TestStaleRunYieldsToNewerFrontmatter(t *testing.T) {
 }
 
 // TKB-26 is read-only: a board that hides a stale frontmatter processing
-// never writes agent_status back, across load, refresh and live polls.
+// never writes agent_status back, across load, refresh and live polls. That
+// still holds by default: the TKB-29 write-back (reconcile.go) is opt-in via
+// reconcile_agent_status, which this board leaves off.
 func TestBoardNeverWritesAgentStatus(t *testing.T) {
 	src := &fakeLive{byKey: map[string]herdr.Live{}} // herdr on, no pane
 	m, cr := testModel(t)

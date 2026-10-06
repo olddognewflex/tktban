@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,6 +50,16 @@ type captureRunner struct {
 	failOn      map[string]bool
 	list        string
 	agents      string
+	// viewAgent and viewAgentAt are the agent_status and agent_status_at a
+	// `tkt view` of a key reports (absent when unset). An `edit KEY
+	// --agent-status X` writes both, stamping a fresh agent_status_at only
+	// when the value changes, as tkt does, so a view after a write agrees
+	// with it. stamps counts those restamps; stampNow makes each restamp the
+	// package clock's own second instead of a fixed early one.
+	viewAgent   map[string]string
+	viewAgentAt map[string]string
+	stamps      int
+	stampNow    bool
 }
 
 // ctxCall is one observed invocation: whether it was bounded, how long the
@@ -101,7 +112,11 @@ func (c *captureRunner) run(ctx context.Context, bin string, args, env []string)
 		if r, ok := c.viewRole[args[1]]; ok {
 			role = r
 		}
-		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"` + role + `","description":"d","labels":[],"blocked_by":[]}`), nil, 0, nil
+		return []byte(`{"key":"` + args[1] + `","summary":"first thing","status_role":"` + role + `","description":"d","labels":[],"blocked_by":[]` +
+			c.agentFields(args[1]) + `}`), nil, 0, nil
+	case len(args) >= 4 && args[0] == "edit" && args[2] == "--agent-status":
+		c.writeAgent(args[1], args[3])
+		return []byte(`{"key":"` + args[1] + `"` + c.agentFields(args[1]) + `}`), nil, 0, nil
 	case eq(args, "cfg", "issue_types", "--json"):
 		return []byte(`{"full_sdlc":["Story","Bug"],"deliverable":["Task"]}`), nil, 0, nil
 	case eq(args, "cfg", "vcs", "--json"):
@@ -118,6 +133,34 @@ func (c *captureRunner) run(ctx context.Context, bin string, args, env []string)
 		return []byte(`{"key":"TKB-99"}`), nil, 0, nil
 	default: // transition, comment, edit, create
 		return []byte(`{"key":"TKT-1"}`), nil, 0, nil
+	}
+}
+
+// agentFields is the agent_status JSON fields for key, with a leading comma,
+// or "" when it has none.
+func (c *captureRunner) agentFields(key string) string {
+	st, ok := c.viewAgent[key]
+	if !ok {
+		return ""
+	}
+	return `,"agent_status":"` + st + `","agent_status_at":"` + c.viewAgentAt[key] + `"`
+}
+
+// writeAgent applies an `edit --agent-status`: the stamp moves only when the
+// value changes or there is none yet, as tkt's markdown backend does
+// (adapters/markdown.py edit) — re-asserting the same value keeps its stamp.
+func (c *captureRunner) writeAgent(key, st string) {
+	if c.viewAgent == nil {
+		c.viewAgent, c.viewAgentAt = map[string]string{}, map[string]string{}
+	}
+	if cur, ok := c.viewAgent[key]; ok && cur == st && c.viewAgentAt[key] != "" {
+		return
+	}
+	c.stamps++
+	c.viewAgent[key] = st
+	c.viewAgentAt[key] = fmt.Sprintf("2026-10-01T00:00:%02dZ", c.stamps)
+	if c.stampNow {
+		c.viewAgentAt[key] = now().UTC().Format(time.RFC3339)
 	}
 }
 

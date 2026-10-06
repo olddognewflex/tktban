@@ -14,10 +14,11 @@ import (
 
 // LiveSource is where live agent status comes from (herdr.SocketSource inside
 // herdr). Probe runs at startup, and again while herdr is unreachable; Poll
-// returns the herdr view of each ticket, keyed by uppercase ticket key.
+// returns the herdr view of each ticket, keyed by uppercase ticket key, along
+// with every pane that still has an agent (see herdr.Snapshot).
 type LiveSource interface {
 	Probe(ctx context.Context) error
-	Poll(ctx context.Context) (map[string]herdr.Live, error)
+	Poll(ctx context.Context) (herdr.Snapshot, error)
 }
 
 const (
@@ -32,21 +33,29 @@ const (
 // keeps going while a modal is open. src is nil outside herdr, and is dropped
 // for good when herdr speaks an unsupported protocol.
 type liveState struct {
-	src      LiveSource
-	probed   bool                  // the startup probe passed; ticks poll rather than re-probe
-	on       bool                  // a poll succeeded lately: badges follow herdr
-	byKey    map[string]herdr.Live // last good poll
-	fails    int                   // consecutive failed probes, then polls
-	nextPoll time.Duration         // delay of the tick last scheduled, 0 before any
+	src    LiveSource
+	probed bool                  // the startup probe passed; ticks poll rather than re-probe
+	on     bool                  // a poll succeeded lately: badges follow herdr
+	byKey  map[string]herdr.Live // last good poll
+	// agentPanes is the last good poll's live agent panes, keyed or not; the
+	// write-back reads it to tell a closed pane from one whose branch stopped
+	// naming its ticket.
+	agentPanes map[string]bool
+	polledAt   time.Time     // when the last good poll started
+	fails      int           // consecutive failed probes, then polls
+	nextPoll   time.Duration // delay of the tick last scheduled, 0 before any
 }
 
 // liveProbeMsg is the startup probe result.
 type liveProbeMsg struct{ err error }
 
-// liveMsg is one poll result.
+// liveMsg is one poll result. polledAt is when the poll started, read before
+// herdr was asked, so anything stamped after it is certainly after the poll.
 type liveMsg struct {
-	byKey map[string]herdr.Live
-	err   error
+	byKey      map[string]herdr.Live
+	agentPanes map[string]bool
+	polledAt   time.Time
+	err        error
 }
 
 // liveTickMsg fires when the next scheduled call (probe or poll) is due.
@@ -79,8 +88,9 @@ func livePollCmd(src LiveSource) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
 		defer cancel()
-		byKey, err := src.Poll(ctx)
-		return liveMsg{byKey: byKey, err: err}
+		at := now()
+		snap, err := src.Poll(ctx)
+		return liveMsg{byKey: snap.ByKey, agentPanes: snap.AgentPanes, polledAt: at, err: err}
 	}
 }
 
@@ -116,26 +126,38 @@ func (m Model) onLiveProbe(msg liveProbeMsg) (tea.Model, tea.Cmd) {
 	if m.live.fails == 1 {
 		warn = m.setStatus("herdr live status off: unavailable", "warn")
 	}
-	return m, tea.Batch(warn, m.scheduleLive(liveBackoff))
+	next := m.scheduleLive(liveBackoff)
+	return m, tea.Batch(warn, next)
 }
 
 // onLive stores a poll result; a good one turns badges live. A failure keeps
 // the last map for a couple of polls (a blip should not flicker badges); after
 // liveMaxFails the board falls back to frontmatter badges, warns once per
 // outage, and keeps retrying slowly so it recovers when herdr returns.
+//
+// Only a good poll feeds the agent_status write-back (reconcile): a failed one
+// is no evidence that a pane closed, so it neither counts towards nor resets
+// a pane's absence.
 func (m Model) onLive(msg liveMsg) (tea.Model, tea.Cmd) {
 	if m.live.src == nil {
 		return m, nil
 	}
 	if msg.err == nil {
 		m.live.byKey = msg.byKey
+		m.live.agentPanes = msg.agentPanes
+		m.live.polledAt = msg.polledAt
 		m.live.fails = 0
 		m.live.on = true
-		return m, m.scheduleLive(livePollInterval)
+		// reconcile and scheduleLive both change m, so they run before m is
+		// returned: Go leaves the order of a return's operands unspecified.
+		recon := m.reconcile()
+		next := m.scheduleLive(livePollInterval)
+		return m, tea.Batch(recon, next)
 	}
 	m.live.fails++
 	if m.live.fails < liveMaxFails {
-		return m, m.scheduleLive(livePollInterval)
+		next := m.scheduleLive(livePollInterval)
+		return m, next
 	}
 	var warn tea.Cmd
 	if m.live.fails == liveMaxFails {
@@ -147,7 +169,9 @@ func (m Model) onLive(msg liveMsg) (tea.Model, tea.Cmd) {
 	}
 	m.live.on = false
 	m.live.byKey = nil
-	return m, tea.Batch(warn, m.scheduleLive(liveBackoff))
+	m.live.agentPanes = nil
+	next := m.scheduleLive(liveBackoff)
+	return m, tea.Batch(warn, next)
 }
 
 // onLiveTick runs the next scheduled call: a poll, or another probe while
