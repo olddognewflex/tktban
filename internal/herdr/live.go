@@ -223,6 +223,11 @@ func (s *SocketSource) Poll(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	s.attachRepos(ctx, byKey)
+	// attachRepos stops early once ctx ends, leaving panes unfilled; that is
+	// a failed poll, not a partial success.
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
 	s.publishTokens(ctx, agents, byKey)
 	return Snapshot{ByKey: byKey, AgentPanes: agentPanes(agents)}, nil
 }

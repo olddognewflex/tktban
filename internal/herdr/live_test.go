@@ -260,3 +260,20 @@ func TestAttachReposStopsOnCancel(t *testing.T) {
 		t.Fatalf("panes = %+v, want only the first filled", p)
 	}
 }
+
+// A ctx that ends during repo lookup fails the poll rather than returning
+// panes whose Repo was left unfilled.
+func TestPollFailsWhenRepoLookupOutlivesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &SocketSource{
+		Client: pipeClient(t, func(map[string]any) string { return compact(t, agentListReply) }),
+		KeysForDir: func(context.Context, string) []string {
+			return []string{"TKB-22"}
+		},
+		RepoForDir: func(string) string { cancel(); return "o/n" },
+	}
+	if _, err := s.Poll(ctx); err == nil {
+		t.Fatal("Poll succeeded though ctx ended during repo lookup")
+	}
+}
