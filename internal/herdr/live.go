@@ -252,31 +252,6 @@ func (s *SocketSource) attachRepos(ctx context.Context, byKey map[string]Live) {
 	}
 }
 
-// attachRepos fills each pane's Repo from its Dir, reading each distinct dir
-// once per poll. Like the branch reads, it stops touching the disk once ctx
-// ends.
-func (s *SocketSource) attachRepos(ctx context.Context, byKey map[string]Live) {
-	repoFor := s.RepoForDir
-	if repoFor == nil {
-		repoFor = RepoForDir
-	}
-	cache := map[string]string{}
-	for _, l := range byKey {
-		for i := range l.Panes {
-			dir := l.Panes[i].Dir
-			repo, seen := cache[dir]
-			if !seen {
-				if ctx.Err() != nil {
-					return
-				}
-				repo = repoFor(dir)
-				cache[dir] = repo
-			}
-			l.Panes[i].Repo = repo
-		}
-	}
-}
-
 // publishTokens tells herdr which ticket each agent pane is on, as a `ticket`
 // pane-metadata token, and clears the token of panes that are on no ticket any
 // more (a branch that names none, or an agent herdr has released).
