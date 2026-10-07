@@ -91,6 +91,7 @@ func TestRepoForDirConfigWorktree(t *testing.T) {
 	write(t, filepath.Join(base, "wt", ".git"), "gitdir: "+wtGit+"\n")
 	wt := filepath.Join(base, "wt")
 
+	write(t, filepath.Join(base, "main", ".git", "config"), originCfg+"[extensions]\n\tworktreeConfig = true\n")
 	write(t, filepath.Join(wtGit, "config.worktree"), "[core]\n\tbare = false\n")
 	if got := RepoForDir(wt); got != "o/n" {
 		t.Fatalf("no origin in config.worktree: RepoForDir = %q, want o/n", got)
@@ -98,6 +99,36 @@ func TestRepoForDirConfigWorktree(t *testing.T) {
 	write(t, filepath.Join(wtGit, "config.worktree"), "[remote \"origin\"]\n\turl = https://github.com/w/t.git\n")
 	if got := RepoForDir(wt); got != "w/t" {
 		t.Fatalf("RepoForDir = %q, want w/t", got)
+	}
+}
+
+// git reads config.worktree only when the common config enables
+// extensions.worktreeConfig; otherwise it is ignored and origin comes from the
+// common config.
+func TestRepoForDirConfigWorktreeNeedsExtension(t *testing.T) {
+	over := "[remote \"origin\"]\n\turl = https://github.com/w/t.git\n"
+	cases := map[string]string{
+		"": "o/n",
+		"[extensions]\n\tworktreeConfig = false\n":                          "o/n",
+		"[extensions]\n\tworktreeConfig = no\n":                             "o/n",
+		"[core]\n\tworktreeConfig = true\n":                                 "o/n",
+		"[extensions]\n\tworktreeConfig = true\n":                           "w/t",
+		"[Extensions]\n\tWorktreeConfig = YES\n":                            "w/t",
+		"[extensions]\n\tworktreeConfig = on\n":                             "w/t",
+		"[extensions]\n\tworktreeConfig = 1\n":                              "w/t",
+		"[extensions]\n\tworktreeConfig\n":                                  "w/t",
+		"[extensions]\n\tworktreeConfig = true\n\tworktreeConfig = false\n": "o/n",
+	}
+	for ext, want := range cases {
+		base := t.TempDir()
+		write(t, filepath.Join(base, "main", ".git", "config"), originCfg+ext)
+		wtGit := filepath.Join(base, "main", ".git", "worktrees", "wt")
+		write(t, filepath.Join(wtGit, "commondir"), "../..\n")
+		write(t, filepath.Join(wtGit, "config.worktree"), over)
+		write(t, filepath.Join(base, "wt", ".git"), "gitdir: "+wtGit+"\n")
+		if got := RepoForDir(filepath.Join(base, "wt")); got != want {
+			t.Errorf("extensions %q: RepoForDir = %q, want %q", ext, got, want)
+		}
 	}
 }
 
@@ -123,39 +154,50 @@ func TestNormalizeRepo(t *testing.T) {
 		"https://user:pw@github.com:443/o/n.git": "o/n",
 		"ssh://git@github.com/o/n.git":           "o/n",
 		"ssh://git@github.com:22/o/n.git":        "o/n",
+		"https://github.com:65535/o/n":           "o/n",
 		"git://github.com/o/n":                   "o/n",
 		"HTTPS://GitHub.com/o/n":                 "o/n",
 		"  git@github.com:o/n.git  ":             "o/n",
 		"https://github.com/Owner/Name.git":      "owner/name",
 		"git@GitHub.com:Owner/Name.git":          "owner/name",
 		// rejected
-		"":                                "",
-		"n":                               "",
-		"/":                               "",
-		"https://github.com":              "",
-		"https://github.com/":             "",
-		"https://github.com/n":            "",
-		"git@github.com:n":                "",
-		"https://github.com/o/.git":       "",
-		"file:///x/o/n":                   "",
-		"file://github.com/o/n":           "",
-		"/x/o/n":                          "",
-		"./o/n":                           "",
-		"o/n":                             "",
-		"../github.com/o/n":               "",
-		"/x/github.com:o/n":               "",
-		"https://gitlab.com/o/n":          "",
-		"https://host.example/g/o/n/":     "",
-		"git@gitlab.com:o/n.git":          "",
-		"https://notgithub.com/o/n":       "",
-		"https://github.com.evil.com/o/n": "",
-		"https://github.com@evil.com/o/n": "",
-		"https:///o/n":                    "",
-		"ssh://git@/o/n.git":              "",
-		"git@:o/n.git":                    "",
-		"https://github.com/g/o/n":        "",
-		"git@github.com:g/o/n.git":        "",
-		"ftp://github.com/o/n":            "",
+		"":                                    "",
+		"n":                                   "",
+		"/":                                   "",
+		"https://github.com":                  "",
+		"https://github.com/":                 "",
+		"https://github.com/n":                "",
+		"git@github.com:n":                    "",
+		"https://github.com/o/.git":           "",
+		"file:///x/o/n":                       "",
+		"file://github.com/o/n":               "",
+		"/x/o/n":                              "",
+		"./o/n":                               "",
+		"o/n":                                 "",
+		"../github.com/o/n":                   "",
+		"/x/github.com:o/n":                   "",
+		"https://gitlab.com/o/n":              "",
+		"https://host.example/g/o/n/":         "",
+		"git@gitlab.com:o/n.git":              "",
+		"https://notgithub.com/o/n":           "",
+		"https://github.com.evil.com/o/n":     "",
+		"https://github.com@evil.com/o/n":     "",
+		"https://github.com@evil/o/n":         "",
+		"https://github.com.evil.example/o/n": "",
+		"https://github.com:evil.example/o/n": "",
+		"https://github.com:/o/n":             "",
+		"https://github.com:0/o/n":            "",
+		"https://github.com:65536/o/n":        "",
+		"https://github.com:-1/o/n":           "",
+		"https://github.com:+443/o/n":         "",
+		"https://github.com:44 3/o/n":         "",
+		"https://github.com:1:2/o/n":          "",
+		"https:///o/n":                        "",
+		"ssh://git@/o/n.git":                  "",
+		"git@:o/n.git":                        "",
+		"https://github.com/g/o/n":            "",
+		"git@github.com:g/o/n.git":            "",
+		"ftp://github.com/o/n":                "",
 	}
 	for in, want := range cases {
 		if got := normalizeRepo(in); got != want {

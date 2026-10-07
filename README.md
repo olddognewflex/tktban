@@ -267,6 +267,69 @@ no key are ignored. When several agent panes work one ticket, 🙋 beats ⚙.
 The branch comes from the `.git/HEAD` file; only repos using reftable ref
 storage, where that file is a stub, run `git symbolic-ref` instead.
 
+### Write `agent_status` back (opt-in)
+
+The badges above fix what the *board* shows; the ticket file can still say
+`processing` long after its agent pane was closed, and every other reader
+(`tkt view`, a skill picking the next ticket) believes it. With write-back on,
+the board corrects the frontmatter from what herdr sees:
+
+| herdr sees | Ticket says | Board writes |
+|------------|-------------|--------------|
+| the ticket's agent pane is gone (closed, or the agent released) | `processing` | `idle` |
+| the agent is blocked on a prompt or question | `processing` | `waiting` |
+| the agent is working again | a `waiting` this board wrote | `processing` |
+| the pane is gone | a `waiting` this board wrote | `idle` |
+
+It is off by default, because it writes to your ticket provider. It is a hand
+edit, like `dispatch`, in the settings file the board reads:
+
+```toml
+# ~/.local/state/herdr/plugins/odnf.tktban/settings.toml  (herdr's own board)
+# ~/.config/tktban/settings.toml                          (everywhere else)
+reconcile_agent_status = true
+```
+
+The one-time seed into herdr's plugin file does not copy this key, so a
+board herdr launches stays off until you set it there.
+
+It is deliberately narrow:
+
+- **Only from a good live poll, inside herdr.** Outside herdr, with
+  `--no-herdr-live`, after a protocol mismatch, and while polls are failing,
+  nothing is written: a poll that did not answer is no evidence a pane closed.
+- **Gone means the pane, not the branch.** A ticket's pane counts as gone
+  only once herdr stops listing it with an agent (the pane closed, or herdr
+  released the agent) for two good polls in a row *and* at least three
+  seconds since a poll last saw it on the ticket. An agent whose branch merely
+  stops naming the ticket — a detached HEAD mid-rebase, a checkout inside the
+  worktree, a `cd` out of it — is still alive, so nothing is written for as
+  long as it stays that way, even if another pane on the same ticket closes.
+- **Only over a `processing` older than the pane.** `idle` is written only if
+  the ticket's `agent_status_at` is before the start of the last poll that saw
+  the pane, or is the very `processing` this board restored itself. A
+  `processing` written later (another machine, an agent outside herdr) is
+  left alone, as is one with a missing or unreadable `agent_status_at`.
+- **Only tickets this board has seen a pane for.** A ticket that never had an
+  agent pane while the board was open is never written.
+- **Never `done`.** A closed pane looks the same whether the agent finished or
+  was killed.
+- **Never over someone else's value.** Each ticket is re-read (`tkt view`)
+  right before the write and skipped unless it still says `processing`, or
+  still holds the very `waiting` this board wrote (same `agent_status_at`). A
+  `waiting` a skill wrote is never cleared.
+- **Not while a headless run owns it.** No `idle` while `tkt agents` reports a
+  `running` or `stalled` run for the ticket.
+- **Only in this board's repo.** Ticket keys are unique per board, not
+  globally, so the board writes only when its `[vcs] repo` is set and every
+  agent pane on the ticket is a checkout of that repo (the `origin` remote,
+  compared case-insensitively). A pane whose repo cannot be read blocks the
+  write.
+- **Once per episode.** A write that fails warns once and is not retried until
+  herdr moves on (the pane comes back, leaves `blocked`, or goes `blocked`
+  again, which re-arms the restore to `processing`). One batch of writes runs
+  at a time, and the board refreshes after any write.
+
 ### Jump between a card and its agent pane
 
 Two-way navigation, so the board and the agent working a ticket are one key
@@ -515,8 +578,9 @@ found by reading the pane's branch back.
 tktban does not write `agent_status` into the ticket's frontmatter when it
 dispatches. The card's badge comes from herdr while live status is on, and the
 badge merge deliberately hides a frontmatter `processing` in that case — so a
-written-back status would be invisible on the board that wrote it. Writing the
-merged status back to the ticket is planned in TKB-29.
+written-back status would be invisible on the board that wrote it. Correcting
+a stale status after the agent stops or closes is a separate, opt-in feature:
+[Write `agent_status` back](#write-agent_status-back-opt-in).
 
 ### Notifications
 

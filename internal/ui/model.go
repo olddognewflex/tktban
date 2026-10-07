@@ -65,6 +65,9 @@ type Model struct {
 
 	// live is herdr agent status for card badges; zero (off) outside herdr.
 	live liveState
+	// recon is the opt-in agent_status write-back that rides on live's polls
+	// (reconcile.go); it never writes while live is off.
+	recon reconcileState
 
 	// dispatchDir is the checkout the D key dispatches in, "" when the key is
 	// off (no opt-in setting, or no directory that was safe to resolve — see
@@ -206,6 +209,7 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 		archiveDays:  archiveThreshold(s["archive_after_days"]),
 		swept:        map[string]bool{},
 		allProjects:  s["all_projects"] == true,
+		recon:        reconcileState{enabled: reconcileEnabled(s), keys: map[string]*reconKey{}},
 	}
 }
 
@@ -248,6 +252,7 @@ func (m Model) Init() tea.Cmd {
 		m.refreshCmd(),
 		tickCmd(secondsToDuration(m.refreshSecs)),
 		m.liveInit(),
+		m.reconcileInit(),
 		m.selectInit(),
 	)
 }
@@ -390,6 +395,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case liveTickMsg:
 		return m.onLiveTick()
+
+	case reconcileRepoMsg:
+		return m.onReconcileRepo(msg)
+
+	case reconcileMsg:
+		return m.onReconcile(msg)
 
 	case jumpMsg:
 		return m.onJump(msg)
