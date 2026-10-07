@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -19,12 +20,37 @@ import (
 // warn carries a non-fatal note (e.g. time-in-lane unavailable). archive is the
 // tickets auto-archive should sweep, across the whole board rather than just
 // the filtered cards; empty when the sweep is off or has nothing to do.
+//
+// project is the project a whole-board load ran for, which is how the board
+// tells this project's cards from the rest; "" on a scoped load, where every
+// card is this project's. scopeOff is why a whole-board load fell back to a
+// scoped one (a scopeOff* value), "" when it did not. allProjects is the scope
+// the refresh was asked for, so a load that lands after P has changed it can
+// be told apart and dropped.
 type boardMsg struct {
-	roles   []model.RolePair
-	columns []model.Column
-	warn    string
-	archive []string
-	err     error
+	roles       []model.RolePair
+	columns     []model.Column
+	warn        string
+	archive     []string
+	project     string
+	scopeOff    string
+	allProjects bool
+	err         error
+}
+
+// Why the whole board is unavailable. The model turns these into a status
+// line, since only it knows which config file to name.
+const (
+	scopeOffNoProject = "no-project" // ticketing.project unset
+	scopeOffOldTkt    = "old-tkt"    // tkt list has no --all-projects
+)
+
+// scopeMsg is the answer to P on a scoped board: what tkt says about this
+// project and the flag, read off the UI loop. seq is the press it answers.
+type scopeMsg struct {
+	seq       int
+	project   string
+	supported bool
 }
 
 // archiveMsg is the result of an auto-archive sweep: the keys moved, the ones
@@ -89,32 +115,90 @@ type statusExpireMsg int
 // archiveDays <= 0 turns the sweep off, and so does a board with no archived
 // role or a lane-time read that failed — a sweep on missing data would move
 // nothing anyway, and one on partial data is not worth reasoning about.
-func refreshCmd(tk *tkt.Tkt, filter filterState, archiveDays float64) tea.Cmd {
+//
+// allProjects lists the whole shared board. The sweep still covers this
+// project's tickets only: every project's own board archives its own.
+func refreshCmd(tk *tkt.Tkt, filter filterState, archiveDays float64, allProjects bool) tea.Cmd {
 	return func() tea.Msg {
 		roles, err := tk.Roles()
 		if err != nil {
-			return boardMsg{err: err}
+			return boardMsg{err: err, allProjects: allProjects}
 		}
-		tickets, err := tk.ListAll()
+		tickets, project, scopeOff, err := listTickets(tk, allProjects)
 		if err != nil {
-			return boardMsg{err: err}
+			return boardMsg{err: err, allProjects: allProjects}
 		}
+		own := ownTickets(tickets, project)
 		sweep := archiveDays > 0 && model.HasRole(roles, model.RoleArchived)
 		visible := model.FilterTickets(tickets, filter.assignee, filter.prefix)
-		lane, warn := attachLaneTime(tk, laneTickets(tickets, visible, sweep))
+		lane, warn := attachLaneTime(tk, laneTickets(tickets, visible, sweep, project))
 		attachRunState(tk, visible)
 		var archive []string
 		if sweep && warn == "" {
-			archive = model.ArchiveCandidates(tickets, lane, archiveDays)
+			archive = model.ArchiveCandidates(own, lane, archiveDays)
 		}
-		return boardMsg{roles: roles, columns: model.BuildBoard(roles, visible), warn: warn, archive: archive}
+		return boardMsg{roles: roles, columns: model.BuildBoard(roles, visible), warn: warn,
+			archive: archive, project: project, scopeOff: scopeOff, allProjects: allProjects}
+	}
+}
+
+// listTickets is the refresh's list, in the board's scope. A whole-board list
+// that cannot run — no project to call this one, or a tkt without the flag —
+// falls back to a scoped list and says why in scopeOff, so a board persisted
+// to the whole board still opens on an old tkt. project is "" unless the
+// whole-board list ran.
+func listTickets(tk *tkt.Tkt, allProjects bool) (tickets []model.Ticket, project, scopeOff string, err error) {
+	if allProjects {
+		project = tk.Project()
+		if project == "" {
+			scopeOff = scopeOffNoProject
+		} else {
+			tickets, err = tk.ListAll(tkt.ListOpts{AllProjects: true})
+			if err == nil {
+				return tickets, project, "", nil
+			}
+			if !errors.Is(err, tkt.ErrAllProjectsUnsupported) {
+				return nil, "", "", err
+			}
+			scopeOff = scopeOffOldTkt
+		}
+	}
+	tickets, err = tk.ListAll(tkt.ListOpts{})
+	return tickets, "", scopeOff, err
+}
+
+// ownTickets is the tickets in project, by key prefix. An empty project is a
+// scoped list, where every ticket is this project's.
+func ownTickets(tickets []model.Ticket, project string) []model.Ticket {
+	if project == "" {
+		return tickets
+	}
+	return model.FilterTickets(tickets, "", project)
+}
+
+// ownKey reports whether key belongs to project, by its key prefix — the same
+// test the f filter makes. An empty project owns every key.
+func ownKey(key, project string) bool {
+	return project == "" || strings.EqualFold(model.KeyPrefix(key), project)
+}
+
+// scopeCmd reads what P needs to know before it widens the board: the project
+// and whether tkt can list past it. Both are cached by the Tkt after the
+// first successful read.
+func scopeCmd(tk *tkt.Tkt, seq int) tea.Cmd {
+	return func() tea.Msg {
+		project := tk.Project()
+		if project == "" {
+			return scopeMsg{seq: seq}
+		}
+		return scopeMsg{seq: seq, project: project, supported: tk.SupportsAllProjects()}
 	}
 }
 
 // laneTickets is the tickets whose lane time a refresh reads: the visible ones,
-// plus every done ticket when the sweep is on, in board order. With the sweep
-// off it is visible itself.
-func laneTickets(all, visible []model.Ticket, sweep bool) []model.Ticket {
+// plus every done ticket in project (any, when project is "") when the sweep
+// is on, in board order. With the sweep off it is visible itself.
+func laneTickets(all, visible []model.Ticket, sweep bool, project string) []model.Ticket {
 	if !sweep {
 		return visible
 	}
@@ -127,7 +211,7 @@ func laneTickets(all, visible []model.Ticket, sweep bool) []model.Ticket {
 	for _, t := range all {
 		k, _ := t["key"].(string)
 		r, _ := t["status_role"].(string)
-		if shown[k] || r == model.RoleDone {
+		if shown[k] || (r == model.RoleDone && ownKey(k, project)) {
 			out = append(out, t)
 		}
 	}

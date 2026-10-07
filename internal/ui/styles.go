@@ -90,6 +90,7 @@ type styles struct {
 	card          lipgloss.Style
 	cardSelected  lipgloss.Style
 	cardHead      lipgloss.Style
+	cardForeign   lipgloss.Style // another project's card key (whole board)
 	cardAgent     lipgloss.Style
 	cardSummary   lipgloss.Style
 	cardMeta      lipgloss.Style
@@ -115,6 +116,7 @@ func newStyles(t theme) styles {
 		card:         lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.muted).Padding(0, 1),
 		cardSelected: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.accent).Padding(0, 1),
 		cardHead:     lipgloss.NewStyle().Bold(true).Foreground(t.fg),
+		cardForeign:  lipgloss.NewStyle().Bold(true).Foreground(t.accent),
 		cardAgent:    lipgloss.NewStyle().Bold(true).Foreground(t.primary),
 		cardSummary:  lipgloss.NewStyle().Foreground(t.muted),
 		cardMeta:     lipgloss.NewStyle().Foreground(t.accent),

@@ -186,6 +186,12 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 	if key == "" {
 		return m, m.setStatus("That card has no ticket key", "warn")
 	}
+	// The whole board shows other projects' cards, but a dispatch cuts its
+	// branch in this repo: that is the wrong place for their ticket.
+	if !m.ownCard(key) {
+		return m, m.setStatus(key+" is another project's ticket — dispatch it from "+
+			model.KeyPrefix(key)+"'s own board", "warn")
+	}
 	// An agent is already on this ticket. Dispatching a second one is a way to
 	// end up with two agents racing the same branch, so the board sends the
 	// person to the one that exists instead.

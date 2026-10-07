@@ -33,6 +33,7 @@ Run `tktban doctor` to check your setup:
 ```sh
 tktban doctor              # verifies: tkt on PATH, board.roles readable, `all` query present
                            # and hints when there is no archived role for auto-archive
+                           # or the whole-board scope (P) is unavailable
 ```
 
 ## Usage
@@ -53,6 +54,7 @@ tktban --config path/to/.sdlc/config.toml
 | `o` / `ga` | Focus the herdr pane running this card's agent (inside herdr) |
 | `D` | Dispatch this card to a herdr agent: branch, worktree, agent, prompt ([Dispatch a ticket to an agent](#dispatch-a-ticket-to-an-agent)) |
 | `b` | Silence herdr's ticket toasts, or turn them back on ([Notifications](#notifications)) |
+| `P` | Switch between this project and every project on the shared board ([Whole board](#whole-board)) |
 | `q` | Quit |
 | `tab` / arrows | Move focus between columns and cards |
 
@@ -60,6 +62,31 @@ Columns come from `[board.roles]` (in config order); cards are grouped by their
 canonical `status_role` and sorted by priority then key. A `⛔N` badge shows
 unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 `(unmapped)` column rather than being dropped.
+
+### Whole board
+
+A board shows this project's tickets: tkt limits `tkt list` to
+`ticketing.project` from `.sdlc/config.toml`. `P` switches to every ticket on
+the shared board (`tkt list --all-projects`) and back. The subtitle shows
+`scope: this project` or `scope: all projects`, and the choice is saved as
+`all_projects` in the settings file, so it survives a restart.
+
+On the whole board:
+
+- Another project's cards show their key prefix highlighted. `f` still
+  narrows by prefix, so `f` → `OPS` shows one other project.
+- Move, comment, edit and dates work on any card.
+- `n` and `N` still create tickets in this project.
+- `D` refuses another project's card: a dispatch cuts a branch in this repo.
+- `o` and the herdr badges work as before, by branch.
+- Auto-archive only sweeps this project's tickets; each project's own board
+  archives its own.
+
+`P` needs `ticketing.project` set and a tkt whose `list` takes
+`--all-projects`. Without either, `P` says which is missing and the board stays
+on this project. A saved `all_projects = true` on such a tkt opens the board on
+this project with the same warning, and leaves the setting for a newer tkt.
+`tktban doctor` reports whether `P` is available.
 
 ### Auto-archive
 

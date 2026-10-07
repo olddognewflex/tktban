@@ -22,6 +22,8 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olddognewflex/tktban/internal/model"
@@ -60,6 +62,18 @@ type Tkt struct {
 	Binary string
 	run    Runner
 	ctx    context.Context // nil means context.Background()
+	caps   *caps           // shared by every WithContext copy; nil caches nothing
+}
+
+// caps caches what this tkt can do, read once per board. A pointer, so a
+// bounded copy (WithContext) shares it with the board's own Tkt: the answer
+// does not change because one caller is in a hurry.
+type caps struct {
+	helpOnce    sync.Once
+	allProjects bool        // `tkt list --help` advertises --all-projects
+	rejected    atomic.Bool // a flagged list was refused anyway
+	mu          sync.Mutex
+	project     string // "" until a read succeeds; a failure is not cached
 }
 
 // New builds a Tkt. binary defaults to $TKT_BIN, else "tkt".
@@ -70,7 +84,7 @@ func New(config, binary string) *Tkt {
 	if binary == "" {
 		binary = "tkt"
 	}
-	return &Tkt{Config: config, Binary: binary, run: defaultRunner}
+	return &Tkt{Config: config, Binary: binary, run: defaultRunner, caps: &caps{}}
 }
 
 // WithRunner overrides the command runner (used in tests).
@@ -349,13 +363,99 @@ func (t *Tkt) VCS() VCSConfig {
 	return out
 }
 
+// ListOpts are the options for ListAll.
+type ListOpts struct {
+	// AllProjects lists every project on a shared board (`--all-projects`)
+	// instead of only the configured ticketing.project.
+	AllProjects bool
+}
+
+// ErrAllProjectsUnsupported is ListAll's answer when AllProjects is asked of
+// a tkt without the flag (it shipped with TKT-70). The list is not run
+// scoped instead: the caller decides what to fall back to, and says so.
+var ErrAllProjectsUnsupported = errors.New("tkt list has no --all-projects (needs TKT-70)")
+
 // ListAll returns every ticket on the board. Requires a [queries].all query.
-func (t *Tkt) ListAll() ([]model.Ticket, error) {
+func (t *Tkt) ListAll(opts ListOpts) ([]model.Ticket, error) {
+	args := []string{"list", "--query", "all", "--json"}
+	if opts.AllProjects {
+		if !t.SupportsAllProjects() {
+			return nil, ErrAllProjectsUnsupported
+		}
+		args = []string{"list", "--query", "all", "--all-projects", "--json"}
+	}
 	var out []model.Ticket
-	if err := t.runJSON([]string{"list", "--query", "all", "--json"}, &out); err != nil {
+	if err := t.runJSON(args, &out); err != nil {
+		// The help said yes and the parser said no (a wrapper, a stale
+		// shim): believe the parser, and stop asking for the rest of the run.
+		if opts.AllProjects && rejectsFlag(err, "--all-projects") {
+			if t.caps != nil {
+				t.caps.rejected.Store(true)
+			}
+			return nil, ErrAllProjectsUnsupported
+		}
 		return nil, err
 	}
 	return out, nil
+}
+
+// SupportsAllProjects reports whether this tkt's list verb takes
+// --all-projects. It reads `tkt list --help` once and caches the answer; any
+// failure reads as no, which only ever keeps a board scoped.
+func (t *Tkt) SupportsAllProjects() bool {
+	probe := func() bool {
+		out, err := t.runArgs([]string{"list", "--help"})
+		return err == nil && strings.Contains(string(out), "--all-projects")
+	}
+	if t.caps == nil {
+		return probe()
+	}
+	t.caps.helpOnce.Do(func() { t.caps.allProjects = probe() })
+	return t.caps.allProjects && !t.caps.rejected.Load()
+}
+
+// rejectsFlag reports whether err is argparse refusing flag: an "unrecognized
+// arguments" usage error naming it.
+func rejectsFlag(err error, flag string) bool {
+	te, ok := errors.AsType[*Error](err)
+	if !ok {
+		return false
+	}
+	return strings.Contains(te.Stderr, "unrecognized arguments") && strings.Contains(te.Stderr, flag)
+}
+
+// Project is the configured ticketing.project (`tkt cfg ticketing.project`),
+// the project a scoped list is limited to and new tickets are created in. ""
+// when it is unset or unreadable. A project once read is cached; an empty or
+// failed read is not, so one slow tkt call does not turn P off for the run.
+func (t *Tkt) Project() string {
+	p, _ := t.readProject()
+	return p
+}
+
+// readProject is Project with the reason it came back empty: nil for a
+// project, a config-key-not-found *Error when it is unset, or whatever else
+// went wrong.
+func (t *Tkt) readProject() (string, error) {
+	if t.caps != nil {
+		t.caps.mu.Lock()
+		p := t.caps.project
+		t.caps.mu.Unlock()
+		if p != "" {
+			return p, nil
+		}
+	}
+	out, err := t.runArgs([]string{"cfg", "ticketing.project"})
+	if err != nil {
+		return "", err
+	}
+	p := strings.TrimSpace(string(out))
+	if p != "" && t.caps != nil {
+		t.caps.mu.Lock()
+		t.caps.project = p
+		t.caps.mu.Unlock()
+	}
+	return p, nil
 }
 
 // View returns the full ticket dict for key.
@@ -584,8 +684,9 @@ type Check struct {
 	Hint   bool
 }
 
-// Doctor runs setup checks: binary on PATH, config readable, `all` query, and
-// whether an archived lane is configured for auto-archive (a hint when not).
+// Doctor runs setup checks: binary on PATH, config readable, `all` query,
+// whether the whole-board scope is available, and whether an archived lane is
+// configured for auto-archive (hints when not).
 func (t *Tkt) Doctor() []Check {
 	var checks []Check
 
@@ -610,11 +711,14 @@ func (t *Tkt) Doctor() []Check {
 	}
 	checks = append(checks, Check{Name: "board.roles readable", OK: len(roles) > 0, Detail: rdetail})
 
-	if _, err := t.ListAll(); err != nil {
+	if _, err := t.ListAll(ListOpts{}); err != nil {
 		checks = append(checks, Check{Name: "'all' query present", OK: false,
 			Detail: "add to [queries]:  all = 'ORDER BY key ASC'"})
 	} else {
 		checks = append(checks, Check{Name: "'all' query present", OK: true, Detail: "tkt list --query all OK"})
+		// Only on a board that lists at all: a scope on top of a failing
+		// list would only repeat that failure in other words.
+		checks = append(checks, t.scopeCheck())
 	}
 
 	// Auto-archive needs somewhere to archive to. A board without the role
@@ -626,6 +730,32 @@ func (t *Tkt) Doctor() []Check {
 			Detail: `auto-archive off: add archived = "Archived" under [board.roles]`})
 	}
 	return checks
+}
+
+// scopeCheck says whether the board's whole-board scope (P) can work: it
+// needs a project to call "this one" and a tkt that can list past it. Either
+// missing is a hint — the board works scoped without them.
+func (t *Tkt) scopeCheck() Check {
+	const name = "whole-board scope"
+	project, err := t.readProject()
+	if err != nil {
+		// Unset is tkt's not-found exit; anything else is a read that failed,
+		// which is not the same advice.
+		if te, ok := errors.AsType[*Error](err); ok && te.ExitCode == 4 {
+			return Check{Name: name, OK: true, Hint: true,
+				Detail: "P off: no ticketing.project set (tkt cfg ticketing.project)"}
+		}
+		return Check{Name: name, OK: true, Hint: true,
+			Detail: "P off: could not read ticketing.project: " + err.Error()}
+	}
+	if project == "" {
+		return Check{Name: name, OK: true, Hint: true, Detail: "P off: ticketing.project is empty"}
+	}
+	if !t.SupportsAllProjects() {
+		return Check{Name: name, OK: true, Hint: true,
+			Detail: "P off: tkt list has no --all-projects (needs TKT-70)"}
+	}
+	return Check{Name: name, OK: true, Detail: "P switches " + project + " ↔ all projects"}
 }
 
 func binaryFound(binary string) bool {

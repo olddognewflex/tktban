@@ -45,7 +45,7 @@ func (m Model) subtitle() string {
 	for _, c := range m.columns {
 		total += len(c.Cards)
 	}
-	return fmt.Sprintf("%d tickets%s%s%s", total, m.filterLabel(), m.autoLabel(), m.liveLabel())
+	return fmt.Sprintf("%d tickets%s%s%s%s", total, m.filterLabel(), m.scopeLabel(), m.autoLabel(), m.liveLabel())
 }
 
 func (m Model) filterLabel() string {
@@ -60,6 +60,14 @@ func (m Model) filterLabel() string {
 		return ""
 	}
 	return "  ·  filter: " + strings.Join(parts, ", ")
+}
+
+// scopeLabel is the board's scope (P), shown next to the filter it widens.
+func (m Model) scopeLabel() string {
+	if m.allProjects {
+		return "  ·  scope: all projects"
+	}
+	return "  ·  scope: this project"
 }
 
 func (m Model) autoLabel() string {
@@ -88,7 +96,7 @@ func (m Model) liveLabel() string {
 // footerKeys is the key hint line. It is a value rather than a literal inside
 // renderStatus so a test can assert against it without depending on where the
 // terminal width happens to wrap it.
-const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · D dispatch · n new · N new-in-$EDITOR · x hide · X show all · b notify · q quit"
+const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · D dispatch · n new · N new-in-$EDITOR · x hide · X show all · b notify · P scope · q quit"
 
 func (m Model) renderStatus() string {
 	if m.status != "" {
@@ -166,6 +174,12 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		badge = fmt.Sprintf("  ⛔%d", c.BlockerCount)
 	}
 	head := m.styles.cardHead.Render(prio + c.Key + badge)
+	if !m.ownCard(c.Key) {
+		// Another project's card on the whole board: its key, prefix and all,
+		// is what says so, so it is the part that stands out.
+		head = m.styles.cardHead.Render(prio) + m.styles.cardForeign.Render(c.Key) +
+			m.styles.cardHead.Render(badge)
+	}
 	if ab := m.cardBadge(c); ab != "" {
 		head += " " + m.styles.cardAgent.Render(ab)
 	}

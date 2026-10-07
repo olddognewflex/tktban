@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,6 +51,13 @@ type captureRunner struct {
 	failOn      map[string]bool
 	list        string
 	agents      string
+	// project overrides the ticketing.project reply (default "TKT";
+	// failReply is the key unset). allProjects is a tkt with TKT-70's
+	// `list --all-projects`; without it the flag is an argparse error.
+	// allList overrides the flagged list's reply.
+	project     string
+	allProjects bool
+	allList     string
 	// viewAgent and viewAgentAt are the agent_status and agent_status_at a
 	// `tkt view` of a key reports (absent when unset). An `edit KEY
 	// --agent-status X` writes both, stamping a fresh agent_status_at only
@@ -93,6 +101,23 @@ func (c *captureRunner) run(ctx context.Context, bin string, args, env []string)
 	switch {
 	case eq(args, "cfg", "board.roles", "--json"):
 		return cfgReply(c.roles, `{"todo": "To Do", "done": "Done"}`)
+	case eq(args, "list", "--help"):
+		if c.allProjects {
+			return []byte("usage: tkt list [-h] [--json] [--all-projects] (--tier TIER | --query QUERY)"), nil, 0, nil
+		}
+		return []byte("usage: tkt list [-h] [--json] (--tier TIER | --query QUERY)"), nil, 0, nil
+	case eq(args, "cfg", "ticketing.project"):
+		return cfgReply(c.project, "TKT")
+	case len(args) >= 2 && args[0] == "list" && slices.Contains(args, "--all-projects"):
+		if !c.allProjects {
+			return nil, []byte("tkt: error: unrecognized arguments: --all-projects"), 2, nil
+		}
+		return cfgReply(c.allList, `[
+			{"key":"TKT-1","summary":"first thing","status_role":"todo","priority":"High","assignee":"alice","blocked_by":[]},
+			{"key":"TKT-2","summary":"second thing","status_role":"done","priority":"Low","assignee":"","blocked_by":[]},
+			{"key":"OPS-7","summary":"other project","status_role":"todo","priority":"High","assignee":"","blocked_by":[]},
+			{"key":"OPS-8","summary":"other done","status_role":"done","priority":"Low","assignee":"","blocked_by":[]}
+		]`)
 	case len(args) >= 2 && args[0] == "list" && c.list != "":
 		return []byte(c.list), nil, 0, nil
 	case len(args) >= 2 && args[0] == "list":
