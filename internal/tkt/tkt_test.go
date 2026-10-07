@@ -64,7 +64,7 @@ func TestRolesArgvAndParse(t *testing.T) {
 func TestConfigPassedViaEnvNotArgv(t *testing.T) {
 	f := &fake{responses: []resp{{stdout: "[]"}}}
 	tk := New("/x/.sdlc/config.toml", "tkt").WithRunner(f.run)
-	if _, err := tk.ListAll(); err != nil {
+	if _, err := tk.ListAll(ListOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	argv := f.lastArgv()
@@ -83,7 +83,7 @@ func TestConfigPassedViaEnvNotArgv(t *testing.T) {
 
 func TestNoConfigNoEnvOverride(t *testing.T) {
 	tk, f := newFake(resp{stdout: "[]"})
-	if _, err := tk.ListAll(); err != nil {
+	if _, err := tk.ListAll(ListOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if f.lastEnv() != nil {
@@ -93,7 +93,7 @@ func TestNoConfigNoEnvOverride(t *testing.T) {
 
 func TestListAllReturnsArray(t *testing.T) {
 	tk, _ := newFake(resp{stdout: `[{"key": "TKT-1"}, {"key": "TKT-2"}]`})
-	out, err := tk.ListAll()
+	out, err := tk.ListAll(ListOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,8 +319,8 @@ func TestDoctorAllGreen(t *testing.T) {
 			t.Fatalf("check %q failed: %s", c.Name, c.Detail)
 		}
 	}
-	if len(checks) != 4 {
-		t.Fatalf("want 4 checks, got %d", len(checks))
+	if len(checks) != 5 {
+		t.Fatalf("want 5 checks, got %d", len(checks))
 	}
 }
 

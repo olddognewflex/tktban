@@ -115,6 +115,19 @@ type Model struct {
 	swept       map[string]bool
 	release     []string
 
+	// allProjects is the board's scope (P): false lists this project only —
+	// tkt's ticketing.project — and true the whole shared board. project is
+	// the project the last whole-board load ran for, which is what marks a
+	// card as another project's; "" on a scoped board, where every card is
+	// this project's.
+	allProjects bool
+	project     string
+	// scopeSeq numbers P presses that asked to widen; widening is the one
+	// whose scope read is still out, 0 when none is. A second P while it is
+	// out cancels it, so the person ends up where the last press said.
+	scopeSeq int
+	widening int
+
 	// selectKey is a ticket to select once the board first loads, cleared as
 	// soon as it has been applied. selectExplicit records that the person
 	// typed it (--select) rather than it being read off a git branch
@@ -192,6 +205,7 @@ func New(tk *tkt.Tkt, refreshInterval float64, autoRefresh bool, settingsPath st
 		autoOn:       autoRefresh && refreshInterval > 0,
 		archiveDays:  archiveThreshold(s["archive_after_days"]),
 		swept:        map[string]bool{},
+		allProjects:  s["all_projects"] == true,
 	}
 }
 
@@ -216,9 +230,10 @@ func archiveThreshold(v any) float64 {
 	return defaultArchiveDays
 }
 
-// refreshCmd is the board's refresh, carrying its auto-archive threshold.
+// refreshCmd is the board's refresh, carrying its auto-archive threshold and
+// its scope.
 func (m Model) refreshCmd() tea.Cmd {
-	return refreshCmd(m.tkt, m.filter, m.archiveDays)
+	return refreshCmd(m.tkt, m.filter, m.archiveDays, m.allProjects)
 }
 
 // fileExists reports whether path is an existing file (used to detect a board's
@@ -256,6 +271,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case archiveMsg:
 		return m.onArchive(msg)
+
+	case scopeMsg:
+		return m.onScope(msg)
 
 	case writeMsg:
 		if msg.err != nil {
@@ -455,6 +473,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleTheme()
 	case "b":
 		return m.toggleNotify()
+	case "P":
+		return m.toggleScope()
 	case "f":
 		m.modal = newFilterModal(m.filter, m.styles.t.surface)
 		return m, nil
@@ -582,10 +602,89 @@ func (m Model) toggleNotify() (tea.Model, tea.Cmd) {
 	return m, m.setStatus(label, "")
 }
 
+// toggleScope is the P key. Narrowing back to this project always works;
+// widening to the whole board first asks tkt whether it can (scopeCmd), and
+// onScope decides.
+func (m Model) toggleScope() (tea.Model, tea.Cmd) {
+	if !m.allProjects {
+		if m.widening != 0 {
+			m.widening = 0 // its answer is dropped when it lands
+			return m, m.setStatus("Scope: this project", "")
+		}
+		m.scopeSeq++
+		m.widening = m.scopeSeq
+		return m, scopeCmd(m.tkt, m.scopeSeq)
+	}
+	m.allProjects = false
+	return m, tea.Batch(m.persistScope("Scope: this project"), m.refreshCmd())
+}
+
+// onScope widens the board to every project, or says why it cannot and
+// leaves it scoped.
+func (m Model) onScope(msg scopeMsg) (tea.Model, tea.Cmd) {
+	if msg.seq != m.widening {
+		return m, nil // cancelled by a second P, or overtaken by a later one
+	}
+	m.widening = 0
+	switch {
+	case msg.project == "":
+		return m, m.setStatus(m.scopeRefusal(scopeOffNoProject), "warn")
+	case !msg.supported:
+		return m, m.setStatus(m.scopeRefusal(scopeOffOldTkt), "warn")
+	}
+	m.allProjects = true
+	return m, tea.Batch(m.persistScope("Scope: all projects"), m.refreshCmd())
+}
+
+// scopeRefusal says why the board cannot show every project, and that it is
+// showing this one.
+func (m Model) scopeRefusal(reason string) string {
+	why := "this tkt's list has no --all-projects (needs TKT-70)"
+	if reason == scopeOffNoProject {
+		why = "no ticketing.project set in " + m.tktConfigFile()
+	}
+	return "Can't show all projects: " + why + " — showing this project"
+}
+
+// persistScope stores the scope in settings.toml, as the theme is, and
+// reports okMsg. The scope changes for this run even when the save fails.
+func (m *Model) persistScope(okMsg string) tea.Cmd {
+	m.settings["all_projects"] = m.allProjects
+	if err := m.saveSettings("all_projects"); err != nil {
+		return m.setStatus(okMsg+" (not saved: "+err.Error()+")", "warn")
+	}
+	return m.setStatus(okMsg, "")
+}
+
+// ownCard reports whether key is this project's ticket. On a scoped board
+// every card is.
+func (m Model) ownCard(key string) bool {
+	return ownKey(key, m.project)
+}
+
 func (m Model) onBoard(msg boardMsg) (tea.Model, tea.Cmd) {
+	// A load asked for in the other scope landed after P changed it: showing
+	// it would put one scope's cards under the other's label. The refresh P
+	// started is on its way.
+	if msg.allProjects != m.allProjects {
+		return m, nil
+	}
 	if msg.err != nil {
 		return m.fail(msg.err)
 	}
+	// A whole-board load that fell back to this project — a persisted scope
+	// on a tkt that cannot honour it — leaves the board scoped for the run.
+	// The setting is not written back, so a newer tkt picks it up again.
+	if msg.scopeOff != "" && m.allProjects {
+		m.allProjects = false
+		scope := m.scopeRefusal(msg.scopeOff)
+		if msg.warn != "" {
+			msg.warn += "; " + scope
+		} else {
+			msg.warn = scope
+		}
+	}
+	m.project = msg.project
 	curRole, curKey := m.currentLocation()
 	m.roles = msg.roles
 	m.allColumns = msg.columns

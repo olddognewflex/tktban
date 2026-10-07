@@ -45,6 +45,11 @@ import (
 // board with no settings file yet; one that already saved hidden_roles keeps
 // what it saved.
 //
+// all_projects is the board's scope, written by its P key: false shows this
+// project's tickets only, true every project on the shared board. The board
+// writes it only when P flips it, and a board whose tkt cannot list past this
+// project reads true as false for the run without writing it back.
+//
 // reconcile_agent_status is hand-edited and never set by the board. It
 // gates writing agent status back to tickets, and is false by default because
 // that mutates the ticket provider. It is deliberately not seeded into herdr's
@@ -58,6 +63,7 @@ var Defaults = map[string]any{
 	"dispatch_args":      "",
 	"dispatch_prompt":    "",
 	"archive_after_days": 7,
+	"all_projects":       false,
 
 	"reconcile_agent_status": false,
 }
