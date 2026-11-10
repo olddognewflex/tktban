@@ -9,32 +9,102 @@ reads a backend's storage directly. The payoff is that the same TUI works agains
 *any* backend tkt supports — point it at a markdown board or a Jira config and it
 behaves identically, because all it knows are roles, lanes, and the ticket shape.
 
+It also runs as a [herdr](https://herdr.dev) plugin (herdr is a terminal
+multiplexer for AI coding agents). Inside herdr you get:
+
+- the board as a popup over any workspace, toggled by a key ([Run inside herdr](#run-inside-herdr));
+- live agent badges on cards ([Live agent badges](#live-agent-badges));
+- a key to jump between a card and its agent pane ([Jump between a card and its agent pane](#jump-between-a-card-and-its-agent-pane));
+- the ticket key in herdr's agent sidebar ([The ticket key in herdr's sidebar](#the-ticket-key-in-herdrs-sidebar));
+- dispatch of a ticket to a new agent in its own worktree, off by default ([Dispatch a ticket to an agent](#dispatch-a-ticket-to-an-agent));
+- a toast when an agent on a ticket is blocked or done ([Notifications](#notifications));
+- optional write-back of `agent_status` to the ticket ([Write `agent_status` back](#write-agent_status-back-opt-in)).
+
+## Requirements
+
+- **Go ≥ 1.26**, to build it.
+- **[tkt](https://github.com/olddognewflex/tkt)** on your `PATH` (or set
+  `TKT_BIN=/path/to/tkt`). tkt is a stdlib-only Python program (Python
+  3.11+, no other dependencies). Install it by cloning the repo and linking
+  its `tkt` script into a directory on your `PATH`; the link must point back
+  into the clone:
+
+  ```sh
+  git clone https://github.com/olddognewflex/tkt ~/Development/tkt
+  mkdir -p ~/.local/bin && ln -s ~/Development/tkt/tkt ~/.local/bin/tkt   # ~/.local/bin must be on PATH
+  ```
+
+- **A tkt board**: a `.sdlc/config.toml` in your project, on any backend tkt
+  supports (jira, markdown, github, linear, openkanban). If you don't have
+  one, `tkt init` creates it; `tkt init --provider markdown --sample` gives
+  you a local markdown board with a starter ticket.
+- **An `all` query** in that config ([below](#an-all-query)).
+
+For the herdr plugin, also:
+
+- **herdr ≥ 0.9.0**, on macOS or Linux.
+- **Go on herdr's PATH**: installing the plugin builds it from source.
+- **tkt on herdr's PATH**, or `TKT_BIN` set in herdr's environment: the
+  board runs inside herdr and calls tkt from there.
+- **`python3` on herdr's PATH** (optional): without it the board key opens
+  the board but does not close it.
+
+### An `all` query
+
+A board shows *every* ticket, but `tkt list` always needs a named query and ships
+none that returns everything. tktban standardizes on a query named **`all`**. Add
+it to the `[queries]` table in your project's `.sdlc/config.toml` — a config
+from `tkt init` already has that table, so add the line under it rather than
+declaring `[queries]` a second time (TOML rejects a repeated table):
+
+```toml
+[queries]                  # already in a `tkt init` config: add only the line below
+all = 'ORDER BY key ASC'   # empty filter -> tkt returns every ticket
+```
+
 ## Install
+
+### As a herdr plugin
+
+```sh
+herdr plugin install olddognewflex/tktban      # clones and builds bin/tktban (needs Go)
+```
+
+herdr's plugin index is not reviewed, and a plugin runs as your user, with
+your environment, unsandboxed — read `herdr-plugin.toml` and `scripts/` before
+installing.
+
+Bind the board to a key in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+t"   # prefix+b is herdr's sidebar toggle
+type = "plugin_action"
+command = "odnf.tktban.open-board"
+```
+
+[Run inside herdr](#run-inside-herdr) covers what the plugin does from there.
+`herdr plugin update odnf.tktban` pulls the latest commit and rebuilds.
+
+### Standalone
 
 ```sh
 go install github.com/olddognewflex/tktban/cmd/tktban@latest   # or: go build -o tktban ./cmd/tktban
 ```
 
-Requires Go ≥ 1.26 and `tkt` on your `PATH` (or set `TKT_BIN=/path/to/tkt`).
-
-## The one prerequisite: an `all` query
-
-A board shows *every* ticket, but `tkt list` always needs a named query and ships
-none that returns everything. tktban standardizes on a query named **`all`**. Add
-this to your project's `.sdlc/config.toml`:
-
-```toml
-[queries]
-all = 'ORDER BY key ASC'   # empty filter -> tkt returns every ticket
-```
-
-Run `tktban doctor` to check your setup:
+### Check your setup
 
 ```sh
 tktban doctor              # verifies: tkt on PATH, board.roles readable, `all` query present
                            # and hints when there is no archived role for auto-archive
                            # or the whole-board scope (P) is unavailable
 ```
+
+Run it from your project directory, or pass the config before the
+subcommand: `tktban --config path/to/.sdlc/config.toml doctor`. It checks
+your shell's environment, not herdr's. Any tktban binary works: `go install`
+puts one in `$(go env GOPATH)/bin`, and the herdr plugin builds its own under
+herdr's plugin directory (`~/.config/herdr/plugins/github/odnf.tktban-*/bin/tktban`).
 
 ## Usage
 
@@ -150,45 +220,8 @@ auto-archive for the session.
 ## Run inside herdr
 
 tktban ships a [herdr](https://herdr.dev) plugin manifest (`herdr-plugin.toml`),
-so the board opens as a full-screen popup over any herdr workspace.
-
-```sh
-herdr plugin install olddognewflex/tktban      # clones and builds bin/tktban (needs Go)
-
-# local development: link the checkout; link does not run the build step
-go build -o bin/tktban ./cmd/tktban
-herdr plugin link .
-```
-
-**A linked checkout is the live plugin.** `herdr plugin link .` registers the
-working tree itself, and herdr runs `bin/tktban` from it — the binary you
-built, not the code you have since edited. The board key rebuilds it for
-you: before opening, the launcher runs `go build` if any `.go` file, `go.mod`
-or `go.sum` is newer than `bin/tktban` (an edit, a pull or a branch switch).
-A failed build keeps the old binary, still opens the board, and logs the
-error to `herdr plugin log list`, as does a stale binary with no `go` on
-herdr's PATH. A press that closes an open board skips the check, so closing
-never waits on a build. Set `TKTBAN_NO_AUTOBUILD=1` in herdr's
-environment to turn it off. The hook (`herdr-hook`) is not rebuilt this way,
-so after a pull, open the board once or rebuild by hand:
-
-```sh
-go build -o bin/tktban ./cmd/tktban
-```
-
-The giveaway that you forgot is a popup that opens and vanishes at once,
-exiting with status 2: the manifest passes a flag the stale binary does not
-know, so it fails to parse its own command line. `herdr plugin log list` shows
-the usage text.
-
-Bind the action to a key in `~/.config/herdr/config.toml`:
-
-```toml
-[[keys.command]]
-key = "prefix+t"   # prefix+b is herdr's sidebar toggle
-type = "plugin_action"
-command = "odnf.tktban.open-board"
-```
+so the board opens as a full-screen popup over any herdr workspace. Install it
+and bind a key as in [As a herdr plugin](#as-a-herdr-plugin).
 
 The key opens the board and, pressed again, closes it (so does `q`). herdr
 allows one popup at a time; if another plugin's popup is open, the key leaves it
@@ -208,8 +241,7 @@ Under herdr the pane runs `tktban --herdr`, which:
 - holds a lock on `board.lock` in the same dir while running, which is how the
   launcher knows the open popup is the board.
 
-Outside herdr the flag does nothing. For publishing, tag the GitHub repo with
-the `herdr-plugin` topic so it shows in the herdr plugin marketplace.
+Outside herdr the flag does nothing.
 [docs/herdr-events.md](docs/herdr-events.md) records which herdr events the
 live status below and future hooks can use.
 
@@ -664,15 +696,6 @@ Every run prints one line saying what it decided (`shown TKB-24 blocked`,
 `skip: pane focused`, ...), which `herdr plugin log list --plugin odnf.tktban`
 shows.
 
-**After pulling this, rebuild and re-link**, or herdr keeps running the old
-binary, which does not know `herdr-hook` and fails every hook with exit 2.
-Re-linking is what makes herdr read the manifest's new `[[events]]` entry:
-
-```sh
-go build -o bin/tktban ./cmd/tktban
-herdr plugin link .
-```
-
 ## How it talks to tkt
 
 `internal/tkt/tkt.go` is the entire coupling surface — a thin subprocess wrapper:
@@ -702,3 +725,45 @@ go test ./...
 Tests cover the wrapper (subprocess faked via an injected runner), the board model
 (pure grouping/sort), settings persistence, and the UI model/modals (rendered to
 strings and asserted).
+
+### Working on the herdr plugin
+
+Link the checkout instead of installing it. `link` does not run the build
+step, so build first:
+
+```sh
+go build -o bin/tktban ./cmd/tktban
+herdr plugin link .
+```
+
+**A linked checkout is the live plugin.** `herdr plugin link .` registers the
+working tree itself, and herdr runs `bin/tktban` from it — the binary you
+built, not the code you have since edited. The board key rebuilds it for
+you: before opening, the launcher runs `go build` if any `.go` file, `go.mod`
+or `go.sum` is newer than `bin/tktban` (an edit, a pull or a branch switch).
+A failed build keeps the old binary, still opens the board, and logs the
+error to `herdr plugin log list`, as does a stale binary with no `go` on
+herdr's PATH. A press that closes an open board skips the check, so closing
+never waits on a build. Set `TKTBAN_NO_AUTOBUILD=1` in herdr's
+environment to turn it off. The hook (`herdr-hook`) is not rebuilt this way,
+so after a pull, open the board once or rebuild by hand:
+
+```sh
+go build -o bin/tktban ./cmd/tktban
+```
+
+The giveaway that you forgot is a popup that opens and vanishes at once,
+exiting with status 2: the manifest passes a flag the stale binary does not
+know, so it fails to parse its own command line. `herdr plugin log list` shows
+the usage text.
+
+**After a pull that changes the manifest, rebuild and re-link.** herdr reads
+the manifest when the plugin is linked, so a new entry — such as the
+`[[events]]` hook behind [Notifications](#notifications) — does nothing until
+you re-link, and a binary built before `herdr-hook` existed fails every hook
+with exit 2. Re-run the build and `herdr plugin link .` from the top of this
+section.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
