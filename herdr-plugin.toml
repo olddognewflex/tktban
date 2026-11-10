@@ -39,7 +39,7 @@
 # which takes the poll it rides on away.
 id = "odnf.tktban"
 name = "tktban"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kanban board for tkt tickets, opened over any herdr workspace."
 min_herdr_version = "0.9.0"
 platforms = ["macos", "linux"]
