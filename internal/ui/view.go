@@ -16,7 +16,9 @@ func (m Model) View() string {
 	}
 	header := m.renderHeader()
 	status := m.renderStatus()
-	midHeight := max(m.height-2, 1) // header + status rows
+	// The key hints wrap onto several rows on narrow terminals, so budget the
+	// rows header and status actually take rather than one each.
+	midHeight := max(m.height-lipgloss.Height(header)-lipgloss.Height(status), 1)
 
 	var mid string
 	if m.modal != nil {
@@ -96,7 +98,7 @@ func (m Model) liveLabel() string {
 // footerKeys is the key hint line. It is a value rather than a literal inside
 // renderStatus so a test can assert against it without depending on where the
 // terminal width happens to wrap it.
-const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · D dispatch · n new · N new-in-$EDITOR · x hide · X show all · b notify · P scope · q quit"
+const footerKeys = "r refresh · a auto · t theme · f filter · v view · e edit · E $EDITOR · m move · c comment · d dates · o agent pane · D dispatch · n new · N new-in-$EDITOR · x hide · X show all · b notify · P scope · ? types · q quit"
 
 func (m Model) renderStatus() string {
 	if m.status != "" {
@@ -180,6 +182,7 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 		head = m.styles.cardHead.Render(prio) + m.styles.cardForeign.Render(c.Key) +
 			m.styles.cardHead.Render(badge)
 	}
+	head = m.renderTypeMarker(c) + m.styles.cardHead.Render(" ") + head
 	if ab := m.cardBadge(c); ab != "" {
 		head += " " + m.styles.cardAgent.Render(ab)
 	}
@@ -209,6 +212,7 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	if selected {
 		style = m.styles.cardSelected
 	}
+	style = style.BorderForeground(m.typeBorderColor(c))
 	// The card must fit inside the column's text area, which is the column's
 	// inner width minus its own border+padding. lipgloss also adds the card's
 	// border outside the set width, so the card box is width-4 — otherwise the

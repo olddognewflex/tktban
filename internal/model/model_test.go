@@ -79,6 +79,20 @@ func TestCardCarriesAgentStatus(t *testing.T) {
 	}
 }
 
+func TestCardCarriesType(t *testing.T) {
+	d := ticket("TKT-1", "todo")
+	d["type"] = "Bug"
+	d["type_class"] = "full_sdlc"
+	c := CardFromTicket(d)
+	if c.Type != "Bug" || c.TypeClass != "full_sdlc" {
+		t.Fatalf("type = %q class = %q", c.Type, c.TypeClass)
+	}
+	c = CardFromTicket(ticket("TKT-2", "todo"))
+	if c.Type != "" || c.TypeClass != "" {
+		t.Fatalf("absent type = %q class = %q, want empty", c.Type, c.TypeClass)
+	}
+}
+
 func TestColumnsFollowRoleOrder(t *testing.T) {
 	cols := BuildBoard(roles, nil)
 	for i, rp := range roles {

@@ -111,10 +111,11 @@ func newStyles(t theme) styles {
 		column:        lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.muted).Padding(0, 1),
 		columnFocused: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.primary).Padding(0, 1),
 		colTitle:      lipgloss.NewStyle().Bold(true).Foreground(t.fg).Background(t.boost),
-		// Cards carry a faint full outline (muted) that brightens to the accent
-		// colour when selected — TKB-17. Rounded matches the column frame.
+		// Cards carry a full outline whose colour follows the ticket type (set
+		// per card in renderCard). Rounded matches the column frame; the selected
+		// card is thick instead, so selection reads by shape, not colour.
 		card:         lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.muted).Padding(0, 1),
-		cardSelected: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.accent).Padding(0, 1),
+		cardSelected: lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(t.muted).Padding(0, 1),
 		cardHead:     lipgloss.NewStyle().Bold(true).Foreground(t.fg),
 		cardForeign:  lipgloss.NewStyle().Bold(true).Foreground(t.accent),
 		cardAgent:    lipgloss.NewStyle().Bold(true).Foreground(t.primary),

@@ -22,38 +22,30 @@ func fgSeq(c lipgloss.Color) string {
 	return s[i+1 : j]
 }
 
-// TKB-17: cards have a faint full outline that brightens when selected. A
-// meta-less card isolates the border colour (accent is otherwise only used by
-// the meta line), so an unselected card must not carry the accent sequence
-// while a selected one must.
-func TestCardOutlineBrightensWhenSelected(t *testing.T) {
+// TKB-17 / TKB-33: cards have a full outline in the type colour; the selected
+// card is marked by a thick border, not a different colour.
+func TestCardOutlineThickWhenSelected(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	defer lipgloss.SetColorProfile(termenv.Ascii)
 
 	th, _ := themeByName("textual-dark")
 	m := Model{styles: newStyles(th)}
-	card := model.Card{Key: "TKB-1", Summary: "outline me"} // no priority/meta/blockers
+	card := model.Card{Key: "TKB-1", Summary: "outline me", Type: "Task"} // no meta: accent only on border
 
 	unselected := m.renderCard(card, 24, false)
 	selected := m.renderCard(card, 24, true)
 
-	// Full outline present (rounded box corners), both states.
-	for name, out := range map[string]string{"unselected": unselected, "selected": selected} {
-		if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
-			t.Fatalf("%s card lacks a full rounded outline:\n%q", name, out)
-		}
+	if !strings.Contains(unselected, "╭") || !strings.Contains(unselected, "╰") {
+		t.Fatalf("unselected card lacks a full rounded outline:\n%q", unselected)
 	}
-
+	if !strings.Contains(selected, "┏") || !strings.Contains(selected, "┗") || strings.Contains(selected, "╭") {
+		t.Fatalf("selected card lacks a full thick outline:\n%q", selected)
+	}
 	accent := fgSeq(th.accent)
-	muted := fgSeq(th.muted)
-	if strings.Contains(unselected, accent) {
-		t.Fatalf("unselected card border should be faint (muted), not accent %q:\n%q", accent, unselected)
-	}
-	if !strings.Contains(selected, accent) {
-		t.Fatalf("selected card border should brighten to accent %q:\n%q", accent, selected)
-	}
-	if !strings.Contains(unselected, muted) {
-		t.Fatalf("unselected card border should be muted %q:\n%q", muted, unselected)
+	for name, out := range map[string]string{"unselected": unselected, "selected": selected} {
+		if !strings.Contains(out, accent) {
+			t.Fatalf("%s card border should be the type colour (accent) %q:\n%q", name, accent, out)
+		}
 	}
 }
 
@@ -76,10 +68,13 @@ func TestCardOutlineFitsInColumn(t *testing.T) {
 	var topRuns, botRuns int
 	for ln := range strings.SplitSeq(col, "\n") {
 		// A card border line contains its left+right corner on the same line.
-		if strings.Contains(ln, "╭") && strings.Contains(ln, "╮") && strings.Count(ln, "╭") == 1 {
+		// The selected card is thick (┏…┓), the rest rounded (╭…╮).
+		if strings.Contains(ln, "╭") && strings.Contains(ln, "╮") && strings.Count(ln, "╭") == 1 ||
+			strings.Contains(ln, "┏") && strings.Contains(ln, "┓") && strings.Count(ln, "┏") == 1 {
 			topRuns++
 		}
-		if strings.Contains(ln, "╰") && strings.Contains(ln, "╯") && strings.Count(ln, "╰") == 1 {
+		if strings.Contains(ln, "╰") && strings.Contains(ln, "╯") && strings.Count(ln, "╰") == 1 ||
+			strings.Contains(ln, "┗") && strings.Contains(ln, "┛") && strings.Count(ln, "┗") == 1 {
 			botRuns++
 		}
 	}
@@ -125,7 +120,7 @@ func TestColumnTitleDoesNotWrap(t *testing.T) {
 
 	lines := strings.Split(col, "\n")
 	// line 0 = column top border, line 1 = title, line 2 = first card's top border.
-	if len(lines) < 3 || !strings.Contains(lines[2], "╭") {
-		t.Fatalf("title appears to wrap (first card not on line 3):\n%s", col)
+	if len(lines) < 3 || !strings.Contains(lines[2], "┏") {
+		t.Fatalf("title appears to wrap (first card, selected so thick, not on line 3):\n%s", col)
 	}
 }
