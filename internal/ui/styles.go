@@ -84,25 +84,29 @@ func nextTheme(current string) theme {
 type styles struct {
 	t theme
 
-	column        lipgloss.Style
-	columnFocused lipgloss.Style
-	colTitle      lipgloss.Style
-	card          lipgloss.Style
-	cardSelected  lipgloss.Style
-	cardHead      lipgloss.Style
-	cardForeign   lipgloss.Style // another project's card key (whole board)
-	cardAgent     lipgloss.Style
-	cardSummary   lipgloss.Style
-	cardMeta      lipgloss.Style
-	dialog        lipgloss.Style
-	dialogTitle   lipgloss.Style
-	fieldLabel    lipgloss.Style
-	errorText     lipgloss.Style
-	statusBar     lipgloss.Style
-	statusErr     lipgloss.Style
-	statusWarn    lipgloss.Style
-	header        lipgloss.Style
-	footer        lipgloss.Style
+	column          lipgloss.Style
+	columnFocused   lipgloss.Style
+	colTitle        lipgloss.Style
+	card            lipgloss.Style
+	cardSelected    lipgloss.Style
+	cardHead        lipgloss.Style
+	cardForeign     lipgloss.Style // another project's card key (whole board)
+	cardAgent       lipgloss.Style
+	typeBug         lipgloss.Style // type marker colours; the letter carries the meaning
+	typeSDLC        lipgloss.Style
+	typeDeliverable lipgloss.Style
+	typeUnknown     lipgloss.Style
+	cardSummary     lipgloss.Style
+	cardMeta        lipgloss.Style
+	dialog          lipgloss.Style
+	dialogTitle     lipgloss.Style
+	fieldLabel      lipgloss.Style
+	errorText       lipgloss.Style
+	statusBar       lipgloss.Style
+	statusErr       lipgloss.Style
+	statusWarn      lipgloss.Style
+	header          lipgloss.Style
+	footer          lipgloss.Style
 }
 
 func newStyles(t theme) styles {
@@ -113,21 +117,25 @@ func newStyles(t theme) styles {
 		colTitle:      lipgloss.NewStyle().Bold(true).Foreground(t.fg).Background(t.boost),
 		// Cards carry a faint full outline (muted) that brightens to the accent
 		// colour when selected — TKB-17. Rounded matches the column frame.
-		card:         lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.muted).Padding(0, 1),
-		cardSelected: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.accent).Padding(0, 1),
-		cardHead:     lipgloss.NewStyle().Bold(true).Foreground(t.fg),
-		cardForeign:  lipgloss.NewStyle().Bold(true).Foreground(t.accent),
-		cardAgent:    lipgloss.NewStyle().Bold(true).Foreground(t.primary),
-		cardSummary:  lipgloss.NewStyle().Foreground(t.muted),
-		cardMeta:     lipgloss.NewStyle().Foreground(t.accent),
-		dialog:       lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(t.primary).Background(t.surface).Padding(1, 2),
-		dialogTitle:  lipgloss.NewStyle().Bold(true).Foreground(t.fg).MarginBottom(1),
-		fieldLabel:   lipgloss.NewStyle().Foreground(t.muted),
-		errorText:    lipgloss.NewStyle().Bold(true).Foreground(t.errc),
-		statusBar:    lipgloss.NewStyle().Foreground(t.muted),
-		statusErr:    lipgloss.NewStyle().Bold(true).Foreground(t.errc),
-		statusWarn:   lipgloss.NewStyle().Foreground(t.accent),
-		header:       lipgloss.NewStyle().Bold(true).Foreground(t.fg).Background(t.boost).Padding(0, 1),
-		footer:       lipgloss.NewStyle().Foreground(t.muted),
+		card:            lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.muted).Padding(0, 1),
+		cardSelected:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.accent).Padding(0, 1),
+		cardHead:        lipgloss.NewStyle().Bold(true).Foreground(t.fg),
+		cardForeign:     lipgloss.NewStyle().Bold(true).Foreground(t.accent),
+		cardAgent:       lipgloss.NewStyle().Bold(true).Foreground(t.primary),
+		cardSummary:     lipgloss.NewStyle().Foreground(t.muted),
+		typeBug:         lipgloss.NewStyle().Bold(true).Foreground(t.errc),
+		typeSDLC:        lipgloss.NewStyle().Bold(true).Foreground(t.primary),
+		typeDeliverable: lipgloss.NewStyle().Bold(true).Foreground(t.accent),
+		typeUnknown:     lipgloss.NewStyle().Foreground(t.muted),
+		cardMeta:        lipgloss.NewStyle().Foreground(t.accent),
+		dialog:          lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(t.primary).Background(t.surface).Padding(1, 2),
+		dialogTitle:     lipgloss.NewStyle().Bold(true).Foreground(t.fg).MarginBottom(1),
+		fieldLabel:      lipgloss.NewStyle().Foreground(t.muted),
+		errorText:       lipgloss.NewStyle().Bold(true).Foreground(t.errc),
+		statusBar:       lipgloss.NewStyle().Foreground(t.muted),
+		statusErr:       lipgloss.NewStyle().Bold(true).Foreground(t.errc),
+		statusWarn:      lipgloss.NewStyle().Foreground(t.accent),
+		header:          lipgloss.NewStyle().Bold(true).Foreground(t.fg).Background(t.boost).Padding(0, 1),
+		footer:          lipgloss.NewStyle().Foreground(t.muted),
 	}
 }

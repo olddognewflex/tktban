@@ -904,3 +904,27 @@ func (m dispatchModal) View(st styles, width, height int) string {
 	b.WriteString(wrap(st.cardMeta.Render("▸ "+m.progress)) + "\n")
 	return dialogBox(st, width, height, b.String())
 }
+
+// ---- Type legend ----
+
+// typeLegendModal lists the card type tags. Any key closes it.
+type typeLegendModal struct{}
+
+func (m typeLegendModal) Update(msg tea.Msg) (modal, tea.Cmd) {
+	if _, ok := msg.(tea.KeyMsg); ok {
+		return m, send(viewerClosedMsg{})
+	}
+	return m, nil
+}
+
+func (m typeLegendModal) View(st styles, width, height int) string {
+	var b strings.Builder
+	b.WriteString(st.dialogTitle.Render("Card type markers") + "\n")
+	for _, tm := range typeMarkers {
+		b.WriteString(tm.Glyph + "  " + tm.Type + "\n")
+	}
+	b.WriteString(unknownTypeGlyph + "  other / none\n")
+	b.WriteString("\n" + st.fieldLabel.Render("The letter carries the meaning, not the colour.") + "\n")
+	b.WriteString(st.fieldLabel.Render("any key closes"))
+	return dialogBox(st, width, height, b.String())
+}
