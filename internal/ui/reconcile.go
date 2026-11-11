@@ -398,7 +398,7 @@ func reconcileCmd(tk *tkt.Tkt, items []reconcileItem) tea.Cmd {
 		for _, it := range items {
 			if it.want == agentIdle {
 				runsErr = call(func(b *tkt.Tkt) (err error) { runs, err = b.Agents(); return err })
-				if te, ok := errors.AsType[*tkt.Error](runsErr); ok && te.ExitCode == 64 {
+				if agentsUnsupported(runsErr) {
 					runs, runsErr = nil, nil // an older tkt: no headless runs to defer to
 				}
 				break
@@ -437,7 +437,7 @@ func reconcileCmd(tk *tkt.Tkt, items []reconcileItem) tea.Cmd {
 					out.results = append(out.results, res)
 					continue
 				}
-				if s := runs[it.key].State; s == "running" || s == "stalled" {
+				if model.LiveRun(runs[it.key].State) {
 					out.results = append(out.results, res) // the headless driver owns it
 					continue
 				}

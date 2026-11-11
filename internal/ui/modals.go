@@ -767,10 +767,42 @@ type dispatchModal struct {
 	// the person needs to see how far it got.
 	progress string
 	done     []string
+
+	// run is the ticket's `tkt agents` state when D was pressed. Only halted
+	// and blocked say anything (runWarning); a live run never gets this far.
+	run string
 }
 
 func newDispatchModal(plan herdr.Plan, pre herdr.PreflightResult) dispatchModal {
 	return dispatchModal{plan: plan, pre: pre}
+}
+
+// withRun records the ticket's run state for the warning.
+func (m dispatchModal) withRun(state string) dispatchModal {
+	m.run = state
+	return m
+}
+
+// runWarning is what the dialog says about a `tkt run` parked on the ticket,
+// or "".
+//
+// A halted or blocked run is waiting on a person rather than working, so it
+// does not refuse the way a running one does: re-dispatching a run that hit
+// a gate is a reasonable thing to want. But its branch is the one this
+// dispatch is about to cut or reuse, and the person is owed that before they
+// press enter. dead says nothing — tkt never cleans up run dirs, so a dead run
+// is history, and a warning about it would never go away.
+func (m dispatchModal) runWarning() string {
+	var what string
+	switch m.run {
+	case "halted":
+		what = "is halted at a gate"
+	case "blocked":
+		what = "is blocked"
+	default:
+		return ""
+	}
+	return "a tkt run on " + m.plan.Key + " " + what + " — dispatching starts a new agent on its branch"
 }
 
 // withProgress moves the dialog on to step. The previous step joins the log.
@@ -793,8 +825,9 @@ func (m dispatchModal) running() bool { return m.progress != "" }
 
 func (m dispatchModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 	if m.running() {
-		// Every key, enter and esc included. There is nothing left to answer:
-		// the worktree is being cut, and no keystroke can un-cut it.
+		// Every key, enter and esc included. Once confirmed, the run is latched
+		// and no key answers it: there is nothing left to ask, and from its
+		// first herdr call on, nothing a keystroke could take back.
 		return m, nil
 	}
 	switch {
@@ -878,6 +911,9 @@ func (m dispatchModal) View(st styles, width, height int) string {
 	b.WriteString(wrap(st.dialogTitle.Render("Dispatch "+m.plan.Key)) + "\n")
 	if m.plan.Summary != "" {
 		b.WriteString(wrap(st.cardSummary.Render(m.plan.Summary)) + "\n")
+	}
+	if w := m.runWarning(); w != "" {
+		b.WriteString(wrap(st.statusWarn.Render(w)) + "\n")
 	}
 	b.WriteString("\n")
 	for _, row := range [][2]string{

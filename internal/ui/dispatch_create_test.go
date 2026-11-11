@@ -55,7 +55,7 @@ func runDispatch(t *testing.T, m Model, cmd tea.Cmd) Model {
 		}
 		msg := cmd()
 		switch msg.(type) {
-		case dispatchStageMsg, dispatchLaneMsg, dispatchDoneMsg:
+		case dispatchRunCheckMsg, dispatchStageMsg, dispatchLaneMsg, dispatchDoneMsg:
 		default:
 			return m
 		}
@@ -608,7 +608,7 @@ func TestDispatchProgressStagesAdvance(t *testing.T) {
 		}
 		msg := cmd()
 		switch msg.(type) {
-		case dispatchStageMsg, dispatchLaneMsg, dispatchDoneMsg:
+		case dispatchRunCheckMsg, dispatchStageMsg, dispatchLaneMsg, dispatchDoneMsg:
 		default:
 			cmd = nil
 			continue
@@ -617,6 +617,7 @@ func TestDispatchProgressStagesAdvance(t *testing.T) {
 	}
 
 	wantSteps := []string{
+		"Checking tkt agents for TKT-1…",
 		"Cutting feature/tkt-1-first-thing and opening a worktree…",
 		"Starting claude in the worktree…",
 		"Sending the first prompt…",
@@ -640,7 +641,9 @@ func TestDispatchProgressSaysWhenItIsReusingAWorktree(t *testing.T) {
 	src.open, src.start = createdWorktree(), startedAgent()
 	m = pressD(t, m)
 	m, cmd := update(m, key("enter"))
-	m, _ = update(m, cmd().(dispatchResultMsg))
+	m, cmd = update(m, cmd().(dispatchResultMsg))
+	// Past the `tkt agents` re-check, which is the first step of every run.
+	m, _ = update(m, cmd().(dispatchRunCheckMsg))
 	dm, ok := m.modal.(dispatchModal)
 	if !ok {
 		t.Fatalf("modal = %T", m.modal)
@@ -819,6 +822,21 @@ func TestDispatchStageBudgets(t *testing.T) {
 			t.Errorf("tkt %v ran with %v left, want about %v", call.args, call.budget, dispatchWriteTimeout)
 		}
 	}
+
+	// So does the confirm's `tkt agents` re-check. The dialog swallows every
+	// key while it runs, so an unbounded read would hold the board hostage.
+	var checks []ctxCall
+	for _, call := range cr.ctxCalls {
+		if len(call.args) > 0 && call.args[0] == "agents" {
+			checks = append(checks, call)
+		}
+	}
+	if len(checks) != 1 {
+		t.Fatalf("observed %d tkt agents reads, want the confirm's one: %+v", len(checks), cr.ctxCalls)
+	}
+	if c := checks[0]; !c.deadline || c.budget > dispatchWriteTimeout || c.budget < dispatchWriteTimeout-time.Second {
+		t.Errorf("tkt agents ran with deadline %v and %v left, want about %v", c.deadline, c.budget, dispatchWriteTimeout)
+	}
 }
 
 // A stage whose budget has already run out fails that stage and nothing else —
@@ -891,7 +909,7 @@ func TestDispatchDoesNotQuitThePopup(t *testing.T) {
 			t.Fatal("a dispatch quit the program; the popup has to stay open for o")
 		}
 		switch msg.(type) {
-		case dispatchStageMsg, dispatchLaneMsg, dispatchDoneMsg:
+		case dispatchRunCheckMsg, dispatchStageMsg, dispatchLaneMsg, dispatchDoneMsg:
 		default:
 			cmd = nil
 			continue
@@ -963,6 +981,7 @@ func TestDispatchIgnoresStaleStageMessages(t *testing.T) {
 	m, _ := testModel(t)
 	m = loadBoard(m)
 	for _, msg := range []tea.Msg{
+		dispatchRunCheckMsg{state: "running"},
 		dispatchStageMsg{seq: herdr.NewSequence(herdr.Plan{Key: "TKT-1"}, herdr.PreflightResult{})},
 		dispatchLaneMsg{},
 		dispatchDoneMsg{},
@@ -1193,6 +1212,7 @@ func TestDispatchDropsMessagesFromASupersededRun(t *testing.T) {
 	// done message would close run 2's dialog and report run 1's outcome twice.
 	finished := herdr.NewSequence(herdr.Plan{Key: "TKT-1"}, herdr.PreflightResult{})
 	for _, msg := range []tea.Msg{
+		dispatchRunCheckMsg{run: 1},
 		dispatchStageMsg{run: 1, seq: finished},
 		dispatchLaneMsg{run: 1, skipped: true, why: "nonsense"},
 		dispatchDoneMsg{run: 1},

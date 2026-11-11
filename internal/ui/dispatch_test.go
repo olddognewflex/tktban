@@ -206,7 +206,8 @@ func pressD(t *testing.T, m Model) Model {
 }
 
 // dispatchReadVerbs are the only tkt invocations anything on the D path may
-// make: the board's own refresh and the dispatch's two config reads.
+// make: the board's own refresh, the dispatch's two config reads and the
+// confirm's `tkt agents` re-check.
 //
 // An allowlist, not a denylist. A denylist of write verbs would quietly stop
 // covering the moment the create sequence reaches for a verb nobody thought
@@ -219,7 +220,7 @@ var dispatchReadVerbs = map[string]bool{
 	"cfg":    true, // board.roles, priorities, vcs, board.ownership
 	"list":   true,
 	"view":   true,
-	"agents": true, // run state for the badges
+	"agents": true, // run state for the badges, and the confirm's re-check
 }
 
 // isRead reports whether one recorded tkt invocation changed nothing.
@@ -340,6 +341,18 @@ func TestDispatchGuardLadder(t *testing.T) {
 			}}
 			return poll(t, m)
 		}, "TKT-1 already has an agent pane (o focuses it)", nil},
+
+		// TKB-30: a headless `tkt run` is an agent on the ticket too, just not
+		// one herdr can see. The card already shows it as ⚙.
+		{"a tkt run is working the ticket", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
+			m.columns[0].Cards[0].RunState = "running"
+			return m
+		}, "TKT-1 already has a tkt run working it (tkt agents says running)", nil},
+
+		{"a tkt run on the ticket has gone quiet", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
+			m.columns[0].Cards[0].RunState = "stalled"
+			return m
+		}, "TKT-1 already has a tkt run working it (tkt agents says stalled)", nil},
 
 		{"no directory resolved", func(_ *testing.T, m Model, _ *fakeDispatch) Model {
 			return m.WithDispatch(DispatchOpts{})
@@ -759,6 +772,10 @@ func TestDispatchModalShowsTheWholePlan(t *testing.T) {
 			t.Errorf("the confirm modal is missing %q:\n%s", want, view)
 		}
 	}
+	// With no run on the ticket there is nothing to warn about.
+	if strings.Contains(view, "tkt run") {
+		t.Errorf("the confirm modal warns about a run there is none of:\n%s", view)
+	}
 }
 
 // The dialog is the PR's deliverable, and it is useless if it does not fit.
@@ -771,10 +788,15 @@ func TestDispatchModalFitsTheTerminal(t *testing.T) {
 	// deep repository path, and the built-in prompt.
 	m.columns[0].Cards[0].Summary =
 		"dispatch a ticket to a herdr agent with a great many words in its summary"
+	// And the run warning, which is a line of its own.
+	m.columns[0].Cards[0].RunState = "blocked"
 	m = pressD(t, m)
 	dm, ok := m.modal.(dispatchModal)
 	if !ok {
 		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+	if dm.runWarning() == "" {
+		t.Fatal("setup: the dialog has no run warning to fit")
 	}
 
 	for _, width := range []int{80, 100, 120, 200, 40} {
@@ -891,11 +913,16 @@ func TestDispatchEnterStartsTheCreateSequenceWithTheRenderedPlan(t *testing.T) {
 	if !prog.running() {
 		t.Fatal("the dialog stayed open but is not showing progress")
 	}
-	if !strings.Contains(prog.progress, "feature/tkt-1-first-thing") {
-		t.Errorf("progress = %q, want the branch being cut", prog.progress)
+	// The first step re-reads `tkt agents`, and creates nothing.
+	if prog.progress != "Checking tkt agents for TKT-1…" {
+		t.Errorf("progress = %q, want the run-state re-check", prog.progress)
 	}
 	if cmd == nil {
 		t.Fatal("the confirm started no work")
+	}
+	m, cmd = update(m, cmd().(dispatchRunCheckMsg))
+	if prog = m.modal.(dispatchModal); !strings.Contains(prog.progress, "feature/tkt-1-first-thing") {
+		t.Errorf("progress = %q, want the branch being cut", prog.progress)
 	}
 	// And the sequence it started acts on the plan, not on the board.
 	m = runDispatch(t, m, cmd)
@@ -1100,6 +1127,347 @@ func TestDispatchRefusesAnAgentThatAppearedDuringTheDialog(t *testing.T) {
 	}
 	if len(cr.calls) != before {
 		t.Errorf("the confirm ran tkt %v", cr.calls[before:])
+	}
+}
+
+// runAgentsReply is a `tkt agents --json` reply with one run on TKT-1.
+func runAgentsReply(state string) string {
+	return `{"agents":[{"key":"TKT-1","state":"` + state + `","updated":"2026-09-28T09:00:00Z"}]}`
+}
+
+// TKB-30: the card shows ⚙ for a headless `tkt run` (TKB-26), and D has to
+// agree with it. Before this, only a herdr pane refused, so D on a card the
+// board itself called busy dispatched a second agent onto the run's branch.
+//
+// stalled refuses as well as running: it is a run whose heartbeat has gone
+// quiet, not one that has stopped, and MergeAgent badges it as working.
+func TestDispatchRefusesWhileATktRunIsWorkingTheTicket(t *testing.T) {
+	for _, state := range []string{"running", "stalled"} {
+		t.Run(state, func(t *testing.T) {
+			m, src, cr := dispatchBoard(t)
+			cr.agents = runAgentsReply(state)
+			m = loadBoard(m)
+			if got := card(m).RunState; got != state {
+				t.Fatalf("setup: run state = %q, want %q", got, state)
+			}
+			before := len(cr.calls)
+
+			m, _ = update(m, key("D"))
+
+			if m.dispatching {
+				t.Fatal("a refused dispatch still started a preparation")
+			}
+			if m.modal != nil {
+				t.Errorf("a refused dispatch opened a %T", m.modal)
+			}
+			want := "TKT-1 already has a tkt run working it (tkt agents says " + state + ")"
+			if m.status != want || m.statusKind != "warn" {
+				t.Errorf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+			}
+			if len(src.calls) != 0 || len(src.listed) != 0 {
+				t.Errorf("a refused dispatch called herdr: %v", src.calls)
+			}
+			if call := nonReadCall(cr); call != nil {
+				t.Errorf("a refused dispatch ran tkt %v, which is not a read", call)
+			}
+			if len(cr.calls) != before {
+				t.Errorf("the refusal ran tkt %v", cr.calls[before:])
+			}
+		})
+	}
+}
+
+// The keypress rung reads the run state of the last refresh, and the board
+// does not refresh while a dialog is open (or ever, with auto-refresh off). So
+// a run that starts between D and enter is invisible to the board — and enter
+// reads `tkt agents` itself, before anything is created.
+func TestDispatchConfirmRefusesATktRunThatStartedDuringTheDialog(t *testing.T) {
+	for _, state := range []string{"running", "stalled"} {
+		t.Run(state, func(t *testing.T) {
+			m, src, cr := dispatchBoard(t)
+			src.create, src.start = createdWorktree(), startedAgent()
+			m = pressD(t, m)
+			if _, ok := m.modal.(dispatchModal); !ok {
+				t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+			}
+
+			// A `tkt run` picks the ticket up while the dialog is open.
+			cr.agents = runAgentsReply(state)
+			before := len(cr.calls)
+
+			m, cmd := update(m, key("enter"))
+			res, ok := cmd().(dispatchResultMsg)
+			if !ok || !res.confirmed {
+				t.Fatalf("enter produced %+v", cmd())
+			}
+			m, cmd = update(m, res)
+			m = runDispatch(t, m, cmd)
+
+			assertHerdrCalls(t, src, "worktree.list")
+			want := "TKT-1 has a tkt run working it now (tkt agents says " + state + ") — nothing was dispatched"
+			if m.status != want || m.statusKind != "warn" {
+				t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+			}
+			if m.modal != nil {
+				t.Errorf("the dialog stayed open as a %T", m.modal)
+			}
+			if m.dispatchBusy() {
+				t.Error("the refused run left the board busy, so D would refuse for the rest of the session")
+			}
+			if call := nonReadCall(cr); call != nil {
+				t.Errorf("a refused confirm ran tkt %v, which is not a read", call)
+			}
+			if countCalls(&captureRunner{calls: cr.calls[before:]}, "agents") == 0 {
+				t.Errorf("the confirm did not read tkt agents: %v", cr.calls[before:])
+			}
+		})
+	}
+}
+
+// A halted or blocked run is waiting on a person, not working: dispatching
+// over it is a judgement call, so the dialog says so and lets them make it.
+func TestDispatchModalWarnsAboutAGatedRun(t *testing.T) {
+	for _, state := range []string{"halted", "blocked"} {
+		t.Run(state, func(t *testing.T) {
+			m, src, cr := dispatchBoard(t)
+			src.create, src.start = createdWorktree(), startedAgent()
+			cr.agents = runAgentsReply(state)
+			m = loadBoard(m)
+			m = pressD(t, m)
+			dm, ok := m.modal.(dispatchModal)
+			if !ok {
+				t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+			}
+			if view := dm.View(m.styles, 120, 40); !strings.Contains(view, "a tkt run on TKT-1 is "+state) {
+				t.Errorf("the dialog does not warn about the %s run:\n%s", state, view)
+			}
+
+			m = confirmDispatch(t, m)
+			assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+			if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+				t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+			}
+		})
+	}
+}
+
+// confirmThroughRunCheck answers the open dialog with enter and applies the
+// run's first step, the `tkt agents` re-check, and nothing after it.
+//
+// runDispatch cannot drive a check refused for a pane, a timeout or an
+// unreadable `tkt agents`: those end on the bare status-expiry timer, and
+// running it would sit on a real six-second clock. (The live-run refusal
+// batches a refresh with it, so runDispatch can drive that one.)
+func confirmThroughRunCheck(t *testing.T, m Model) Model {
+	t.Helper()
+	m, cmd := update(m, key("enter"))
+	res, ok := cmd().(dispatchResultMsg)
+	if !ok || !res.confirmed {
+		t.Fatalf("enter produced %+v", cmd())
+	}
+	m, cmd = update(m, res)
+	check, ok := cmd().(dispatchRunCheckMsg)
+	if !ok {
+		t.Fatalf("the confirm's first step produced %T, want dispatchRunCheckMsg", check)
+	}
+	m, _ = update(m, check)
+	return m
+}
+
+// assertNothingDispatched is the shape of every refusal at the re-check: herdr
+// was asked nothing past the preflight, tkt was only read, the dialog is gone
+// and the latch is released.
+func assertNothingDispatched(t *testing.T, m Model, src *fakeDispatch, cr *captureRunner) {
+	t.Helper()
+	assertHerdrCalls(t, src, "worktree.list")
+	if call := nonReadCall(cr); call != nil {
+		t.Errorf("a refused confirm ran tkt %v, which is not a read", call)
+	}
+	if m.modal != nil {
+		t.Errorf("the dialog stayed open as a %T", m.modal)
+	}
+	if m.dispatchBusy() {
+		t.Error("the refused run left the board busy, so D would refuse for the rest of the session")
+	}
+}
+
+// A `tkt agents` that fails says nothing about what is running, so the
+// re-check fails closed: guessing "nothing" is the guess that puts two agents
+// on one branch.
+func TestDispatchConfirmFailsClosedWhenTktAgentsErrors(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m = pressD(t, m)
+	cr.failVerbs = map[string]bool{"agents": true}
+
+	m = confirmThroughRunCheck(t, m)
+
+	assertNothingDispatched(t, m, src, cr)
+	want := "Couldn't check tkt agents for TKT-1, so it was not dispatched: "
+	if !strings.HasPrefix(m.status, want) || !strings.Contains(m.status, "agents exploded") || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q plus tkt's error (warn)", m.status, m.statusKind, want)
+	}
+
+	// The latch really is clear: with tkt answering again, D dispatches.
+	cr.failVerbs = nil
+	m = dispatchOnce(t, m)
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+		t.Fatalf("after a failed check the next dispatch gave %q", m.status)
+	}
+}
+
+// The `tkt agents` read is a subprocess with a 5s budget, and live status keeps
+// polling the whole time it runs. A pane that appears on the ticket during the
+// read has passed the herdr re-check (it ran before the read started) and is
+// invisible to the read itself — so the go-ahead looks at herdr once more.
+// Without that, the worktree.open path would start a second agent in a
+// worktree git is happy to share.
+func TestDispatchRefusesAPaneThatAppearedDuringTheRunCheck(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m = pressD(t, m)
+
+	m, cmd := update(m, key("enter"))
+	res, ok := cmd().(dispatchResultMsg)
+	if !ok || !res.confirmed {
+		t.Fatalf("enter produced %+v", cmd())
+	}
+	m, cmd = update(m, res)
+	check := cmd() // tkt agents: no runs
+
+	// herdr reports an agent on TKT-1 while that read was in flight.
+	src.byKey = map[string]herdr.Live{"TKT-1": {
+		Status: herdr.StatusWorking,
+		Panes:  []herdr.PaneRef{{PaneID: "wC:p1", Status: herdr.StatusWorking}},
+	}}
+	m = poll(t, m)
+
+	m, cmd = update(m, check)
+	// A run that went ahead is driven to the end so its herdr calls are on the
+	// record; a refused one is not, because its command is the status timer.
+	if m.dispatchBusy() {
+		m = runDispatch(t, m, cmd)
+	}
+
+	assertNothingDispatched(t, m, src, cr)
+	want := "TKT-1 picked up an agent while the dialog was open (o focuses it)"
+	if m.status != want || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+	}
+}
+
+// withRunCheckContext swaps the re-check's budget for the test's own.
+func withRunCheckContext(t *testing.T, mk func() (context.Context, context.CancelFunc)) {
+	t.Helper()
+	orig := dispatchRunCheckContext
+	dispatchRunCheckContext = mk
+	t.Cleanup(func() { dispatchRunCheckContext = orig })
+}
+
+// A wedged tkt is killed rather than waited on, and the board says it ran out
+// of time rather than passing on tkt's "did not finish" as if tkt had refused.
+func TestDispatchConfirmRunCheckTimesOut(t *testing.T) {
+	withRunCheckContext(t, func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // the budget is already gone when the read starts
+		return ctx, cancel
+	})
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m = pressD(t, m)
+
+	m = confirmThroughRunCheck(t, m)
+
+	assertNothingDispatched(t, m, src, cr)
+	want := "Timed out checking tkt agents for TKT-1 — nothing was dispatched"
+	if m.status != want || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+	}
+}
+
+// A tkt from before `tkt agents` cannot have a headless run, so its exit 64 is
+// an answer — no runs — and the dispatch goes ahead, as reconcile reads it.
+func TestDispatchConfirmProceedsWithoutTheAgentsVerb(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	m = pressD(t, m)
+	cr.agents = failReply
+
+	m = confirmDispatch(t, m)
+
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+}
+
+// A dead run is tkt confirming nothing is driving the ticket, and run dirs
+// are never cleaned up: refusing or warning on one would be permanent.
+func TestDispatchAllowsADeadRun(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	src.create, src.start = createdWorktree(), startedAgent()
+	cr.agents = runAgentsReply("dead")
+	m = loadBoard(m)
+	if got := card(m).RunState; got != "dead" {
+		t.Fatalf("setup: run state = %q, want dead", got)
+	}
+	m = pressD(t, m)
+	dm, ok := m.modal.(dispatchModal)
+	if !ok {
+		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+	if view := dm.View(m.styles, 120, 40); strings.Contains(view, "tkt run") {
+		t.Errorf("the dialog warns about a dead run:\n%s", view)
+	}
+	m = confirmDispatch(t, m)
+	assertHerdrCalls(t, src, "worktree.list", "worktree.create", "agent.start", "agent.prompt")
+	if !strings.HasPrefix(m.status, "Dispatched TKT-1") {
+		t.Fatalf("status = %q (%s)", m.status, m.statusKind)
+	}
+}
+
+// A ticket with both a pane and a run gets the pane refusal: o can take the
+// person to a pane, and nothing can take them to a headless run.
+func TestDispatchHerdrPaneRefusalBeatsRunRefusal(t *testing.T) {
+	m, src, cr := dispatchBoard(t)
+	cr.agents = runAgentsReply("running")
+	m = loadBoard(m)
+	src.byKey = map[string]herdr.Live{"TKT-1": {
+		Status: herdr.StatusWorking,
+		Panes:  []herdr.PaneRef{{PaneID: "wC:p1", Status: herdr.StatusWorking}},
+	}}
+	m = poll(t, m)
+
+	m, _ = update(m, key("D"))
+
+	want := "TKT-1 already has an agent pane (o focuses it)"
+	if m.status != want || m.statusKind != "warn" {
+		t.Fatalf("status = %q (%s), want %q (warn)", m.status, m.statusKind, want)
+	}
+	if m.dispatching || m.modal != nil {
+		t.Fatalf("the refusal started work (dispatching %v, modal %T)", m.dispatching, m.modal)
+	}
+}
+
+// A halted run the person has since finished by hand is the one the badge
+// already ignores (TKB-26's EffectiveRun). The dialog must agree with the
+// badge, or it warns about a run the board itself has stopped showing.
+func TestDispatchModalOmitsASupersededRunWarning(t *testing.T) {
+	m, _, cr := dispatchBoard(t)
+	cr.list = `[{"key":"TKT-1","summary":"first thing","status_role":"todo","blocked_by":[],` +
+		`"agent_status":"done","agent_status_at":"2026-09-28T11:00:00Z"}]`
+	cr.agents = runAgentsReply("halted") // updated 09:00, before the frontmatter
+	m = loadBoard(m)
+	if c := card(m); c.RunState != "halted" || m.cardBadge(c) != "✓" {
+		t.Fatalf("setup: card %+v badge %q, want a halted run hidden behind ✓", c, m.cardBadge(c))
+	}
+	m = pressD(t, m)
+	dm, ok := m.modal.(dispatchModal)
+	if !ok {
+		t.Fatalf("modal = %T (status %q)", m.modal, m.status)
+	}
+	if view := dm.View(m.styles, 120, 40); strings.Contains(view, "tkt run") {
+		t.Errorf("the dialog warns about a run the badge has stopped showing:\n%s", view)
 	}
 }
 

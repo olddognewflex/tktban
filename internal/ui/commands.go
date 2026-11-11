@@ -331,6 +331,15 @@ func attachRunState(tk *tkt.Tkt, tickets []model.Ticket) {
 	}
 }
 
+// agentsUnsupported reports whether err is a tkt that predates `tkt agents`:
+// argparse rejects the verb with exit 64. That tkt cannot run headless agents
+// at all, so a caller that needs a definite answer can read it as "no runs" —
+// unlike any other failure, which says nothing about what is running.
+func agentsUnsupported(err error) bool {
+	te, ok := errors.AsType[*tkt.Error](err)
+	return ok && te.ExitCode == 64
+}
+
 func viewCmd(tk *tkt.Tkt, key, purpose string) tea.Cmd {
 	return func() tea.Msg {
 		t, err := tk.View(key)

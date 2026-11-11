@@ -79,6 +79,11 @@ type dispatchTarget struct {
 	agentKind string
 	agentArgs []string
 	prompt    string // "" takes herdr.DefaultPrompt
+
+	// run is the card's `tkt agents` state at the keypress, for the dialog's
+	// warning. Never a live one — startDispatch refuses those — so it is
+	// halted, blocked, dead or "".
+	run string
 }
 
 // dispatchRefusal is a reason not to dispatch, already worded for the status
@@ -93,10 +98,12 @@ func refuse(format string, a ...any) error {
 	return dispatchRefusal{msg: fmt.Sprintf(format, a...)}
 }
 
-// dispatchPrepMsg is a prepared plan, or the reason there is none.
+// dispatchPrepMsg is a prepared plan, or the reason there is none. run is the
+// target's run state, carried through to the dialog.
 type dispatchPrepMsg struct {
 	plan herdr.Plan
 	pre  herdr.PreflightResult
+	run  string
 	err  error
 }
 
@@ -142,11 +149,12 @@ func (m Model) WithDispatch(o DispatchOpts) Model {
 //
 // Every refusal says which one it was and opens nothing, because the key
 // otherwise does nothing visible. The ladder runs in the order the guards get
-// cheaper to be wrong about: the opt-in, then herdr, then the card, then the
-// repo. The last two rungs — the branch convention and the agent-owned
-// transition — need `tkt cfg` reads, so they run inside the command rather
-// than on the UI loop; they still refuse before anything touches herdr, and
-// they still produce a status and no modal.
+// cheaper to be wrong about: the opt-in, then herdr, then the card (an agent
+// pane on it, then a `tkt run` working it), then the repo. The last two rungs
+// — the branch convention and the agent-owned transition — need `tkt cfg`
+// reads, so they run inside the command rather than on the UI loop; they
+// still refuse before anything touches herdr, and they still produce a status
+// and no modal.
 func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 	if m.dispatchOptedOut {
 		return m, m.setStatus("Dispatch is off for this board (--no-herdr-dispatch)", "warn")
@@ -196,10 +204,27 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 	// end up with two agents racing the same branch, so the board sends the
 	// person to the one that exists instead.
 	//
-	// Checked again in onDispatchResult: live status keeps polling while the
-	// dialog is open, so this answer can go stale between D and enter.
+	// Checked again in onDispatchResult and onDispatchRunCheck: live status
+	// keeps polling while the dialog is open, so this answer can go stale
+	// between D and enter.
+	//
+	// Ahead of the run rung, so a ticket with both gets this refusal: a pane is
+	// something o can take the person to, and a headless run is not.
 	if _, live := herdr.PickPane(m.live.byKey[key]); live {
 		return m, m.setStatus(key+" already has an agent pane (o focuses it)", "warn")
+	}
+	// The same race from the other kind of agent: a headless `tkt run` working
+	// the ticket outside herdr, which the card already badges as ⚙ (TKB-26).
+	// The key has to agree with the badge, so this reads the same signal —
+	// EffectiveRun, not the merged badge, because a herdr pane is the rung
+	// above's business and a frontmatter processing is a claim, not a process.
+	//
+	// It is the run state of the last refresh, and the board does not refresh
+	// behind a dialog, so the confirm reads `tkt agents` afresh
+	// (dispatchRunCheckCmd, started by onDispatchResult) before anything is
+	// created.
+	if run := model.EffectiveRun(card); model.LiveRun(run) {
+		return m, m.setStatus(key+" already has a tkt run working it (tkt agents says "+run+")", "warn")
 	}
 	if m.dispatchDir == "" {
 		return m, m.setStatus("Don't know which repo to dispatch "+key+
@@ -215,6 +240,7 @@ func (m Model) startDispatch() (tea.Model, tea.Cmd) {
 		agentKind:  m.dispatchAgentKind(),
 		agentArgs:  strings.Fields(str(m.settings["dispatch_args"])),
 		prompt:     str(m.settings["dispatch_prompt"]),
+		run:        model.EffectiveRun(card),
 	}
 	m.dispatching = true
 	return m, dispatchPrepCmd(m.tkt, disp, target)
@@ -302,7 +328,7 @@ func dispatchPrepCmd(tk *tkt.Tkt, d Dispatcher, t dispatchTarget) tea.Cmd {
 			Prompt:     t.prompt,
 		})
 		pre, err := herdr.Preflight(ctx, d, plan)
-		return dispatchPrepMsg{plan: plan, pre: pre, err: err}
+		return dispatchPrepMsg{plan: plan, pre: pre, run: t.run, err: err}
 	}
 }
 
@@ -319,7 +345,7 @@ func (m Model) onDispatchPrep(msg dispatchPrepMsg) (tea.Model, tea.Cmd) {
 	if m.modal != nil {
 		return m, m.setStatus("Dispatch for "+msg.plan.Key+" was dropped behind the open dialog — press D again", "warn")
 	}
-	m.modal = newDispatchModal(msg.plan, msg.pre)
+	m.modal = newDispatchModal(msg.plan, msg.pre).withRun(msg.run)
 	return m, nil
 }
 
@@ -510,9 +536,106 @@ func (m Model) onDispatchResult(msg dispatchResultMsg) (tea.Model, tea.Cmd) {
 	// of defence against a second enter: it swallows every keystroke. The
 	// dispatchBusy rungs above are the second, for the case where an
 	// asynchronous modal displaces it.
+	//
+	// The run is latched from here, but its first step creates nothing: it
+	// re-reads `tkt agents` (dispatchRunCheckCmd). Latched first, because the
+	// read is a subprocess and the dialog has to keep swallowing keys while it
+	// runs.
 	m.modal = newDispatchModal(msg.plan, msg.pre).
-		withProgress(dispatchStageLabel(m.dispatchSeq))
-	return m, dispatchStageCmd(disp, m.dispatchSeq, m.dispatchRun)
+		withProgress("Checking tkt agents for " + msg.plan.Key + "…")
+	return m, dispatchRunCheckCmd(m.tkt, msg.plan.Key, m.dispatchRun)
+}
+
+// dispatchRunCheckContext mints the budget for the confirm's `tkt agents`
+// read: a single tkt subprocess, so it gets what the dispatch's other single
+// tkt calls get. A variable for the same reason dispatchPrepContext is.
+var dispatchRunCheckContext = func() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), dispatchWriteTimeout)
+}
+
+// dispatchRunCheckMsg is the run state `tkt agents` reports for the plan's
+// ticket at the moment of the confirm ("" for none), or why it could not say.
+type dispatchRunCheckMsg struct {
+	run      int
+	state    string
+	err      error
+	timedOut bool
+}
+
+// dispatchRunCheckCmd reads `tkt agents` afresh for the confirm's re-check of
+// the run rung in startDispatch.
+//
+// The herdr re-check above it can read the model, because live status keeps
+// polling behind the dialog. Run state cannot: it arrives only with a board
+// refresh, and the board does not refresh while a modal is open, nor ever with
+// --no-auto-refresh — so a run that started while the dialog sat open is on no
+// card, and only a fresh read can see it. It is the first step of the run
+// rather than a check in onDispatchResult because it is a subprocess, and like
+// every other one here it runs as a tea.Cmd (see dispatchStageCmd).
+//
+// It is the same read reconcileCmd makes before it will idle a ticket, with
+// the same reading of an older tkt: exit 64 is a tkt without the verb, which
+// cannot have a headless run, so it is no run rather than a failure.
+func dispatchRunCheckCmd(tk *tkt.Tkt, key string, run int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := dispatchRunCheckContext()
+		defer cancel()
+		runs, err := tk.WithContext(ctx).Agents()
+		switch {
+		case agentsUnsupported(err):
+			return dispatchRunCheckMsg{run: run}
+		case err != nil:
+			return dispatchRunCheckMsg{run: run, err: err, timedOut: ctx.Err() != nil}
+		}
+		return dispatchRunCheckMsg{run: run, state: runs[key].State}
+	}
+}
+
+// onDispatchRunCheck starts the create sequence, or ends the run having
+// created nothing: a live run, an unreadable `tkt agents`, or a herdr pane
+// that appeared while the read ran all refuse.
+//
+// It fails closed: a `tkt agents` that will not answer is not evidence that
+// nothing is running, and the cost of guessing wrong is two agents on one
+// branch. Nothing has been created by this point, so a refusal leaves no
+// comment on the ticket — there is nothing to record, which is also why the
+// herdr re-check's refusal leaves none.
+func (m Model) onDispatchRunCheck(msg dispatchRunCheckMsg) (tea.Model, tea.Cmd) {
+	if !m.ours(msg.run) {
+		return m, nil
+	}
+	key := m.dispatchRep.plan.Key
+	// The herdr re-check again. onDispatchResult made it before this read
+	// started, and the read can take its whole 5s budget while live status
+	// keeps polling — a pane that turned up meanwhile has passed that check and
+	// is invisible to `tkt agents`. On the worktree.open path nothing
+	// downstream would stop it: git lets a second agent into a worktree that
+	// already has one. It goes first, as at D, because a pane is the refusal
+	// the person can act on (o takes them to it).
+	if _, live := herdr.PickPane(m.live.byKey[key]); live {
+		m.endDispatchRun()
+		return m, m.setStatus(key+" picked up an agent while the dialog was open (o focuses it)", "warn")
+	}
+	switch {
+	case msg.timedOut:
+		m.endDispatchRun()
+		return m, m.setStatus("Timed out checking tkt agents for "+key+" — nothing was dispatched", "warn")
+	case msg.err != nil:
+		m.endDispatchRun()
+		return m, m.setStatus("Couldn't check tkt agents for "+key+
+			", so it was not dispatched: "+msg.err.Error(), "warn")
+	case model.LiveRun(msg.state):
+		m.endDispatchRun()
+		// The board's run state is the stale picture that let D through, so
+		// refresh it: the card then shows the run's ⚙, and the next D refuses
+		// at the keypress instead of here.
+		return m, tea.Batch(
+			m.setStatus(key+" has a tkt run working it now (tkt agents says "+msg.state+
+				") — nothing was dispatched", "warn"),
+			m.refreshCmd())
+	}
+	m.modal = m.progressModal(dispatchStageLabel(m.dispatchSeq))
+	return m, dispatchStageCmd(m.dispatchSrc, m.dispatchSeq, m.dispatchRun)
 }
 
 // ours reports whether a dispatch message belongs to the run in flight.
@@ -648,13 +771,20 @@ func (m Model) onDispatchDone(msg dispatchDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.dispatchRep.commentErr = msg.err
 	rep := m.dispatchRep
+	m.endDispatchRun()
+	text, kind := dispatchStatusText(rep)
+	// The lane may have moved, so the board is out of date either way.
+	return m, tea.Batch(m.setStatus(text, kind), m.refreshCmd())
+}
+
+// endDispatchRun closes the dialog and releases the run's latch, so D works
+// again. The run stamp stays where it is: it is what makes a late message
+// from this run inert.
+func (m *Model) endDispatchRun() {
 	m.modal = nil
 	m.dispatchSrc = nil
 	m.dispatchSeq = herdr.Sequence{}
 	m.dispatchRep = dispatchReport{}
-	text, kind := dispatchStatusText(rep)
-	// The lane may have moved, so the board is out of date either way.
-	return m, tea.Batch(m.setStatus(text, kind), m.refreshCmd())
 }
 
 // progressModal re-renders the confirm dialog with the step now running. A
