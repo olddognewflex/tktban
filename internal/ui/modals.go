@@ -918,21 +918,72 @@ func (m typeLegendModal) Update(msg tea.Msg) (modal, tea.Cmd) {
 }
 
 func (m typeLegendModal) View(st styles, width, height int) string {
-	var b strings.Builder
-	b.WriteString(st.dialogTitle.Render("Card type markers") + "\n")
+	type entry struct{ typ, glyph, name string }
+	entries := make([]entry, 0, len(typeMarkers)+1)
 	for _, tm := range typeMarkers {
-		b.WriteString(tm.Glyph + "  " + tm.Type + "\n")
+		entries = append(entries, entry{tm.Type, tm.Glyph, tm.Type})
 	}
-	b.WriteString(unknownTypeGlyph + "  other / none\n")
-	sw := func(c lipgloss.TerminalColor, name string) string {
-		return lipgloss.NewStyle().Foreground(c).Render("━━") + " " + name
+	entries = append(entries, entry{"", unknownTypeGlyph, "other / none"})
+	cell := func(e entry) string {
+		sw := lipgloss.NewStyle().Foreground(typeColor(st.t, e.typ, "")).Render("━━")
+		return sw + " " + e.glyph + "  " + e.name
 	}
-	b.WriteString("\n" + st.fieldLabel.Render("Border colour follows the type:") + "\n")
-	b.WriteString(sw(st.t.errc, "Bug") + "\n")
-	b.WriteString(sw(st.t.primary, "Story, Sub-task") + "\n")
-	b.WriteString(sw(st.t.accent, "Task, Chore, Spike, Epic") + "\n")
-	b.WriteString(sw(st.t.muted, "other / none") + "\n")
-	b.WriteString("\n" + st.fieldLabel.Render("Thick border = selected card.") + "\n")
-	b.WriteString(st.fieldLabel.Render("any key closes"))
-	return dialogBox(st, width, height, b.String())
+	cells := make([]string, len(entries))
+	for i, e := range entries {
+		cells[i] = cell(e)
+	}
+	footer := []string{
+		st.fieldLabel.Render("Border colour = type"),
+		st.fieldLabel.Render("Thick border = selected card."),
+		st.fieldLabel.Render("any key closes"),
+	}
+	// lines builds the body: the title, the types in one or two columns, a
+	// blank line, then the footer.
+	lines := func(cols int) []string {
+		out := []string{st.dialogTitle.Render("Card type markers")}
+		if cols == 1 {
+			out = append(out, cells...)
+		} else {
+			w := 0
+			for i := 0; i < len(cells); i += 2 {
+				w = max(w, lipgloss.Width(cells[i]))
+			}
+			for i := 0; i < len(cells); i += 2 {
+				row := cells[i]
+				if i+1 < len(cells) {
+					row += strings.Repeat(" ", w-lipgloss.Width(cells[i])+3) + cells[i+1]
+				}
+				out = append(out, row)
+			}
+		}
+		return append(append(out, ""), footer...)
+	}
+	tight := st.dialog.Padding(0, 2)
+	type layout struct {
+		cols  int
+		frame lipgloss.Style
+	}
+	layouts := []layout{{1, st.dialog}, {2, st.dialog}, {2, tight}}
+	place := func(box string) string {
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	}
+	for _, l := range layouts {
+		box := l.frame.Render(strings.Join(lines(l.cols), "\n"))
+		if lipgloss.Height(box) <= height && lipgloss.Width(box) <= width {
+			return place(box)
+		}
+	}
+	// Nothing fits: clip the most compact layout that fits the width, keeping
+	// the title and ending on a hint line.
+	cols := 2
+	if lipgloss.Width(tight.Render(strings.Join(lines(2), "\n"))) > width {
+		cols = 1
+	}
+	body := lines(cols)
+	frame := lipgloss.Height(tight.Render(strings.Join(body, "\n"))) - len(body)
+	keep := max(height-frame, 2)
+	if keep < len(body) {
+		body = append(body[:keep-1:keep-1], st.fieldLabel.Render("… taller pane shows all"))
+	}
+	return place(tight.Render(strings.Join(body, "\n")))
 }

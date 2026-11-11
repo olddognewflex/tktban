@@ -201,13 +201,97 @@ func TestTypeLegendModalContent(t *testing.T) {
 		t.Fatal("typeMarkers empty")
 	}
 	for _, tm := range typeMarkers {
-		if want := tm.Glyph + "  " + tm.Type; !strings.Contains(v, want) {
-			t.Errorf("legend missing pairing %q:\n%s", want, v)
+		if want := "━━ " + tm.Glyph + "  " + tm.Type; !strings.Contains(v, want) {
+			t.Errorf("legend missing row %q:\n%s", want, v)
 		}
 	}
-	for _, want := range []string{"❔  other / none", "Border colour follows the type", "Thick border = selected card"} {
+	for _, want := range []string{"━━ ❔  other / none", "Thick border = selected card", "any key closes"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("legend missing %q:\n%s", want, v)
+		}
+	}
+}
+
+func TestTypeLegendFitsShortPanes(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	defer lipgloss.SetColorProfile(prev)
+	m := markerModel()
+	for _, w := range []int{80, 40} {
+		for _, h := range []int{18, 14, 10, 8, 6} {
+			v := typeLegendModal{}.View(m.styles, w, h)
+			if got := lipgloss.Height(v); got > h {
+				t.Errorf("%dx%d: height %d exceeds %d:\n%s", w, h, got, h, ansi.Strip(v))
+			}
+			for _, ln := range strings.Split(v, "\n") {
+				if lw := lipgloss.Width(ln); lw > w {
+					t.Errorf("%dx%d: line width %d exceeds %d: %q", w, h, lw, w, ansi.Strip(ln))
+				}
+			}
+			plain := ansi.Strip(v)
+			missing := 0
+			for _, tm := range typeMarkers {
+				if !strings.Contains(plain, tm.Type) {
+					missing++
+				}
+			}
+			if !strings.Contains(plain, "other / none") {
+				missing++
+			}
+			if (h >= 18 || (w == 80 && h >= 10)) && missing > 0 {
+				t.Errorf("%dx%d: %d rows clipped:\n%s", w, h, missing, plain)
+			}
+			if missing > 0 {
+				t.Logf("%dx%d clips %d rows", w, h, missing)
+			}
+		}
+	}
+}
+
+func TestTypeLegendSwatchColours(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+	m := markerModel()
+	th := m.styles.t
+	v := typeLegendModal{}.View(m.styles, 80, 30)
+	want := map[string]lipgloss.Color{
+		"Bug": th.errc, "Story": th.primary, "Task": th.accent, "other / none": th.muted,
+	}
+	for _, ln := range strings.Split(v, "\n") {
+		plain := ansi.Strip(ln)
+		for name, c := range want {
+			if strings.HasSuffix(strings.TrimSpace(strings.Trim(strings.TrimSpace(plain), "┃")), "  "+name) {
+				if !strings.Contains(ln, fgSeq(c)) {
+					t.Errorf("%s row lacks its colour %q: %q", name, fgSeq(c), ln)
+				}
+				delete(want, name)
+			}
+		}
+	}
+	for name := range want {
+		t.Errorf("no legend row found for %s", name)
+	}
+}
+
+func TestTypeLegendAppShortTerminal(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	defer lipgloss.SetColorProfile(prev)
+	m, _ := testModel(t)
+	m = loadBoard(m)
+	m = step(m, tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = step(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	v := m.View()
+	// At 80 columns the key hints wrap onto several rows; View must budget
+	// for them so the whole screen still fits the terminal.
+	if got := lipgloss.Height(v); got > 20 {
+		t.Errorf("view height %d exceeds 20:\n%s", got, ansi.Strip(v))
+	}
+	plain := ansi.Strip(v)
+	for _, tm := range typeMarkers {
+		if !strings.Contains(plain, tm.Type) {
+			t.Errorf("type %s missing at 80x20:\n%s", tm.Type, plain)
 		}
 	}
 }

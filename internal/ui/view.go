@@ -16,7 +16,9 @@ func (m Model) View() string {
 	}
 	header := m.renderHeader()
 	status := m.renderStatus()
-	midHeight := max(m.height-2, 1) // header + status rows
+	// The key hints wrap onto several rows on narrow terminals, so budget the
+	// rows header and status actually take rather than one each.
+	midHeight := max(m.height-lipgloss.Height(header)-lipgloss.Height(status), 1)
 
 	var mid string
 	if m.modal != nil {

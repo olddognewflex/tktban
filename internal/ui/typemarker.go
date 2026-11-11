@@ -66,14 +66,14 @@ func (m Model) renderTypeMarker(c model.Card) string {
 	return glyph
 }
 
-// typeBorderColor is the card's border colour. Bug is always errc; otherwise
-// the card's own type_class wins over the table's. Anything else is muted.
-func (m Model) typeBorderColor(c model.Card) lipgloss.TerminalColor {
-	glyph, class := typeMarker(c.Type)
-	if c.TypeClass != "" {
-		class = c.TypeClass
+// typeColor is the colour for an issue type: the border of its cards and the
+// swatch in the legend. Bug is always errc; otherwise typeClass (the card's own
+// type_class) wins over the table's. Anything else is muted.
+func typeColor(t theme, typ, typeClass string) lipgloss.TerminalColor {
+	glyph, class := typeMarker(typ)
+	if typeClass != "" {
+		class = typeClass
 	}
-	t := m.styles.t
 	switch {
 	case glyph == bugGlyph:
 		return t.errc
@@ -83,4 +83,9 @@ func (m Model) typeBorderColor(c model.Card) lipgloss.TerminalColor {
 		return t.accent
 	}
 	return t.muted
+}
+
+// typeBorderColor is the card's border colour; see typeColor.
+func (m Model) typeBorderColor(c model.Card) lipgloss.TerminalColor {
+	return typeColor(m.styles.t, c.Type, c.TypeClass)
 }
