@@ -210,6 +210,7 @@ func (m Model) renderCard(c model.Card, width int, selected bool) string {
 	if selected {
 		style = m.styles.cardSelected
 	}
+	style = style.BorderForeground(m.typeBorderColor(c))
 	// The card must fit inside the column's text area, which is the column's
 	// inner width minus its own border+padding. lipgloss also adds the card's
 	// border outside the set width, so the card box is width-4 — otherwise the

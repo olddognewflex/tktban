@@ -924,7 +924,15 @@ func (m typeLegendModal) View(st styles, width, height int) string {
 		b.WriteString(tm.Glyph + "  " + tm.Type + "\n")
 	}
 	b.WriteString(unknownTypeGlyph + "  other / none\n")
-	b.WriteString("\n" + st.fieldLabel.Render("The letter carries the meaning, not the colour.") + "\n")
+	sw := func(c lipgloss.TerminalColor, name string) string {
+		return lipgloss.NewStyle().Foreground(c).Render("━━") + " " + name
+	}
+	b.WriteString("\n" + st.fieldLabel.Render("Border colour follows the type:") + "\n")
+	b.WriteString(sw(st.t.errc, "Bug") + "\n")
+	b.WriteString(sw(st.t.primary, "Story, Sub-task") + "\n")
+	b.WriteString(sw(st.t.accent, "Task, Chore, Spike, Epic") + "\n")
+	b.WriteString(sw(st.t.muted, "other / none") + "\n")
+	b.WriteString("\n" + st.fieldLabel.Render("Thick border = selected card.") + "\n")
 	b.WriteString(st.fieldLabel.Render("any key closes"))
 	return dialogBox(st, width, height, b.String())
 }

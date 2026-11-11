@@ -136,21 +136,25 @@ unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 
 ### Card type markers
 
-Each card starts with a one-letter tag for its ticket type, e.g.
-`B [High] TKB-12  ⛔2`. The letter carries the meaning; colour only
-reinforces it, so the tags still read with colour off. Press `?` in the
-board for this legend.
+Each card starts with an emoji tag for its ticket type, e.g.
+`🐛 [High] TKB-12  ⛔2`. The emoji, not the colour, carries the type. The
+card's border colour follows the type too, and a thick border (`┏━┓`) marks
+the selected card, so both still read with colour off. Press `?` in the board
+for this legend.
 
-| Tag | Type |
-|-----|------|
-| `S` | Story |
-| `B` | Bug |
-| `U` | Sub-task |
-| `T` | Task |
-| `C` | Chore |
-| `K` | Spike |
-| `E` | Epic |
-| `?` | any other type, or none |
+| Tag | Type | Border colour |
+|-----|------|---------------|
+| 📖 | Story | primary |
+| 🐛 | Bug | red (error) |
+| 🔗 | Sub-task | primary |
+| ✅ | Task | accent |
+| 🔧 | Chore | accent |
+| 🔬 | Spike | accent |
+| 📦 | Epic | accent |
+| ❔ | any other type, or none | muted grey |
+
+A card's own `type_class` from tkt (`full_sdlc`, `deliverable`, `container`)
+overrides the table's class for the colour; a Bug is always red.
 
 ### Whole board
 
