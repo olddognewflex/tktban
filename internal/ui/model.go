@@ -537,6 +537,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.hideFocusedColumn()
 	case "X":
 		return m.showAllColumns()
+	case "?":
+		m.modal = typeLegendModal{}
+		return m, nil
 	case "/":
 		m.modal = newFilterModal(m.filter, m.styles.t.surface)
 		return m, nil

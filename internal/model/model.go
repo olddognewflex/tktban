@@ -58,6 +58,8 @@ type Card struct {
 	AgentStatusAt string // when AgentStatus was written, ISO "2006-01-02T15:04:05Z" or ""
 	RunState      string // `tkt agents` run state: ""|running|stalled|dead|blocked|halted
 	RunUpdated    string // when the run last wrote RunState, ISO like AgentStatusAt, or ""
+	Type          string // issue type, e.g. "Bug"; "" when unset
+	TypeClass     string // tkt type_class: ""|full_sdlc|deliverable|container|unknown
 }
 
 // CardFromTicket builds a Card from a normalized ticket dict.
@@ -77,6 +79,8 @@ func CardFromTicket(t Ticket) Card {
 		AgentStatusAt: getStr(t, "agent_status_at"),
 		RunState:      getStr(t, "run_state"),
 		RunUpdated:    getStr(t, "run_updated"),
+		Type:          getStr(t, "type"),
+		TypeClass:     getStr(t, "type_class"),
 	}
 }
 

@@ -125,6 +125,7 @@ tktban --config path/to/.sdlc/config.toml
 | `D` | Dispatch this card to a herdr agent: branch, worktree, agent, prompt ([Dispatch a ticket to an agent](#dispatch-a-ticket-to-an-agent)) |
 | `b` | Silence herdr's ticket toasts, or turn them back on ([Notifications](#notifications)) |
 | `P` | Switch between this project and every project on the shared board ([Whole board](#whole-board)) |
+| `?` | Show the card type legend ([Card type markers](#card-type-markers)) |
 | `q` | Quit |
 | `tab` / arrows | Move focus between columns and cards |
 
@@ -132,6 +133,28 @@ Columns come from `[board.roles]` (in config order); cards are grouped by their
 canonical `status_role` and sorted by priority then key. A `⛔N` badge shows
 unresolved blocker count. Tickets in an unconfigured lane appear in a trailing
 `(unmapped)` column rather than being dropped.
+
+### Card type markers
+
+Each card starts with an emoji tag for its ticket type, e.g.
+`🐛 [High] TKB-12  ⛔2`. The emoji, not the colour, carries the type. The
+card's border colour follows the type too, and a thick border (`┏━┓`) marks
+the selected card, so both still read with colour off. Press `?` in the board
+for this legend.
+
+| Tag | Type | Border colour |
+|-----|------|---------------|
+| 📖 | Story | primary |
+| 🐛 | Bug | red (error) |
+| 🔗 | Sub-task | primary |
+| ✅ | Task | accent |
+| 🔧 | Chore | accent |
+| 🔬 | Spike | accent |
+| 📦 | Epic | accent |
+| ❔ | any other type, or none | muted grey |
+
+A card's own `type_class` from tkt (`full_sdlc`, `deliverable`, `container`)
+overrides the table's class for the colour; a Bug is always red.
 
 ### Whole board
 
