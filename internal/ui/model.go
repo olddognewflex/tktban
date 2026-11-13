@@ -411,6 +411,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dispatchResultMsg:
 		return m.onDispatchResult(msg)
 
+	case dispatchRunCheckMsg:
+		return m.onDispatchRunCheck(msg)
+
 	case dispatchStageMsg:
 		return m.onDispatchStage(msg)
 

@@ -163,6 +163,12 @@ func EffectiveRun(c Card) string {
 	return c.RunState
 }
 
+// LiveRun reports whether a `tkt agents` run state means something is still
+// driving the ticket. stalled counts: it is a run whose heartbeat has gone
+// quiet, not one that has stopped. halted and blocked are waiting on a person,
+// and dead is tkt confirming nothing is driving it, so none of those is live.
+func LiveRun(state string) bool { return state == "running" || state == "stalled" }
+
 // sortKey returns the ordering tuple: priority DESC (negated rank), then key ASC.
 func (c Card) less(other Card) bool {
 	pa, pb := -priorityRank(c.Priority), -priorityRank(other.Priority)

@@ -366,3 +366,22 @@ func TestEffectiveRun(t *testing.T) {
 		}
 	}
 }
+
+// LiveRun is the line between a run that refuses a dispatch and one that does
+// not, so every state tkt reports is pinned, plus none at all.
+func TestLiveRun(t *testing.T) {
+	want := map[string]bool{
+		"running": true,
+		"stalled": true, // a quiet heartbeat, not a stopped run
+		"halted":  false,
+		"blocked": false,
+		"dead":    false,
+		"idle":    false, // only with `tkt agents --all`, which the board never asks for
+		"":        false,
+	}
+	for state, live := range want {
+		if got := LiveRun(state); got != live {
+			t.Errorf("LiveRun(%q) = %v, want %v", state, got, live)
+		}
+	}
+}

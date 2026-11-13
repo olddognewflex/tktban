@@ -484,10 +484,18 @@ cut from, the repository, where the worktree goes, the agent kind and name,
 and the prompt. `esc` closes it and creates nothing, saying nothing. `enter`
 goes ahead.
 
+If a `tkt run` on the ticket is halted at a gate or blocked, the dialog says so
+in a line of its own — dispatching starts a new agent on that run's branch.
+You can still go ahead; a run that stopped for a person is yours to
+re-dispatch. There is no warning when the ticket's `agent_status` was written
+after the run last was — the badge ignores that run too, as one finished by
+hand. A run that is still working refuses instead (below).
+
 #### What `enter` creates, in order
 
 | Stage | Call | What it does |
 |-------|------|--------------|
+| 0 | `tkt agents` (read) | re-reads run state for the ticket. A `tkt run` that is `running` or `stalled` refuses here, before anything is created — the board's own run state only changes on a refresh, and it does not refresh behind a dialog. herdr is checked again once the read is back, because live status keeps polling while it runs. |
 | 1 | `worktree.create` (or `worktree.open`) | cuts the branch from the base and opens a worktree for it, in a new herdr workspace with a tab and a pane at a shell. **herdr chooses the path** — tktban sends none, so a dispatched worktree lands under `[worktrees] directory` (default `~/.herdr/worktrees`) beside the ones you make by hand. If the preflight already saw the branch checked out, this is `worktree.open` instead and the existing worktree is rejoined rather than a second one cut. |
 | 2 | `agent.start` | starts the agent in that pane, named after the ticket (`TKB-25` → `tkb-25`), which is what makes it recognisable in herdr's own agent list. No herdr method opens a pane *at* a command, so this is necessarily a second step — and the pane exists before its login shell reaches a prompt, so herdr answers `agent_pane_busy` until it does. tktban retries six times at 100/200/400/800/1600/3200 ms (6.3 s in all); the first real dispatch needed five attempts and 1.5 s on a shell with a prompt framework and a version manager in its rc files. A name already held by a live agent (`agent_name_taken`) gets one retry as `tkb-25-2`, out of the same budget. |
 | 3 | `agent.prompt` | types the first prompt in. No `wait` is sent: a board must never block on an agent's status. **This retries too.** A successful `agent.start` means herdr detected the agent, not that it will accept a prompt - the active-named-agent registry lags, and herdr answers `agent_not_ready` until it catches up. Same schedule as the start. `agent_blocked` is never retried (herdr refuses before sending anything, so a retry would type into whatever dialog is up), and nor is a submission that failed part-way, which may have left half the prompt in the pane. |
@@ -524,6 +532,7 @@ dispatch may be incomplete.
 
 | What failed | What happens |
 |-------------|--------------|
+| a `tkt run` started working the ticket between `D` and `enter`, or `tkt agents` could not be read | Nothing was created. No transition, no comment — there is nothing to record. The status says which it was. An unreadable `tkt agents` refuses rather than guess that nothing is running; a tkt too old to have the verb has no headless runs, and dispatches. |
 | `worktree.create` / `worktree.open` refused by herdr | Nothing was created. No transition. A comment carrying herdr's code and message, and a status line that names them. |
 | `worktree.create` / `worktree.open` never answered (closed socket, deadline) | Nothing claims nothing was created — herdr may have cut the branch and opened a workspace before the socket dropped. The status says `TKB-25 may be half dispatched` and to check `herdr worktree list`, and the comment carries a worktree line saying the same. That comment is the **only** record that an orphan may exist, so it is written even though there is no path to name. |
 | the worktree was made but herdr's reply carried no pane | The worktree **does** exist, so nothing says otherwise: the status names the path it is still at and the comment records it, while the agent bullet says the dispatch stopped before `agent.start`. No transition, nothing removed. |
@@ -597,6 +606,7 @@ Every way `D` can refuse says which one it was, and opens nothing:
 | `Live agent status is off` / `herdr live status unavailable` | outside herdr, or herdr is not answering |
 | `Select a card first` / `That card has no ticket key` | nothing to dispatch |
 | `TKB-25 already has an agent pane (o focuses it)` | an agent is already on it; two agents racing one branch is not an improvement |
+| `TKB-25 already has a tkt run working it (tkt agents says running)` | a headless `tkt run` is on it — the card's ⚙ — so the same applies. `running` or `stalled` refuses; `dead` does not, and `halted` / `blocked` only warn in the dialog. A `stalled` run that is really stuck is cleared from tkt's side: check `tkt agents`, then `tkt run --stop TKB-25`. |
 | `Don't know which repo to dispatch TKB-25 in — open the board from a pane in the repo` | see below |
 | `No [vcs] branch_fmt in <config>` | no branch convention to follow |
 | `branch_fmt … in <config> doesn't name TKB-25` | the branch would not name the ticket, so the board could never badge or jump to its agent |
@@ -604,7 +614,13 @@ Every way `D` can refuse says which one it was, and opens nothing:
 | `Not a git work tree: …` | herdr says the directory is not a checkout |
 | `This board is open in a worktree …` | there is nothing to branch from |
 | `Timed out reading the tkt config …` | the two `tkt cfg` reads did not finish inside the 2 s budget |
-| `TKB-25 picked up an agent while the dialog was open` | an agent appeared between `D` and `enter`; live status keeps polling behind the dialog, and this is what stops two agents racing one branch |
+| `TKB-25 picked up an agent while the dialog was open (o focuses it)` | an agent appeared between `D` and `enter`, or while `enter`'s `tkt agents` read was running; live status keeps polling behind the dialog, and this is what stops two agents racing one branch |
+| `TKB-25 has a tkt run working it now (tkt agents says running) — nothing was dispatched` | the same for a headless run, caught by `enter`'s own `tkt agents` read; the board refreshes, so the card shows it |
+| `Timed out checking tkt agents for TKB-25 — nothing was dispatched` | that read did not finish inside its 5 s budget |
+| `Couldn't check tkt agents for TKB-25, so it was not dispatched: …` | that read failed; not knowing what is running is not the same as nothing running |
+
+`D` checks run state from the last refresh, the same state the badge shows;
+`enter` always reads it again.
 
 Two details worth knowing:
 
